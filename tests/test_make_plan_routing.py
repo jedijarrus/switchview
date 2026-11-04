@@ -1,0 +1,765 @@
+"""Task 10: which write mechanism main._make_plan picks for a port change (SSH-CLI or SNMP), what it refuses before planning, and the
+API around it (POST /plan, POST /apply, GET /api/drivers).
+
+The routing rule (spec §5 / Q5: fixed at plan time, never switched mid-apply):
+  * revert / save run over the mechanism of the ORIGINAL change (changes.mechanism, NULL = "ssh" from before the column), never over
+    another one: an SNMP change's `before` carries a PVID the SSH planner does not know (it would KeyError, a 500). Not possible over
+    that mechanism right now -> 409 with the reason; an SNMP change needs no save (the switch stores SNMP sets itself) -> 409.
+  * a mechanism the client echoes (what the preview used, sent again on /apply) is used if it is still possible, else 409 "Die
+    Vorschau ist veraltet" - never a silent switch between preview and apply.
+  * otherwise: a driver with the `cli` cap and stored SSH credentials goes over SSH, and reading its configuration (changes.fresh_cfg)
+    is the pre-flight. If that read fails, SNMP takes over only if the request can go over SNMP (a warning says so), else today's 502
+    plus the reason SNMP cannot. Without `cli` or without SSH credentials: SNMP if possible, else 409 / 422 with the reason.
+  * "possible over SNMP": nothing CLI-only in the request (802.1X / MAC auth: status known / radius, limit, guest VLAN, "Protected" on a
+    NAC-capable driver, RADIUS prepare -> 409, before any read), the driver has every cap the request needs (needed_ops) and
+    poller.creds_of(row, write=True) finds a write identity (else its reason, 422).
+  * port names: SSH keeps the strict PORT_RE (it guards CLI interpolation); SNMP accepts the names of other vendors (no leading "-") and
+    requires each port to exist in the live read.
+
+The app runs in-process (FastAPI TestClient without `with`: no lifespan, no scheduler) against a fresh database per test. No network:
+changes.fresh_cfg (the SSH read), snmpwrite.read_cfg (the SNMP read) and changes.inventory (the poll) are fakes over fixture switches,
+and changes.plan_ports, create_change and run_change are spied on (run_change never runs: nothing is applied in this file).
+Expected messages and shown lines are written out by hand.
+"""
+import asyncio
+import hashlib
+import json
+import sqlite3
+
+import pytest
+from fastapi.testclient import TestClient
+
+import auth
+import cfgparse
+import changes
+import config
+import db
+import drivers
+import main
+import snmp
+import snmpwrite
+import sshcli
+from drivers import Driver
+from switchfix import CATALYST_VMVLAN, VMVLAN, W_CATALYST, W_SAMPLE, agent, edit_walks
+
+USER = {"username": "tester", "name": "Tester", "method": "local"}
+
+# Messages, written out by hand (poller's write-identity reasons included).
+WRITE_DISABLED = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
+NO_WRITE_CREDS = "Keine SNMP-Schreib-Zugangsdaten hinterlegt"
+PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
+SSH_NEEDED = "Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearbeiten). Per SNMP geht es auch nicht: "
+NO_SSH_ACCESS = "für diesen Switch ist kein SSH-Zugang hinterlegt (Zugang bearbeiten)"
+STALE = "Die Vorschau ist veraltet, bitte neu laden"
+SSH_DOWN = "NetmikoTimeoutException: TCP connection to device failed."
+SNMP_DOWN = "Zeitüberschreitung bei der SNMP-Abfrage"
+NOT_READABLE = f"Konfiguration des Switches nicht lesbar: {SSH_DOWN}"
+FALLBACK = f"SSH nicht verfügbar ({SSH_DOWN}), die Änderung geht per SNMP"
+RADIUS_CLI = "Zustand „RADIUS“ geht nur mit SSH/ProCurve, nicht per SNMP"
+SNMP_SAVE = "SNMP-Änderungen werden sofort gespeichert, Speichern ist nicht nötig"
+
+# The ProCurve's running-config as the SSH read sees it: the very switch tests/switchfix.py's W_SAMPLE describes over SNMP (ports 1-6,
+# Trk1 = 4 + 5; port 1 untagged 20 + tagged 30 "Platz-107", port 2 untagged 99, port 3 tagged 20 + 30, port 6 untagged 1 and disabled),
+# so one request means the same on both paths.
+SSH_CONFIG = """\
+Running configuration:
+
+; J9729A Configuration Editor; Created on release #WB.16.99.0001
+hostname "SW-EK-01"
+trunk 4-5 Trk1 LACP
+vlan 1
+   name "DEFAULT_VLAN"
+   untagged 6,Trk1
+   no untagged 1-3
+   exit
+vlan 20
+   name "Clients"
+   untagged 1
+   tagged 3,Trk1
+   exit
+vlan 30
+   name "Voice"
+   tagged 1,3,Trk1
+   exit
+vlan 99
+   name "Guest"
+   untagged 2
+   tagged Trk1
+   exit
+interface 1
+   name "Platz-107"
+   exit
+interface 6
+   disable
+   name "unused"
+   exit
+"""
+# What the SNMP read sees per driver: (walk rows as the simulated agent holds them, port selection for snmpwrite.build_cfg).
+#   procurve  W_SAMPLE (as above): port 2 = bridge port 1, untagged 99, PVID 99
+#   cisco     the Catalyst with vmVlan rows: Gi1/0/1 access VLAN 10, Gi1/0/2 access VLAN 1 (down), Po1 = Gi1/0/3 + Gi1/0/4
+#   others    the Catalyst over Q-BRIDGE: Gi1/0/1 untagged 10 (PVID 10), Gi1/0/2 untagged 1 + tagged 20 (PVID 1, down), Po1 a LAG
+VIEWS = {"procurve": (agent(W_SAMPLE), "procurve"), "cisco": (agent({**W_CATALYST, "vmVlan": CATALYST_VMVLAN}), "cisco")}
+QBRIDGE_VIEW = (agent(W_CATALYST), "generic")
+
+PC_PROBE = {"ports": ["2"], "change": {"untagged": "20"}}
+GI_PROBE = {"ports": ["Gi1/0/2"], "change": {"untagged": "10"}}
+PROBES = {"procurve": PC_PROBE, "cisco": GI_PROBE, "generic": GI_PROBE}
+SHOWN = {("procurve", "ssh"): ["vlan 20 untagged 2"], ("procurve", "snmp"): ["Port 2: VLAN ungetaggt 99 → 20"],
+         ("cisco", "snmp"): ["Port Gi1/0/2: Access-VLAN 1 → 10"], ("generic", "snmp"): ["Port Gi1/0/2: VLAN ungetaggt 1 → 10"]}
+
+SSH = {"ssh_user": "manager", "ssh_pass": "ssh-s3cret"}
+RW = {"snmp_rw_community": "rw-s3cret"}
+NO_CREDS = {}                                   # neither a RW identity nor a read community to fall back to
+PUBLIC_RW = {"snmp_rw_community": "public"}     # R25
+
+PROCURVE, GENERIC = drivers.DRIVERS["procurve"], drivers.DRIVERS["generic"]
+# Drivers that lack a cap, registered for single tests: an SNMP driver without ifAlias writes, a CLI driver without SNMP VLAN writes,
+# and one without any SNMP cap.
+NONAME = Driver("noname", GENERIC.caps - {"snmp_name"}, "qbridge", dict(GENERIC.oids), "")
+CLI_NOVLAN = Driver("cli_novlan", PROCURVE.caps - {"snmp_vlan"}, "qbridge", dict(PROCURVE.oids), "")
+BARE = Driver("bare", frozenset(), "qbridge", dict(GENERIC.oids), "")
+
+
+def token(shown: list[str]) -> str:
+    """changes.cmd_token, written out: the first 16 hex digits of the SHA-256 of the shown lines."""
+    return hashlib.sha256("\n".join(shown).encode()).hexdigest()[:16]
+
+
+def inv_of(cfg: dict) -> dict:
+    """changes.inventory() of the switch read as cfg, as far as plan_ports looks at it: every port and trunk member, tr = the trunk of
+    a member or the trunk's own name, no LLDP neighbour, no link, no uplinks."""
+    member_of = {m: t for t, members in cfg["trunks"].items() for m in members}
+    names = dict.fromkeys([*cfg["ports"], *member_of])
+    return {"ports": {n: {"n": n, "tr": n if n in cfg["trunks"] else member_of.get(n, ""), "l": [], "o": False} for n in names},
+            "uplinks": set()}
+
+
+class FakeSwitch:
+    """The switch behind both mechanisms. ssh_up / snmp_error decide whether a read works; calls records, in order, every SSH read
+    ("ssh", switch id), SNMP read ("snmp", driver name, change lock held?) and plan_ports run ("plan", mechanism); created and ran
+    what /apply handed to create_change and run_change."""
+
+    def __init__(self):
+        self.ssh_up = True
+        self.snmp_error: Exception | None = None
+        self.views = dict(VIEWS)
+        self.calls: list[tuple] = []
+        self.created: list[dict] = []
+        self.ran: list[int] = []
+        self.cfg: dict | None = None    # what the last read returned: the inventory is built from it
+
+    async def fresh_cfg(self, sid: int, max_age_s: int = 600) -> dict:
+        self.calls.append(("ssh", sid))
+        if not self.ssh_up:
+            raise RuntimeError(SSH_DOWN)
+        self.cfg = cfgparse.parse_config(SSH_CONFIG)
+        return self.cfg
+
+    async def read_cfg(self, row, driver) -> tuple[dict, dict]:
+        self.calls.append(("snmp", driver.name, sshcli.lock(row["id"]).locked()))
+        if self.snmp_error:
+            raise self.snmp_error
+        W, selection = self.views.get(driver.name, QBRIDGE_VIEW)
+        cfg, raw = snmpwrite.build_cfg(W, selection, vmvlan_base=VMVLAN if "vmVlan" in W else None, text_hex=True)
+        cfg["hostname"] = row["sys_name"] or ""
+        self.cfg = cfg
+        return cfg, raw
+
+    async def inventory(self, sid: int) -> dict:
+        return inv_of(self.cfg)
+
+    def kinds(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+def _never(*args, **kwargs):
+    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
+
+
+@pytest.fixture
+def fake(monkeypatch) -> FakeSwitch:
+    sw = FakeSwitch()
+    real_plan, real_create = changes.plan_ports, changes.create_change
+
+    def plan_spy(*args, **kwargs):
+        sw.calls.append(("plan", kwargs.get("mechanism", "ssh")))
+        return real_plan(*args, **kwargs)
+
+    async def create_spy(sid, user, kind, summary, req, plan, revert_of=None):
+        sw.created.append(plan)
+        return await real_create(sid, user, kind, summary, req, plan, revert_of=revert_of)
+
+    def run_fake(cid):
+        sw.ran.append(cid)          # recorded on the call itself: the task it would become never has to run
+
+        async def nothing():
+            return None
+        return nothing()
+
+    monkeypatch.setattr(changes, "fresh_cfg", sw.fresh_cfg)
+    monkeypatch.setattr(snmpwrite, "read_cfg", sw.read_cfg)
+    monkeypatch.setattr(changes, "inventory", sw.inventory)
+    monkeypatch.setattr(changes, "plan_ports", plan_spy)
+    monkeypatch.setattr(changes, "create_change", create_spy)
+    monkeypatch.setattr(changes, "run_change", run_fake)
+    return sw
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch, fake):
+    """A TestClient on main.app against a fresh database under tmp_path (the app's own init_db), signed in as USER."""
+    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
+    monkeypatch.setattr(main.scheduler, "start", _never)
+    main.app.dependency_overrides[auth.current_user] = lambda: USER
+    asyncio.run(db.init_db())
+    try:
+        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
+    finally:
+        main.app.dependency_overrides.pop(auth.current_user, None)
+
+
+def switch(api, driver: str = "procurve", *, ssh: bool = True, snmp_write: bool = True, creds: dict = RW, **fields) -> int:
+    body = {"name": "SW-EK-01", "host": "203.0.113.21", "driver": driver, "snmp_write": snmp_write, **(SSH if ssh else {}), **creds,
+            **fields}
+    r = api.post("/api/switches", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def plan(api, sid: int, payload: dict, **extra):
+    return api.post(f"/api/switches/{sid}/plan", json={**payload, **extra})
+
+
+def preview(api, sid: int, payload: dict, **extra) -> dict:
+    r = plan(api, sid, payload, **extra)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def apply(api, sid: int, payload: dict, tok: str, **extra):
+    return api.post(f"/api/switches/{sid}/apply", json={**payload, "token": tok, **extra})
+
+
+def refused(r, status: int, detail: str):
+    assert (r.status_code, r.json().get("detail")) == (status, detail), r.text
+
+
+def add_change(tmp_path, sid: int, *, before: dict, mechanism: str | None, status: str = "ok", kind: str = "ports", saved: int = 0,
+               summary: str = "Port 2: VLAN 99") -> int:
+    """A changes row as a finished change leaves it (mechanism NULL: a row from before the column)."""
+    conn = sqlite3.connect(tmp_path / "switchview.db")
+    try:
+        cur = conn.execute(
+            "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, saved, steps, "
+            "expert, mechanism) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, "tester", kind, summary, "{}", json.dumps(sorted(before)), "{}", json.dumps(before), "[]", status, saved, "[]", 0,
+             mechanism))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+# ── The named cases ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+def test_cisco_routes_snmp(api, fake):
+    """A driver without the cli cap goes over SNMP, even with SSH credentials stored: SSH is never touched. The SNMP read runs in the
+    switch's change lock, like the SSH read of the configuration."""
+    sid = switch(api, "cisco", ssh=True)
+    r = plan(api, sid, GI_PROBE)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"kind": "ports", "summary": "Port Gi1/0/2: VLAN 10", "mechanism": "snmp",
+                        "commands": ["Port Gi1/0/2: Access-VLAN 1 → 10"], "warnings": [], "blocked": [],
+                        "before": {"Gi1/0/2": {"u": "1"}}, "desired": {"Gi1/0/2": {"u": "10"}},
+                        "token": token(["Port Gi1/0/2: Access-VLAN 1 → 10"])}
+    assert fake.calls == [("snmp", "cisco", True), ("plan", "snmp")]
+
+
+def test_procurve_prefers_ssh(api, fake):
+    """ProCurve with SSH credentials goes over SSH even though SNMP writing is set up: the plan of before, plus the mechanism."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=True)
+    r = plan(api, sid, PC_PROBE)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"kind": "ports", "summary": "Port 2: VLAN 20", "mechanism": "ssh", "commands": ["vlan 20 untagged 2"],
+                        "warnings": [], "blocked": [], "before": {"2": {"u": "99"}}, "desired": {"2": {"u": "20"}},
+                        "token": token(["vlan 20 untagged 2"])}
+    assert fake.calls == [("ssh", sid), ("plan", "ssh")]
+
+
+def test_procurve_snmp_fallback_when_ssh_fails(api, fake):
+    """The SSH read is the pre-flight: when it fails and SNMP is possible, the change is planned over SNMP, and a warning says why."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=True)
+    fake.ssh_up = False
+    r = plan(api, sid, PC_PROBE)
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert (got["mechanism"], got["commands"], got["warnings"], got["blocked"]) == ("snmp", ["Port 2: VLAN ungetaggt 99 → 20"],
+                                                                                    [FALLBACK], [])
+    assert (got["desired"], got["before"]) == ({"2": {"u": "20"}}, {"2": {"u": "99", "pvid": "99"}})    # R21: the PVID goes along
+    assert fake.calls == [("ssh", sid), ("snmp", "procurve", True), ("plan", "snmp")]
+
+
+def test_procurve_snmp_when_no_ssh_creds(api, fake):
+    sid = switch(api, "procurve", ssh=False, snmp_write=True)
+    got = preview(api, sid, PC_PROBE)
+    assert (got["mechanism"], got["commands"], got["warnings"]) == ("snmp", ["Port 2: VLAN ungetaggt 99 → 20"], [])
+    assert fake.calls == [("snmp", "procurve", True), ("plan", "snmp")]
+
+
+def test_snmp_write_disabled_refused(api, fake):
+    """snmp_write off: refused at plan time with that reason, even with a RW community stored; nothing is read, nothing planned."""
+    refused(plan(api, switch(api, "cisco", snmp_write=False), GI_PROBE), 422, WRITE_DISABLED)
+    refused(plan(api, switch(api, "procurve", ssh=False, snmp_write=False, host="203.0.113.22"), PC_PROBE), 422, SSH_NEEDED + WRITE_DISABLED)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("creds, reason", [(NO_CREDS, NO_WRITE_CREDS), (PUBLIC_RW, PUBLIC), ({"snmp_community": "public"}, PUBLIC)],
+                         ids=["none", "rw-public", "read-public"])
+def test_snmp_no_rw_cred_refused(api, fake, creds, reason):
+    """snmp_write on but no identity that may write (poller.creds_of(row, write=True)): refused with its reason, never a SET with the
+    read community or "public"."""
+    refused(plan(api, switch(api, "cisco", creds=creds), GI_PROBE), 422, reason)
+    assert fake.calls == []
+
+
+def test_mixed_cli_op_on_snmp_blocked(api, fake):
+    """RADIUS plus a VLAN on an SNMP-only switch: the whole change is refused, the VLAN part is never planned alone."""
+    sid = switch(api, "cisco")
+    refused(plan(api, sid, {"ports": ["Gi1/0/2"], "change": {"status": "radius", "untagged": "10"}}), 409, RADIUS_CLI)
+    assert fake.calls == []      # no read, no plan built
+
+
+# ── The routing table ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# (id, driver, SSH credentials, SSH read works, snmp_write, write identity) -> mechanism, or (status, detail)
+ROUTES = [
+    ("procurve: ssh", "procurve", True, True, True, RW, "ssh"),
+    ("procurve: ssh, snmp off", "procurve", True, True, False, NO_CREDS, "ssh"),
+    ("procurve: ssh down -> snmp", "procurve", True, False, True, RW, "snmp"),
+    ("procurve: ssh down, snmp off", "procurve", True, False, False, RW, (502, f"{NOT_READABLE} (per SNMP geht es auch nicht: {WRITE_DISABLED})")),
+    ("procurve: ssh down, no write identity", "procurve", True, False, True, NO_CREDS,
+     (502, f"{NOT_READABLE} (per SNMP geht es auch nicht: {NO_WRITE_CREDS})")),
+    ("procurve: ssh down, public", "procurve", True, False, True, PUBLIC_RW, (502, f"{NOT_READABLE} (per SNMP geht es auch nicht: {PUBLIC})")),
+    ("procurve: no ssh creds -> snmp", "procurve", False, True, True, RW, "snmp"),
+    ("procurve: no ssh creds, snmp off", "procurve", False, True, False, RW, (422, SSH_NEEDED + WRITE_DISABLED)),
+    ("procurve: no ssh creds, no write identity", "procurve", False, True, True, NO_CREDS, (422, SSH_NEEDED + NO_WRITE_CREDS)),
+    ("procurve: no ssh creds, public", "procurve", False, True, True, PUBLIC_RW, (422, SSH_NEEDED + PUBLIC)),
+    ("cisco: snmp, ssh creds ignored", "cisco", True, True, True, RW, "snmp"),
+    ("cisco: snmp", "cisco", False, True, True, RW, "snmp"),
+    ("cisco: snmp off", "cisco", True, True, False, RW, (422, WRITE_DISABLED)),
+    ("cisco: no write identity", "cisco", False, True, True, NO_CREDS, (422, NO_WRITE_CREDS)),
+    ("cisco: public", "cisco", False, True, True, PUBLIC_RW, (422, PUBLIC)),
+    ("generic: snmp", "generic", False, True, True, RW, "snmp"),
+    ("generic: snmp, ssh creds ignored", "generic", True, False, True, RW, "snmp"),
+    ("generic: snmp off", "generic", True, True, False, RW, (422, WRITE_DISABLED)),
+    ("generic: no write identity", "generic", True, True, True, NO_CREDS, (422, NO_WRITE_CREDS)),
+]
+
+
+@pytest.mark.parametrize("driver, ssh, ssh_up, snmp_write, creds, want", [r[1:] for r in ROUTES], ids=[r[0] for r in ROUTES])
+def test_routing_table(api, fake, driver, ssh, ssh_up, snmp_write, creds, want):
+    sid = switch(api, driver, ssh=ssh, snmp_write=snmp_write, creds=creds)
+    fake.ssh_up = ssh_up
+    r = plan(api, sid, PROBES[driver])
+    tried_ssh = [("ssh", sid)] if driver == "procurve" and ssh else []    # only a cli driver with SSH credentials reads over SSH
+    if isinstance(want, tuple):
+        refused(r, *want)
+        assert fake.calls == tried_ssh          # refused before any SNMP read and before planning
+        return
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert (got["mechanism"], got["commands"], got["blocked"]) == (want, SHOWN[(driver, want)], [])
+    assert got["warnings"] == ([FALLBACK] if tried_ssh and want == "snmp" else [])
+    if want == "ssh":
+        assert fake.calls == [("ssh", sid), ("plan", "ssh")]
+    else:
+        assert fake.calls == tried_ssh + [("snmp", driver, True), ("plan", "snmp")]
+
+
+# ── Driver caps (needed_ops) ──────────────────────────────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("change, ops", [
+    ({}, set()),
+    ({"untagged": "20"}, {"snmp_vlan"}), ({"tagged_add": ["20"]}, {"snmp_vlan"}), ({"tagged_remove": ["30"]}, {"snmp_vlan"}),
+    ({"status": "off"}, {"snmp_admin"}), ({"status": "protected"}, {"snmp_admin"}),
+    ({"name": "Drucker"}, {"snmp_name"}), ({"name": ""}, {"snmp_name"}),
+    ({"untagged": "20", "tagged_add": ["30"], "status": "off", "name": "x"}, {"snmp_vlan", "snmp_admin", "snmp_name"}),
+])
+def test_needed_ops(change, ops):
+    assert main.needed_ops(main.PlanIn(ports=["2"], change=change)) == ops
+
+
+@pytest.mark.parametrize("change, want", [
+    ({"untagged": "10"}, (200, ["Port Gi1/0/2: VLAN ungetaggt 1 → 10"])),
+    ({"name": "Drucker"}, (422, "Treiber noname kann Portnamen nicht per SNMP schreiben")),
+    ({"name": "Drucker", "untagged": "10"}, (422, "Treiber noname kann Portnamen nicht per SNMP schreiben")),
+])
+def test_snmp_driver_without_a_needed_cap_refused(api, fake, monkeypatch, change, want):
+    monkeypatch.setitem(drivers.DRIVERS, "noname", NONAME)
+    r = plan(api, switch(api, "noname"), {"ports": ["Gi1/0/2"], "change": change})
+    if want[0] == 422:
+        refused(r, *want)
+        assert fake.calls == []
+    else:
+        assert (r.status_code, r.json()["mechanism"], r.json()["commands"]) == (200, "snmp", want[1])
+
+
+def test_missing_caps_are_all_named(api, fake, monkeypatch):
+    monkeypatch.setitem(drivers.DRIVERS, "bare", BARE)
+    refused(plan(api, switch(api, "bare"), {"ports": ["Gi1/0/2"], "change": {"status": "off", "name": "x", "untagged": "10"}}), 422,
+            "Treiber bare kann An/Aus, Portnamen und VLANs nicht per SNMP schreiben")
+
+
+def test_cli_driver_falls_back_only_for_what_snmp_can(api, fake, monkeypatch):
+    """A cli driver whose SNMP side lacks VLAN writes: over SSH anything goes; with SSH down a VLAN change has no SNMP fallback (502
+    with the reason) while a name change does; without SSH credentials a VLAN change is refused with both reasons."""
+    monkeypatch.setitem(drivers.DRIVERS, "cli_novlan", CLI_NOVLAN)
+    fake.views["cli_novlan"] = VIEWS["procurve"]
+    sid = switch(api, "cli_novlan")
+    assert preview(api, sid, PC_PROBE)["mechanism"] == "ssh"
+    fake.ssh_up = False
+    refused(plan(api, sid, PC_PROBE), 502, f"{NOT_READABLE} (per SNMP geht es auch nicht: Treiber cli_novlan kann VLANs nicht per SNMP schreiben)")
+    got = preview(api, sid, {"ports": ["2"], "change": {"name": "Drucker"}})
+    assert (got["mechanism"], got["commands"], got["warnings"]) == ("snmp", ['Port 2: Name "" → "Drucker"'], [FALLBACK])
+    refused(plan(api, switch(api, "cli_novlan", ssh=False, host="203.0.113.22"), PC_PROBE), 422,
+            SSH_NEEDED + "Treiber cli_novlan kann VLANs nicht per SNMP schreiben")
+
+
+# ── Refused over SNMP before planning (CLI-only) ──────────────────────────────────────────────────────────────────────────────────
+CLI_ONLY = [
+    ("known", {"ports": ["Gi1/0/2"], "change": {"status": "known"}}, "Zustand „Bekannte Geräte“ geht nur mit SSH/ProCurve, nicht per SNMP"),
+    ("radius", {"ports": ["Gi1/0/2"], "change": {"status": "radius"}}, RADIUS_CLI),
+    ("limit", {"ports": ["Gi1/0/2"], "change": {"limit": 2}}, "Geräte pro Port geht nur mit SSH/ProCurve, nicht per SNMP"),
+    ("guest", {"ports": ["Gi1/0/2"], "change": {"guest": "20"}}, "Gast-VLAN geht nur mit SSH/ProCurve, nicht per SNMP"),
+    ("no guest", {"ports": ["Gi1/0/2"], "change": {"guest": ""}}, "Gast-VLAN geht nur mit SSH/ProCurve, nicht per SNMP"),
+    ("several", {"ports": ["Gi1/0/2"], "change": {"status": "known", "limit": 2, "guest": "20", "untagged": "10"}},
+     "Zustand „Bekannte Geräte“, Geräte pro Port und Gast-VLAN gehen nur mit SSH/ProCurve, nicht per SNMP"),
+    ("prepare", {"mode": "prepare"}, "RADIUS vorbereiten geht nur mit SSH/ProCurve, nicht per SNMP"),
+]
+
+
+@pytest.mark.parametrize("payload, detail", [c[1:] for c in CLI_ONLY], ids=[c[0] for c in CLI_ONLY])
+def test_cli_only_request_refused_over_snmp(api, fake, payload, detail):
+    """Over SNMP these would plan NOTHING (802.1X / MAC auth is neither readable nor writable there): 409 before any read."""
+    refused(plan(api, switch(api, "cisco"), payload), 409, detail)
+    assert fake.calls == []
+
+
+def test_cli_only_wins_over_missing_write_identity(api, fake):
+    """No configuration of SNMP writing would make RADIUS possible on cisco: that is the reason given, not the missing identity."""
+    refused(plan(api, switch(api, "cisco", snmp_write=False), {"ports": ["Gi1/0/2"], "change": {"status": "radius"}}), 409, RADIUS_CLI)
+
+
+def test_protected_refused_over_snmp_on_a_nac_driver_only(api, fake):
+    """"Protected" means 802.1X / MAC auth off: on a NAC-capable driver (ProCurve) SNMP can neither read nor switch that, it would only
+    enable the port and claim "Protected". On a driver without NAC it is just "port on"; "off" is fine everywhere."""
+    pc = switch(api, "procurve", ssh=False)
+    refused(plan(api, pc, {"ports": ["2"], "change": {"status": "protected"}}), 409, SSH_NEEDED + (
+        "Zustand „Protected“ (802.1X/MAC-Anmeldung ist per SNMP weder lesbar noch abschaltbar) geht nur mit SSH/ProCurve, nicht per SNMP"))
+    assert fake.calls == []
+    got = preview(api, pc, {"ports": ["2"], "change": {"status": "off"}})
+    assert (got["mechanism"], got["commands"]) == ("snmp", ["Port 2: an → aus"])
+    got = preview(api, switch(api, "cisco", host="203.0.113.22"), {"ports": ["Gi1/0/2"], "change": {"status": "protected"}})
+    assert (got["mechanism"], got["commands"], got["blocked"]) == ("snmp", ["Port Gi1/0/2: aus → an"], [])
+
+
+def test_cli_only_request_without_ssh_creds_names_the_missing_access(api, fake):
+    refused(plan(api, switch(api, "procurve", ssh=False), {"ports": ["2"], "change": {"status": "radius"}}), 409, SSH_NEEDED + RADIUS_CLI)
+    refused(plan(api, switch(api, "procurve", ssh=False, host="203.0.113.22"), {"mode": "prepare"}), 409,
+            SSH_NEEDED + "RADIUS vorbereiten geht nur mit SSH/ProCurve, nicht per SNMP")
+    assert fake.calls == []
+
+
+def test_cli_only_request_has_no_snmp_fallback(api, fake):
+    """SSH down: a request SNMP cannot carry keeps today's 502, plus why SNMP cannot take over; nothing is read over SNMP."""
+    sid = switch(api, "procurve")
+    fake.ssh_up = False
+    refused(plan(api, sid, {"ports": ["2"], "change": {"status": "radius"}}), 502, f"{NOT_READABLE} (per SNMP geht es auch nicht: {RADIUS_CLI})")
+    refused(plan(api, sid, {"mode": "prepare"}), 502,
+            f"{NOT_READABLE} (per SNMP geht es auch nicht: RADIUS vorbereiten geht nur mit SSH/ProCurve, nicht per SNMP)")
+    assert fake.kinds() == ["ssh", "ssh"]
+
+
+def test_cli_only_request_still_goes_over_ssh(api, fake):
+    """Over SSH nothing of this is refused: the RADIUS change is planned as before (here blocked only because the switch is not
+    prepared for RADIUS), prepare as well."""
+    sid = switch(api, "procurve")
+    got = preview(api, sid, {"ports": ["2"], "change": {"status": "radius", "limit": 2, "guest": "99"}})
+    assert got["mechanism"] == "ssh" and got["commands"][0] == "aaa port-access authenticator 2"
+    assert [b["port"] for b in got["blocked"]] == ["*"]
+    got = preview(api, sid, {"mode": "prepare"})
+    assert (got["kind"], got["mechanism"], got["summary"]) == ("prepare", "ssh", "RADIUS vorbereiten")
+    assert fake.kinds() == ["ssh", "plan", "ssh"]
+
+
+# ── The SNMP read ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("error, text", [(snmp.SnmpError(SNMP_DOWN), SNMP_DOWN),
+                                         (FileNotFoundError(2, "No such file or directory"), "[Errno 2] No such file or directory")],
+                         ids=["snmp-error", "no-net-snmp"])
+def test_snmp_read_failure_is_502(api, fake, error, text):
+    fake.snmp_error = error
+    refused(plan(api, switch(api, "cisco"), GI_PROBE), 502, f"Konfiguration des Switches per SNMP nicht lesbar: {text}")
+    assert fake.kinds() == ["snmp"]          # nothing planned from a failed read
+
+
+def test_fallback_with_snmp_down_too_is_502(api, fake):
+    sid = switch(api, "procurve")
+    fake.ssh_up, fake.snmp_error = False, snmp.SnmpError(SNMP_DOWN)
+    refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches per SNMP nicht lesbar: {SNMP_DOWN}")
+    assert fake.kinds() == ["ssh", "snmp"]
+
+
+# ── Port names per mechanism ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# The Catalyst over Q-BRIDGE with two ports renamed the way other vendors name them: Gi1/0/2 -> ge-0/0/1, Po1 -> Port-channel1.
+RENAMED = (edit_walks(QBRIDGE_VIEW[0], ifName={"10102": "ge-0/0/1", "5001": "Port-channel1"}), "generic")
+
+
+@pytest.mark.parametrize("payload, shown, summary", [
+    ({"ports": ["Gi1/0/1"], "change": {"untagged": "20"}}, "Port Gi1/0/1: VLAN ungetaggt 10 → 20", "Port Gi1/0/1: VLAN 20"),
+    ({"ports": ["ge-0/0/1"], "change": {"untagged": "10"}}, "Port ge-0/0/1: VLAN ungetaggt 1 → 10", "Port ge-0/0/1: VLAN 10"),
+    ({"ports": ["Port-channel1"], "change": {"tagged_remove": ["20"]}, "expert": True}, "Port Port-channel1: VLAN getaggt 10, 20 → 10",
+     "Port Port-channel1: getaggt −20"),
+], ids=["Gi1/0/1", "ge-0/0/1", "Port-channel1"])
+def test_snmp_accepts_vendor_port_names_present_in_the_read(api, fake, payload, shown, summary):
+    fake.views["generic"] = RENAMED
+    got = preview(api, switch(api, "generic"), payload)
+    assert (got["mechanism"], got["commands"], got["blocked"], got["summary"]) == ("snmp", [shown], [], summary)
+
+
+@pytest.mark.parametrize("port", ["ge-0/0/1", "Port-channel1", "1.5", "-x", "A1:2"])
+def test_ssh_keeps_the_strict_port_re(api, fake, port):
+    sid = switch(api, "procurve")
+    refused(plan(api, sid, {"ports": [port], "change": {"untagged": "20"}}), 422, f"Port ungültig: {port}")
+    assert fake.kinds() == ["ssh"]           # validated after the SSH read, as before; never planned
+
+
+@pytest.mark.parametrize("port", ["-x", "-", "", "a b", "Gi1/0/1;id", "Gi1/0/1\n", "Ä1", "x" * 65, "/1", ".1"])
+def test_snmp_refuses_a_bad_port_name_before_reading(api, fake, port):
+    refused(plan(api, switch(api, "generic"), {"ports": ["Gi1/0/1", port], "change": {"untagged": "20"}}), 422, f"Port ungültig: {port}")
+    assert fake.calls == []
+
+
+def test_snmp_refuses_a_port_missing_from_the_live_read(api, fake):
+    sid = switch(api, "generic")
+    refused(plan(api, sid, {"ports": ["Gi9/0/9", "Gi1/0/1", "Po7", "x" * 64], "change": {"untagged": "20"}}), 422,
+            f"Port gibt es auf diesem Switch nicht: Gi9/0/9, Po7, {'x' * 64}")
+    assert fake.kinds() == ["snmp"]          # read, then refused: nothing planned
+
+
+def test_snmp_keeps_the_vlan_id_check(api, fake):
+    refused(plan(api, switch(api, "generic"), {"ports": ["Gi1/0/1"], "change": {"tagged_add": ["20", "x1"]}}), 422, "VLAN ungültig: x1")
+    assert fake.calls == []
+
+
+def test_snmp_trunk_member_is_blocked_not_refused(api, fake):
+    """A trunk member exists in the read, so it passes the port check; plan_ports blocks it with the usual reason."""
+    got = preview(api, switch(api, "generic"), {"ports": ["Gi1/0/3"], "change": {"untagged": "10"}})
+    assert (got["mechanism"], got["commands"], got["blocked"]) == ("snmp", [], [{"port": "Gi1/0/3", "reason": "gehört zu Po1, bitte Po1 wählen"}])
+
+
+# ── Echo: /apply never switches the mechanism of its preview ──────────────────────────────────────────────────────────────────────
+def test_apply_with_echoed_snmp_stays_snmp_when_ssh_is_back(api, fake):
+    sid = switch(api, "procurve")
+    fake.ssh_up = False
+    p = preview(api, sid, PC_PROBE)
+    assert (p["mechanism"], p["commands"]) == ("snmp", ["Port 2: VLAN ungetaggt 99 → 20"])
+    fake.ssh_up, fake.calls = True, []
+    r = apply(api, sid, PC_PROBE, p["token"], mechanism="snmp")
+    assert r.status_code == 200, r.text
+    assert fake.kinds() == ["snmp", "plan"]                   # SSH is not even tried
+    assert [(c["mechanism"], c["shown"]) for c in fake.created] == [("snmp", ["Port 2: VLAN ungetaggt 99 → 20"])]
+    assert fake.ran == [r.json()["id"]]
+
+
+def test_apply_with_echoed_ssh_refused_when_ssh_is_down(api, fake):
+    sid = switch(api, "procurve")
+    p = preview(api, sid, PC_PROBE)
+    assert p["mechanism"] == "ssh"
+    fake.ssh_up, fake.calls = False, []
+    refused(apply(api, sid, PC_PROBE, p["token"], mechanism="ssh"), 409, f"{STALE} (Konfiguration per SSH nicht lesbar: {SSH_DOWN})")
+    assert fake.kinds() == ["ssh"] and fake.created == [] and fake.ran == []    # no SNMP fallback behind the client's back
+
+
+def test_apply_without_echo_cannot_switch_silently(api, fake):
+    """A client that does not echo (today's frontend): the preview went over SNMP, SSH is back, so apply plans over SSH; its CLI lines
+    never match the previewed SNMP lines, the token check refuses."""
+    sid = switch(api, "procurve")
+    fake.ssh_up = False
+    p = preview(api, sid, PC_PROBE)
+    fake.ssh_up = True
+    refused(apply(api, sid, PC_PROBE, p["token"]), 409, STALE)
+    assert fake.created == []
+
+
+def test_apply_with_echoed_snmp_refused_when_snmp_writing_was_switched_off(api, fake):
+    sid = switch(api, "cisco")
+    p = preview(api, sid, GI_PROBE)
+    assert api.put(f"/api/switches/{sid}", json={"name": "SW-EK-01", "host": "203.0.113.21", "snmp_write": False}).status_code == 200
+    fake.calls = []
+    refused(apply(api, sid, GI_PROBE, p["token"], mechanism="snmp"), 409, f"{STALE} ({WRITE_DISABLED})")
+    assert fake.calls == [] and fake.created == []
+
+
+@pytest.mark.parametrize("driver, ssh, reason", [("cisco", True, "Treiber cisco hat keine SSH-CLI"), ("procurve", False, NO_SSH_ACCESS)])
+def test_echoed_ssh_refused_where_there_is_no_ssh(api, fake, driver, ssh, reason):
+    refused(plan(api, switch(api, driver, ssh=ssh), PROBES[driver], mechanism="ssh"), 409, f"{STALE} ({reason})")
+    assert fake.calls == []
+
+
+def test_echoed_snmp_still_refuses_cli_only_requests(api, fake):
+    refused(plan(api, switch(api, "procurve"), {"ports": ["2"], "change": {"status": "radius"}}, mechanism="snmp"), 409, RADIUS_CLI)
+    assert fake.calls == []
+
+
+def test_mechanism_must_be_ssh_or_snmp(api, fake):
+    r = plan(api, switch(api, "procurve"), PC_PROBE, mechanism="telnet")
+    assert r.status_code == 422 and r.json()["detail"][0]["loc"] == ["body", "mechanism"]
+    assert fake.calls == []
+
+
+def test_apply_over_ssh_is_unchanged(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    p = preview(api, sid, PC_PROBE)
+    r = apply(api, sid, PC_PROBE, p["token"], mechanism="ssh")
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    assert [(c["mechanism"], c["commands"], c["shown"]) for c in fake.created] == [("ssh", ["vlan 20 untagged 2"], ["vlan 20 untagged 2"])]
+    assert fake.ran == [cid]
+    conn = sqlite3.connect(tmp_path / "switchview.db")
+    try:
+        row = conn.execute("SELECT kind, summary, ports, desired, before, commands, status FROM changes WHERE id = ?", (cid,)).fetchone()
+    finally:
+        conn.close()
+    assert row == ("ports", "Port 2: VLAN 20", '["2"]', '{"2": {"u": "20"}}', '{"2": {"u": "99"}}', '["vlan 20 untagged 2"]', "queued")
+
+
+def test_apply_still_refuses_a_blocked_plan(api, fake):
+    sid = switch(api, "generic")
+    p = preview(api, sid, {"ports": ["Gi1/0/3"], "change": {"untagged": "10"}})
+    refused(apply(api, sid, {"ports": ["Gi1/0/3"], "change": {"untagged": "10"}}, p["token"], mechanism="snmp"), 409,
+            "Nicht ausführbar: Gi1/0/3: gehört zu Po1, bitte Po1 wählen")
+    assert fake.created == []
+
+
+# ── Revert and save: the mechanism of the original change ─────────────────────────────────────────────────────────────────────────
+def test_revert_of_an_snmp_change_goes_over_snmp(api, fake, tmp_path):
+    """Its `before` carries the PVID (R21): planned over SNMP it restores it; over SSH the same `before` would be a KeyError (500). SSH
+    works here, and still is not used."""
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20", "pvid": "20"}}, mechanism="snmp")
+    r = plan(api, sid, {"mode": "revert", "of": cid})
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert (got["kind"], got["summary"], got["mechanism"]) == ("ports", f"Rückgängig #{cid}: Port 2: VLAN 99", "snmp")
+    assert got["commands"] == ["Port 2: VLAN ungetaggt 99 → 20", "Port 2: PVID 99 → 20"]
+    assert (got["desired"], got["blocked"]) == ({"2": {"u": "20", "pvid": "20"}}, [])
+    assert fake.calls == [("snmp", "procurve", True), ("plan", "snmp")]
+
+
+def test_revert_of_an_snmp_change_refused_when_snmp_is_not_possible(api, fake, tmp_path):
+    sid = switch(api, "procurve", snmp_write=False)
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20", "pvid": "20"}}, mechanism="snmp")
+    refused(plan(api, sid, {"mode": "revert", "of": cid}), 409, f"Änderung #{cid} lief per SNMP und lässt sich nur per SNMP zurücknehmen: {WRITE_DISABLED}")
+    assert fake.calls == []                  # never over SSH instead
+
+
+def test_revert_of_a_change_without_mechanism_goes_over_ssh(api, fake, tmp_path):
+    """NULL: a change from before the column, made over SSH. SNMP would be possible here, and is not used."""
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism=None)
+    got = preview(api, sid, {"mode": "revert", "of": cid})
+    assert (got["kind"], got["mechanism"], got["commands"], got["summary"]) == ("ports", "ssh", ["vlan 20 untagged 2"],
+                                                                                f"Rückgängig #{cid}: Port 2: VLAN 99")
+    assert fake.calls == [("ssh", sid), ("plan", "ssh")]
+
+
+def test_ssh_revert_has_no_snmp_fallback(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism="ssh")
+    fake.ssh_up = False
+    refused(plan(api, sid, {"mode": "revert", "of": cid}), 502, NOT_READABLE)
+    assert fake.kinds() == ["ssh"]
+
+
+@pytest.mark.parametrize("driver, ssh, reason", [("cisco", True, "Treiber cisco hat keine SSH-CLI"), ("procurve", False, NO_SSH_ACCESS)])
+def test_ssh_revert_refused_without_ssh(api, fake, tmp_path, driver, ssh, reason):
+    """The switch was switched to another driver, or its SSH access removed, after the change: no revert over SNMP instead."""
+    sid = switch(api, driver, ssh=ssh)
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism=None)
+    refused(plan(api, sid, {"mode": "revert", "of": cid}), 409, f"Änderung #{cid} lief per SSH und lässt sich nur per SSH zurücknehmen: {reason}")
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("mode", ["revert", "save"])
+def test_revert_or_save_of_a_change_with_an_unknown_mechanism_refused(api, fake, tmp_path, mode):
+    """Fail closed: a mechanism this code does not know is never taken for SSH."""
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism="telnet", status="unclear")
+    refused(plan(api, sid, {"mode": mode, "of": cid}), 409, f"Änderung #{cid} hat einen unbekannten Schreibweg (telnet)")
+    assert fake.calls == []
+
+
+def test_revert_refuses_an_echo_of_another_mechanism(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20", "pvid": "20"}}, mechanism="snmp")
+    refused(plan(api, sid, {"mode": "revert", "of": cid, "mechanism": "ssh"}), 409, STALE)
+    assert preview(api, sid, {"mode": "revert", "of": cid, "mechanism": "snmp"})["mechanism"] == "snmp"
+
+
+def test_save_of_an_snmp_change_refused(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20", "pvid": "20"}}, mechanism="snmp", status="unclear")
+    refused(plan(api, sid, {"mode": "save", "of": cid}), 409, SNMP_SAVE)
+    assert fake.calls == []
+
+
+def test_save_of_an_ssh_change_is_unchanged(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism=None, status="unclear")
+    got = preview(api, sid, {"mode": "save", "of": cid})
+    assert got == {"kind": "save", "summary": f"Speichern nach #{cid}", "mechanism": "ssh", "commands": [],
+                   "warnings": ["Speichert den aktuellen Stand des Switches dauerhaft (write memory)."], "blocked": [], "before": {},
+                   "desired": {}, "token": token([])}
+    assert fake.calls == [("ssh", sid)]      # the SSH read stays the pre-flight of a save
+    refused(plan(api, sid, {"mode": "save", "of": add_change(tmp_path, sid, before={}, mechanism=None, status="ok")}), 409,
+            "Diese Änderung muss nicht gespeichert werden")
+
+
+@pytest.mark.parametrize("mode", ["revert", "save"])
+def test_revert_or_save_of_a_missing_change_is_404(api, fake, mode):
+    refused(plan(api, switch(api, "procurve"), {"mode": mode, "of": 4711}), 404, "Änderung nicht gefunden")
+    assert fake.calls == []
+
+
+def test_revert_of_an_unrevertable_change_is_409(api, fake, tmp_path):
+    sid = switch(api, "procurve")
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism=None, status="aborted")
+    refused(plan(api, sid, {"mode": "revert", "of": cid}), 409, "Diese Änderung lässt sich nicht zurücknehmen")
+
+
+# ── Summary, drivers ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("ports, change, want", [
+    (["A3", "A1", "A2", "Trk1"], {"untagged": "20"}, "Port A1-A3,Trk1: VLAN 20"),             # ProCurve: compressed, as before
+    (["2"], {"status": "off"}, "Port 2: Aus"),
+    (["Gi1/0/10", "Gi1/0/2", "Po1", "Gi1/0/2"], {"untagged": "20"}, "Port Gi1/0/2, Gi1/0/10, Po1: VLAN 20"),
+    (["ge-0/0/1", "1"], {"name": "Drucker"}, "Port 1, ge-0/0/1: Name Drucker"),
+    (["1/1/10", "1/1/2"], {"tagged_add": ["30"]}, "Port 1/1/2, 1/1/10: getaggt +30"),
+])
+def test_summary(ports, change, want):
+    """Port names of other vendors, which cfgparse.compress_ports cannot read (it raises), come naturally sorted and comma-separated."""
+    assert main._summary(main.PlanIn(ports=ports, change=change)) == want
+
+
+def test_drivers_list(api):
+    r = api.get("/api/drivers")
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert [d["name"] for d in got] == list(drivers.DRIVERS)
+    for d in got:
+        assert set(d) == {"name", "caps", "notes"}
+        assert d["caps"] == sorted(drivers.DRIVERS[d["name"]].caps) and d["notes"] == drivers.DRIVERS[d["name"]].notes and d["notes"]
+    by_name = {d["name"]: d["caps"] for d in got}
+    assert by_name["procurve"] == ["backup", "cli", "nac", "snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
+    assert by_name["cisco"] == ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
+
+
+def test_drivers_list_needs_a_session(api):
+    main.app.dependency_overrides.pop(auth.current_user)
+    assert api.get("/api/drivers").status_code == 401
