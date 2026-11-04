@@ -3,10 +3,11 @@
 These are characterization tests: they pin what the module does TODAY so later SNMP/multivendor
 work cannot silently change the SSH/CLI path. Expected values are written out by hand from the
 `sample_running_config` fixture (tests/conftest.py), not generated from the parser's own output.
+cfgparse is imported flat (app/ is on sys.path via pytest.ini), exactly as the app itself imports it.
 """
 import pytest
 
-from app.cfgparse import compress_ports, expand_ports, mask_secrets, parse_config
+from cfgparse import compress_ports, expand_ports, mask_secrets, parse_config
 
 
 def test_parse_config_golden(sample_running_config):
@@ -62,7 +63,13 @@ def test_expand_ports_modest_range_expands():
     assert expand_ports("A1-A50") == [f"A{i}" for i in range(1, 51)]
 
 
-@pytest.mark.xfail(strict=True, reason="unbounded range expansion — hardening tracked in security findings, not yet fixed")
+@pytest.mark.xfail(
+    strict=True,
+    # Only the intended outcome ("DID NOT RAISE", i.e. no cap yet) counts as the expected failure;
+    # an unrelated crash inside expand_ports() stays a real failure instead of being swallowed.
+    raises=pytest.fail.Exception,
+    reason="cfgparse-unbounded-range-expansion: unbounded range expansion — hardening tracked in security findings, not yet fixed",
+)
 def test_expand_ports_rejects_huge_range():
     """Desired bound, NOT current behaviour: expand_ports() has no cap on range size, so an absurd range
     is materialised as a giant list instead of raising ValueError. strict=True turns this red as soon as
