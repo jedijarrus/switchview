@@ -6,6 +6,7 @@ import aiosqlite
 
 from config import settings
 
+# Urstand der Tabellen. Spaeter dazugekommene Spalten gehoeren NICHT hierher, sondern in ADDED_COLUMNS (siehe migrate()).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,6 +151,29 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
+# Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,
+# damit eine frische und eine bestehende DB denselben Weg gehen und es keine zweite Quelle der Wahrheit gibt. Neue Spalten nur hier
+# anhaengen. Alle Eintraege sind feste Literale und werden so ins SQL eingesetzt: nie Nutzereingaben hier hineinreichen.
+ADDED_COLUMNS = (
+    # Treiber und SNMP-Schreibfreigabe (Spec 2). Bestandszeilen bleiben ProCurve ohne SNMP-Write, das Verhalten aendert sich nicht.
+    ("switches", "driver", "TEXT NOT NULL DEFAULT 'procurve'"),
+    ("switches", "snmp_write", "INTEGER NOT NULL DEFAULT 0"),
+    # Eigene Write-Identitaet fuer SNMP-SET, getrennt von den Read-Spalten snmp_*. Bestandszeilen haben NULL. Community und Passwoerter
+    # wie die Read-Spalten verschluesselt ablegen und in main.SECRET_FIELDS aufnehmen, sonst liefert GET /api/switches sie mit aus.
+    ("switches", "snmp_rw_community", "TEXT"),
+    ("switches", "snmp_rw_user", "TEXT"),
+    ("switches", "snmp_rw_auth_proto", "TEXT"),
+    ("switches", "snmp_rw_auth_pass", "TEXT"),
+    ("switches", "snmp_rw_priv_proto", "TEXT"),
+    ("switches", "snmp_rw_priv_pass", "TEXT"),
+    # PoE je Port. Bestandszeilen haben NULL.
+    ("ports", "poe_admin", "INTEGER"),
+    ("ports", "poe_status", "INTEGER"),
+    ("ports", "poe_power", "INTEGER"),
+    # Audit-Spur: ssh | snmp. Bestandszeilen haben NULL.
+    ("changes", "mechanism", "TEXT"),
+)
+
 
 @asynccontextmanager
 async def db():
@@ -164,9 +188,28 @@ async def db():
         await conn.close()
 
 
+async def migrate(conn) -> None:
+    """Legt fehlende Spalten aus ADDED_COLUMNS per ALTER TABLE ... ADD COLUMN an, je Spalte per PRAGMA table_info abgesichert.
+
+    Idempotent: eine vorhandene Spalte bleibt unangetastet (kein Fehler, keine Werte zuruecksetzen), ein zweiter Lauf aendert nichts,
+    und ein frueher abgebrochener Lauf wird beim naechsten Aufruf zu Ende gefuehrt. Laeuft nach executescript(SCHEMA) auf derselben
+    Connection und committet nicht selbst (das macht init_db). Die Zeilen von table_info werden per Index gelesen, damit es mit und
+    ohne row_factory geht. Gegen zwei gleichzeitig startende Prozesse ist die Pruefung nicht gesichert, dafuer gilt die
+    Single-Worker-Invariante (siehe main.py)."""
+    have: dict[str, set[str]] = {}
+    for table, column, definition in ADDED_COLUMNS:
+        if table not in have:
+            async with conn.execute(f"PRAGMA table_info({table})") as cur:
+                have[table] = {row[1] for row in await cur.fetchall()}    # Zeile: (cid, name, type, notnull, dflt_value, pk)
+        if column not in have[table]:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            have[table].add(column)
+
+
 async def init_db():
     async with db() as conn:
         await conn.executescript(SCHEMA)
+        await migrate(conn)
         await conn.commit()
 
 
