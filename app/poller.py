@@ -42,14 +42,14 @@ LAG_IFTYPE = "161"  # ieee8023adLag: Trunk / LAG (Port-channel, ae, Bridge-Aggre
 # propVirtual (53) und propMultiplexor (54): als LAG nur mit LAG_NAME und physischem Port darunter (klassisches IOS meldet
 # Port-channels so)
 NAMED_LAG_IFTYPES = frozenset({"53", "54"})
-# Namen, die ein LAG dieser Typen haben muss, jeweils direkt gefolgt von einer Ziffer, Gross-/Kleinschreibung egal:
+# Namen, die ein LAG dieser Typen haben muss, jeweils direkt gefolgt von einer Ziffer 0-9, Gross-/Kleinschreibung egal:
 #   Po, Port-channel           Cisco (IOS-ifName "Po1"), Arista ("Port-Channel1"), Dell ("Po1", OS10 "port-channel1")
 #   ae                         Juniper ("ae0")
 #   Bridge-Aggregation, BAGG   HPE/H3C Comware (lang und kurz)
 #   lag                        Aruba AOS-CX ("lag1")
 #   ch                         Channel-Gruppen mancher Smart-Switches ("ch1")
 #   Trk                        HPE ProCurve / AOS-S ("Trk1"), falls so ein Switch unter einem anderen Treiber laeuft
-LAG_NAME = re.compile(r"(?:Po|Port-channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk)\d", re.IGNORECASE)
+LAG_NAME = re.compile(r"(?:Po|Port-channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk)[0-9]", re.IGNORECASE)
 
 _locks: dict[int, asyncio.Lock] = {}
 
@@ -170,6 +170,10 @@ async def poll_switch(switch_id: int) -> dict:
                     log.warning("%s: Walk %s fehlgeschlagen: %s", host, k, r)
                     r = []
                 W[k] = r
+            if by_iftype(driver_name) and _tbl(W["ifName"], O["ifName"]) and not _tbl(W["ifType"], O["ifType"]):
+                # Kein Fehler, aber keine einzige Zeile (leere oder verbotene View): ohne ifType kaemen keine Ports heraus, und das
+                # Speichern unten loeschte die des letzten guten Polls. Also wie ein gescheiterter Pflicht-Walk.
+                raise snmp.SnmpError("ifType-Walk lieferte keine Zeile, ifName schon: ohne ifType lassen sich die Ports nicht bestimmen")
             data = _build(W, driver_name)
         except Exception as e:  # noqa: BLE001
             async with db() as conn:

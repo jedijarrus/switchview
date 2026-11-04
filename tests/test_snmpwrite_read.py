@@ -42,9 +42,9 @@ import snmp
 import snmpwrite
 import sshcli
 from drivers import DRIVERS
-from switchfix import (BASES, EXPECTED_PORTS, HEX_WALKS, HOST, IF_STACK, IF_TYPE, IFTYPE_SAMPLE, NAC, RECORDING, ROW, VLAN_EGRESS,
-                       VLAN_UNTAGGED, VMVLAN, VMVLAN_SAMPLE, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, edit_walks, random_procurve_switch,
-                       walk_rows)
+from switchfix import (BASES, EXPECTED_PORTS, FREE_TEXT, HEX_WALKS, HOST, IF_ALIAS, IF_STACK, IF_TYPE, IFTYPE_SAMPLE, NAC, RECORDING,
+                       ROW, VLAN_EGRESS, VLAN_NAME, VLAN_UNTAGGED, VMVLAN, VMVLAN_SAMPLE, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, edit_walks,
+                       hex_text, netsnmp_hex, random_procurve_switch, walk_answer, walk_rows)
 
 DRIVER = DRIVERS["procurve"]
 
@@ -427,7 +427,7 @@ def agent(monkeypatch):
     async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
         calls.append({"host": host, "cred": cred, "oid": oid, "hex": hex_values, "strict": strict})
         assert oid in RECORDING, f"read_cfg walked an OID the agent does not serve: {oid}"
-        return list(RECORDING[oid])
+        return walk_answer(RECORDING[oid], oid, hex_values)
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     return calls
@@ -445,8 +445,9 @@ async def _switch_row(**cols):
 
 
 async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
-    """Nine walks (the PortLists in hex), all strict, at the switch's host, all with the READ identity, never the RW one; the
-    result is build_cfg of what the agent answered, with the polled sys_name as hostname."""
+    """Nine walks (the PortLists and, since R18, the free text ifAlias / vlanName in hex), all strict, at the switch's host, all
+    with the READ identity, never the RW one; the result is build_cfg of what the agent answered (the text, decoded), with the
+    polled sys_name as hostname."""
     monkeypatch.setattr(crypto, "_fernet", Fernet(Fernet.generate_key()))
     row = await _switch_row(name="SW-EK-01", host=HOST, sys_name="SW-EK-01", driver="procurve", snmp_version="2c",
                             snmp_community=crypto.encrypt("ro-s3cret"), snmp_write=1, snmp_rw_community=crypto.encrypt("rw-s3cret"))
@@ -457,7 +458,7 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
     assert cfg == {**want_cfg, "hostname": "SW-EK-01"}
     assert raw == want_raw
     assert len(agent) == len(BASES)
-    assert {c["oid"]: c["hex"] for c in agent} == {base: key in HEX_WALKS for key, base in BASES.items()}
+    assert {c["oid"]: c["hex"] for c in agent} == {base: key in HEX_WALKS | FREE_TEXT for key, base in BASES.items()}
     for c in agent:
         assert c["strict"] is True    # a walk cut short must be an error, not a shorter table
         assert c["host"] == HOST
@@ -475,7 +476,7 @@ async def test_read_cfg_walks_vmvlan_only_for_cisco_vmps(agent, name):
     driver = DRIVERS[name]
     cfg, raw = await snmpwrite.read_cfg(ROW, driver)
 
-    walked = {base: key in HEX_WALKS for key, base in BASES.items()}
+    walked = {base: key in HEX_WALKS | FREE_TEXT for key, base in BASES.items()}
     W, base = dict(W_SAMPLE), None
     if name != "procurve":
         walked[IF_TYPE] = False
@@ -533,7 +534,7 @@ async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, fa
             raise err
         await asyncio.sleep(0.01)    # the healthy walks take longer than the failing one
         finished.append(oid)
-        return list(RECORDING[oid])
+        return walk_answer(RECORDING[oid], oid, hex_values)
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     with pytest.raises(snmp.SnmpError) as caught:
@@ -550,7 +551,7 @@ async def test_read_cfg_passes_other_walk_errors_through(monkeypatch):
     async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
         if oid == VLAN_UNTAGGED:
             raise err
-        return list(RECORDING[oid])
+        return walk_answer(RECORDING[oid], oid, hex_values)
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     with pytest.raises(FileNotFoundError) as caught:
@@ -573,8 +574,11 @@ class _Proc:
 
 
 def _as_printed(key: str, rows) -> str:
-    """Walk rows as snmpbulkwalk prints them with -On -Oq (and -Ox for the PortLists): strings in quotes, numbers and hex bare."""
-    quoted = key in ("ifName", "ifAlias", "vlanName")
+    """Walk rows as snmpbulkwalk prints them for read_cfg with -On -Oq: ifName in quotes, numbers bare; with -Ox the PortLists (hex
+    in the fixture already) and the free text (R18: its UTF-8 bytes as hex pairs, 16 to a line)."""
+    if key in FREE_TEXT:
+        return "".join(f".{oid} {netsnmp_hex(val.encode())}\n" for oid, val in rows)
+    quoted = key == "ifName"
     return "".join(f'.{oid} "{val}"\n' if quoted else f".{oid} {val}\n" for oid, val in rows)
 
 
@@ -615,7 +619,7 @@ async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_portlist(net_snmp):
         await snmpwrite.read_cfg(ROW, DRIVER)
 
 
-@pytest.mark.parametrize("key", ["ifName", "ifAlias", "vlanName", "ifAdmin", "bp2if", "pvid", "ifStack"])
+@pytest.mark.parametrize("key", ["ifName", "ifAdmin", "bp2if", "pvid", "ifStack"])
 async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_text_walk(net_snmp, key):
     """The same behind the last row of a text walk, a quoted string or a bare number: read leniently, the line would be glued to
     that value (an ifAlias a revert would write back, a bridge port or PVID that is no number any more); the strict text walk
@@ -624,3 +628,70 @@ async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_text_walk(net_snmp,
     net_snmp[BASES[key]] = (text + "End of MIB\n", 0)
     with pytest.raises(snmp.SnmpError, match=r"^Unerwartete Zeile hinter dem Wert von "):
         await snmpwrite.read_cfg(ROW, DRIVER)
+
+
+@pytest.mark.parametrize("key", sorted(FREE_TEXT))
+async def test_read_cfg_end_to_end_refuses_a_stray_line_in_free_text(net_snmp, key):
+    """The free text is a hex walk since R18: a line that is not hex behind the last name would end up in a name that a revert
+    writes back; the strict hex walk refuses it, like behind a PortList."""
+    text, _ = net_snmp[BASES[key]]
+    net_snmp[BASES[key]] = (text + "End of MIB\n", 0)
+    with pytest.raises(snmp.SnmpError, match=r"^Unerwartete Ausgabe in einem Hex-Wert"):
+        await snmpwrite.read_cfg(ROW, DRIVER)
+
+
+# ── R18: free text with umlauts ─────────────────────────────────────────────────────────────────────────────────────────────────
+# Without MIBs (MIBS="") net-snmp prints an OCTET STRING that holds a byte it does not count as printable, such as each byte of an
+# umlaut in UTF-8, as bare hex wrapped every 16 bytes, and a strict text walk refuses that continuation (R15): one "Büro" alias
+# would make every SNMP change on the switch fail. So read_cfg walks ifAlias and vlanName with -Ox (always hex, under R14's rules)
+# and build_cfg(text_hex=True) decodes them, UTF-8 first, latin-1 if that fails. The display poller still reads them as text.
+ALIAS = "Büro Erdgeschoss"    # 17 bytes in UTF-8: a line of 16 bytes and a line of 1
+
+
+def _free_text_as_hex(W: dict) -> dict:
+    """W as read_cfg walks it: the free-text walks in hex (UTF-8), everything else as it is."""
+    return {k: walk_answer(rows, BASES[k], True) for k, rows in W.items()}
+
+
+def test_build_cfg_decodes_the_free_text_read_as_hex():
+    """text_hex=True: ifAlias and vlanName are decoded, UTF-8 first; port 6's alias is latin-1 ("Büro" with the single byte FC, no
+    valid UTF-8) and decodes through the fallback. The result is exactly build_cfg of the same switch read as text."""
+    texts = edit_walks(W_SAMPLE, ifAlias={"1": ALIAS, "6": "Büro"}, vlanName={"99": "Gäste"})
+    W = edit_walks(_free_text_as_hex(texts), ifAlias={"6": hex_text("Büro", "latin-1")})
+    assert dict(W["ifAlias"])[f"{IF_ALIAS}.6"] == "42 FC 72 6F"
+    cfg, raw = snmpwrite.build_cfg(W, text_hex=True)
+    assert (cfg["ports"]["1"]["name"], cfg["ports"]["6"]["name"], cfg["vlans"]["99"]) == (ALIAS, "Büro", "Gäste")
+    assert (cfg, raw) == snmpwrite.build_cfg(texts)
+
+
+def test_build_cfg_leaves_the_free_text_alone_by_default():
+    """Without text_hex (the display poller's rows) nothing is decoded, exactly as before: hex stays hex."""
+    cfg, raw = snmpwrite.build_cfg(_free_text_as_hex(W_SAMPLE))
+    assert cfg["ports"]["1"]["name"] == raw["alias"]["1"] == hex_text("Platz-107") == "50 6C 61 74 7A 2D 31 30 37"
+    assert cfg["vlans"]["20"] == hex_text("Clients")
+
+
+@pytest.mark.parametrize("value", ["52 6", "52 XY", "5 2"])
+def test_free_text_that_is_no_hex_fails_closed(value):
+    """Not whole bytes of hex (cannot come out of a strict hex walk, but build_cfg does not rely on that): SnmpError, no guess."""
+    W = edit_walks(_free_text_as_hex(W_SAMPLE), ifAlias={"1": value})
+    with pytest.raises(snmp.SnmpError, match=r"^Unerwartete SNMP-Daten \(Index oder Wert nicht lesbar\): ifAlias\.1 ist kein Hex-Text"):
+        snmpwrite.build_cfg(W, text_hex=True)
+
+
+async def test_read_cfg_reads_umlauts_through_the_real_walk(net_snmp):
+    """End to end, the real walk / _run / _parse: port 1's 17-byte alias comes as hex over two lines, port 6's alias is latin-1,
+    VLAN 99 is called "Gäste". read_cfg reads all of it, decoded, and the rest of the switch as before."""
+    texts = edit_walks(W_SAMPLE, ifAlias={"1": ALIAS}, vlanName={"99": "Gäste"})
+    printed = {oid: value.encode() for oid, value in texts["ifAlias"]} | {f"{IF_ALIAS}.6": "Büro".encode("latin-1")}
+    net_snmp[IF_ALIAS] = ("".join(f".{oid} {netsnmp_hex(data)}\n" for oid, data in printed.items()), 0)
+    net_snmp[VLAN_NAME] = (_as_printed("vlanName", texts["vlanName"]), 0)
+    assert f".{IF_ALIAS}.1 42 C3 BC 72 6F 20 45 72 64 67 65 73 63 68 6F 73 \n73 \n" in net_snmp[IF_ALIAS][0]    # wrapped as net-snmp does
+
+    cfg, raw = await snmpwrite.read_cfg(ROW, DRIVER)
+
+    assert cfg["ports"]["1"]["name"] == raw["alias"]["1"] == ALIAS
+    assert cfg["ports"]["6"]["name"] == raw["alias"]["6"] == "Büro"
+    assert cfg["vlans"]["99"] == "Gäste"
+    want_cfg, want_raw = snmpwrite.build_cfg(edit_walks(texts, ifAlias={"6": "Büro"}))
+    assert (cfg, raw) == ({**want_cfg, "hostname": "SW-EK-01"}, want_raw)

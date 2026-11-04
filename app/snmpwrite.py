@@ -30,6 +30,24 @@ import snmp
 # ifadmin und ifalias hat jeder Treiber dieselben OIDs wie poller.O (tests/test_drivers.py), gelesen wird also, was geschrieben wird.
 # Dazu "ifType" fuer jeden Treiber, dessen Ports select_ports danach waehlt (poller.by_iftype: alle ausser procurve).
 WALKS = ("ifName", "ifAlias", "ifAdmin", "bp2if", "vlanName", "vlanEgress", "vlanUntagged", "pvid", "ifStack")
+# Freitext, den read_cfg als Hex walkt (R18). Ohne MIBs gibt net-snmp einen OCTET STRING mit einem Byte, das es nicht fuer druckbar
+# haelt (etwa jedes Byte eines Umlauts in UTF-8), als nacktes Hex aus, alle 16 Bytes umbrochen; ein strikter Text-Walk lehnt das ab
+# (snmp._parse), und ein einziger Portname mit Umlaut sperrte den ganzen Switch. Mit -Ox ist jeder Wert Hex (strikt nach den Hex-Regeln),
+# build_cfg(text_hex=True) macht wieder Text daraus. Der Anzeige-Poller liest beide weiter als Text.
+TEXT_AS_HEX = ("ifAlias", "vlanName")
+
+
+def _hex_text(column: str, index: str, value: str) -> str:
+    """Ein Freitext-Wert aus einem Hex-Walk ("42 C3 BC 72 6F", auch ueber Zeilen; "" ist leer) als Text: UTF-8, sonst latin-1 (jedes
+    Byte ein Zeichen, das scheitert nie). ValueError, wenn der Wert nicht aus ganzen Hex-Bytes besteht."""
+    try:
+        data = bytes.fromhex(value)
+    except ValueError as e:
+        raise ValueError(f"{column}.{index} ist kein Hex-Text: {value[:40]!r}") from e
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
 
 
 def _vids(vids) -> str:
@@ -37,12 +55,14 @@ def _vids(vids) -> str:
     return ", ".join(sorted(vids, key=lambda v: (len(v), v)))
 
 
-def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None = None) -> tuple[dict, dict]:
+def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None = None, text_hex: bool = False) -> tuple[dict, dict]:
     """(cfg, raw) aus den Walk-Zeilen W: Schluessel wie in WALKS -> [(oid, wert), ...], so wie poller.poll_switch sie sammelt, dazu
     "ifType", wenn driver_name die Ports danach waehlt (poller.by_iftype; fehlt er dann, ist das ein KeyError des Aufrufers), und bei
     vlan_strategy cisco_vmps "vmVlan" (dann ist vmvlan_base die OID, unter der diese Zeilen gewalkt wurden; wie bei jedem anderen
     Walk zaehlen nur Zeilen darunter). Weitere Schluessel stoeren nicht. Rein, ohne I/O. Welche Interfaces Ports und Trunks sind,
-    entscheidet poller.select_ports fuer driver_name, genau wie in der Anzeige.
+    entscheidet poller.select_ports fuer driver_name, genau wie in der Anzeige. text_hex (nur read_cfg): die Spalten aus
+    TEXT_AS_HEX kommen als Hex und werden zu Text (UTF-8, sonst latin-1); ohne text_hex (Zeilen im Format des Pollers) bleiben sie,
+    wie sie sind.
 
     cfg hat genau die Schluessel von cfgparse.parse_config. Vom Switch gelesen sind vlans ({vid: Name}, nach Nummer), trunks
     ({Trunk: [Mitglieder]}; Trunk ist der ifName, TrkN bei ProCurve, sonst der des LAG, etwa Po1, ae0, auch ein LAG ohne Mitglieder)
@@ -64,30 +84,42 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
     Bridge-Port aber eine andere PVID (ungetaggt Ankommendes landete in einem anderen VLAN, als cfg sagt). Fuer den ganzen Switch
     geschlossen aus (snmp.SnmpError statt eines cfg, das ihn falsch beschreibt), wenn
       - Name, Egress- und Untagged-Liste nicht fuer dieselben VLANs vorliegen (Spalten derselben Tabellenzeile),
+      - driver_name die Ports nach ifType waehlt und ein Interface mit numerischem ifIndex in ifName keine ifType-Zeile hat (ifXEntry
+        ergaenzt ifEntry, ein Agent liefert also zu jedem ifName ein ifType; fehlt es doch, fiele das Interface still heraus, und
+        waere es ein LAG, stuenden seine Mitglieder ungeschuetzt als gewoehnliche Ports da),
       - ein Port kein lesbares ifAdminStatus hat (er gaelte sonst als aus, und ein Revert wuerde ihn abschalten),
       - ein Portname doppelt vorkommt (ein Schreibzugriff auf diesen Port waere nicht eindeutig),
       - die vmVlan-Zeile eines Ports keine Zahl ist oder ein vmVlan-Index kein ifIndex (falsche Basis-OID),
-      - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0"; hier wird jeder ValueError zu SnmpError. Ein KeyError
-        bleibt einer: jeder Zugriff auf Switch-Daten ist abgesichert, er kann nur ein Fehler im Code sein).
+      - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0" oder mit text_hex ein Freitext, der kein Hex ist; hier
+        wird jeder ValueError zu SnmpError. Ein KeyError bleibt einer: jeder Zugriff auf Switch-Daten ist abgesichert, er kann nur ein
+        Fehler im Code sein).
     """
     rows = {k: W[k] for k in ((*WALKS, "ifType") if poller.by_iftype(driver_name) else WALKS)}
     if "vmVlan" in W and not vmvlan_base:
         raise TypeError("build_cfg: vmVlan-Zeilen ohne vmvlan_base (die OID, unter der sie gewalkt wurden)")
     try:
-        return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {}, driver_name)
+        return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {}, driver_name, text_hex)
     except ValueError as e:
         raise snmp.SnmpError(f"Unerwartete SNMP-Daten (Index oder Wert nicht lesbar): {e}") from e
 
 
-def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str) -> tuple[dict, dict]:
+def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool) -> tuple[dict, dict]:
     """Der Kern von build_cfg: rows = die Walks aus WALKS (plus ifType, wenn driver_name nach ihm waehlt), vmvlan = {ifIndex: vmVlan}
-    (leer ohne vmVlan-Walk)."""
+    (leer ohne vmVlan-Walk), text_hex wie bei build_cfg."""
     tbl = {k: poller._tbl(v, poller.O[k]) for k, v in rows.items()}
+    if text_hex:
+        for k in TEXT_AS_HEX:
+            tbl[k] = {i: _hex_text(k, i, v) for i, v in tbl[k].items()}
     ifname, alias, admin, pvid, vname = tbl["ifName"], tbl["ifAlias"], tbl["ifAdmin"], tbl["pvid"], tbl["vlanName"]
     eg_hex, un_hex, bp2if = tbl["vlanEgress"], tbl["vlanUntagged"], tbl["bp2if"]
     if not set(vname) == set(eg_hex) == set(un_hex):
         odd = (set(vname) | set(eg_hex) | set(un_hex)) - (set(vname) & set(eg_hex) & set(un_hex))
         raise snmp.SnmpError(f"VLAN-Tabelle unvollständig gelesen: Name, Egress- und Untagged-Liste passen nicht zusammen (VLAN {_vids(odd)})")
+    if poller.by_iftype(driver_name):
+        missing = sorted((i for i in ifname if i.isdigit() and i not in tbl["ifType"]), key=lambda v: (len(v), v))
+        if missing:
+            listed = ", ".join(f"{ifname[i]} (ifIndex {i})" for i in missing[:5]) + (", ..." if len(missing) > 5 else "")
+            raise snmp.SnmpError(f"Interface-Tabelle unvollständig gelesen: ifType fehlt für {listed}")
     bad = [k for k in vmvlan if not k.isdigit()]
     if bad:
         raise snmp.SnmpError(f"vmVlan: Index {bad[0]} ist kein ifIndex (zeigt die OID des Treibers nicht auf die Spalte vmVlan?)")
@@ -160,8 +192,9 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
     mittendrin abbricht, oder eine fremde Zeile hinter einem Wert ist ein Fehler, keine kuerzere oder falsche Tabelle. Waehlt der
     Treiber seine Ports nach ifType (poller.by_iftype, alle ausser procurve), kommt ifType als weiterer Walk dazu; ProCurve braucht
     ihn nicht und hat damit auch keinen weiteren Walk, der scheitern kann. Bei driver.vlan_strategy "cisco_vmps" kommt
-    driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg). build_cfg bekommt driver.name. Schreibt nicht in die DB und nimmt
-    keinen Lock, weder den Poll-Lock noch den Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
+    driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg). Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex,
+    damit Umlaute lesbar sind; build_cfg bekommt driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder
+    den Poll-Lock noch den Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
@@ -169,7 +202,7 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
     """
     host, cred, hostname = row["host"], poller.creds_of(row), row["sys_name"] or ""
     vm_base = driver.oids["vmvlan"] if driver.vlan_strategy == "cisco_vmps" else None
-    walks = {k: (poller.O[k], k in poller.HEX) for k in WALKS}  # Schluessel -> (OID, als Hex)
+    walks = {k: (poller.O[k], k in poller.HEX or k in TEXT_AS_HEX) for k in WALKS}  # Schluessel -> (OID, als Hex)
     if poller.by_iftype(driver.name):
         walks["ifType"] = (poller.O["ifType"], False)
     if vm_base:
@@ -179,6 +212,6 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
     for r in results:
         if isinstance(r, BaseException):
             raise r
-    cfg, raw = build_cfg(dict(zip(walks, results)), driver.name, vmvlan_base=vm_base)
+    cfg, raw = build_cfg(dict(zip(walks, results)), driver.name, vmvlan_base=vm_base, text_hex=True)
     cfg["hostname"] = hostname
     return cfg, raw

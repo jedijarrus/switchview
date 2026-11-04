@@ -29,6 +29,9 @@ BASES = {
     "vlanEgress": VLAN_EGRESS, "vlanUntagged": VLAN_UNTAGGED, "pvid": PVID, "ifStack": IF_STACK,
 }
 HEX_WALKS = {"vlanEgress", "vlanUntagged"}    # the two PortLists are walked with -Ox (hex), like the poller does
+# The free text read_cfg walks with -Ox as well (R18): an OCTET STRING with a non-ASCII byte (an umlaut) would otherwise come out as
+# bare hex wrapped every 16 bytes, which a strict text walk refuses. The display poller reads them as text, as it always did.
+FREE_TEXT = {"ifAlias", "vlanName"}
 # Only for drivers that select their ports by ifType (every driver but procurve, see poller.select_ports), one more walk:
 IF_TYPE = "1.3.6.1.2.1.2.2.1.3"               # ifType (IANAifType)  .<ifIndex>   6 / 117 physical port, 161 LAG, anything else no port
 # Only for drivers with vlan_strategy cisco_vmps, one more:
@@ -39,6 +42,27 @@ WALK_BASES = {**BASES, "ifType": IF_TYPE, "vmVlan": VMVLAN}
 def walk_rows(base: str, values: dict) -> list[tuple[str, str]]:
     """Walk rows as snmp.walk returns them: (numeric OID without leading dot, value without quotes), in the order given."""
     return [(f"{base}.{index}", value) for index, value in values.items()]
+
+
+def hex_text(text: str, encoding: str = "utf-8") -> str:
+    """A free-text value as snmp.walk returns it from a walk with -Ox: the bytes as hex pairs ("" stays "")."""
+    return " ".join(f"{byte:02X}" for byte in text.encode(encoding))
+
+
+def walk_answer(rows: list[tuple[str, str]], oid: str, hex_values: bool) -> list[tuple[str, str]]:
+    """What a fake snmp.walk returns for recorded text rows of `oid`: the rows as they are, except that the free text (FREE_TEXT)
+    comes as hex when walked with hex_values, as net-snmp prints every OCTET STRING with -Ox. The PortLists are recorded as hex
+    already."""
+    if hex_values and oid in {BASES[k] for k in FREE_TEXT}:
+        return [(row_oid, hex_text(value)) for row_oid, value in rows]
+    return list(rows)
+
+
+def netsnmp_hex(data: bytes) -> str:
+    """An OCTET STRING as snmpbulkwalk -Oq -Ox prints it: hex pairs, each followed by a space, 16 to a line; empty as \"\"."""
+    if not data:
+        return '""'
+    return "\n".join("".join(f"{byte:02X} " for byte in data[i:i + 16]) for i in range(0, len(data), 16))
 
 
 # ── The sample switch ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -359,10 +383,12 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
     classic IOS (only for the LAG names of R17, in any case, not "bond"), and then it is a trunk only with a member, otherwise no
     port at all.
     There are interfaces that are no ports, under any name and at any ifIndex (VLAN interfaces, loopback, null, tunnel,
-    subinterface, stack port, one without an ifType row), some of them stacked over a port or a LAG, and logical units of type 53
-    named after a port or LAG ("Po1.0", "ge-0/0/1.0") stacked on it. Now and then there is a non-numeric index (even with a
-    physical type) and an ifType row of an interface without ifName. Bridge ports and VLAN bits as in the ProCurve generator of
-    Task 7: members and dropped interfaces may own a bridge port with arbitrary bits, which must not count.
+    subinterface, stack port), some of them stacked over a port or a LAG, and logical units of type 53 named after a port or LAG
+    ("Po1.0", "ge-0/0/1.0") stacked on it. Now and then there is a non-numeric index (even with a physical type) and an ifType row
+    of an interface without ifName. Every numeric ifName row has its ifType row: an agent's ifXTable augments its ifTable, and the
+    write path refuses a switch where one is missing (an interface without ifType row is not part of a well-formed switch). Bridge
+    ports and VLAN bits as in the ProCurve generator of Task 7: members and dropped interfaces may own a bridge port with arbitrary
+    bits, which must not count.
 
     The truth comes from what the generator drew, not from select_ports: the ports in ifIndex order, every LAG that is a trunk with
     its members (an empty 161 LAG too), and per port the effective bridge port (a member uses its LAG's) with u / t from the drawn
@@ -396,8 +422,6 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
         fmt, kind = rng.choice(NO_PORTS)
         ifi = fresh(1, 30000)
         noise[ifi], types[ifi] = fmt.format(ifi), kind
-    if rng.random() < 0.3:
-        noise[fresh(1, 30000)] = "mystery"                   # no ifType row
     units = {}                                               # logical unit (53) -> the port or LAG it sits on
     for target in rng.sample(list(kept), rng.randint(0, min(2, len(kept)))):
         ifi = fresh(40001, 50000)

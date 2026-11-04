@@ -37,7 +37,7 @@ from drivers import DRIVERS
 from switchfix import (BASES, BP2IF, CATALYST_DISPLAY, CATALYST_PORTS, CATALYST_RECORDING, CATALYST_VMVLAN, ETHERNET, GIGABIT,
                        IF_ADMIN, IF_ALIAS, IF_NAME, IF_STACK, IF_TYPE, L2VLAN, L3IPVLAN, LAG, LOOPBACK, OTHER, PROP_MULTIPLEXOR,
                        PROP_VIRTUAL, PVID, RECORDING, ROW, TUNNEL, VLAN_EGRESS, VLAN_NAME, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_ODD,
-                       W_SAMPLE, edit_walks, random_multivendor_switch, random_procurve_switch, walk_rows)
+                       W_SAMPLE, edit_walks, random_multivendor_switch, random_procurve_switch, walk_answer, walk_rows)
 
 
 # Every driver except procurve selects by ifType, and so does a driver name the registry does not know (drivers.driver_for makes it
@@ -210,9 +210,36 @@ def test_iftype_excludes_virtual(name, iftype):
     W = _with_interface(name, iftype, stack={"30.1": "1"})
     for driver in NON_PROCURVE:
         assert poller.select_ports(*_tables(W), driver) == (["1", "2"], {}, {}), driver
+        assert _display(W, driver) == [(1, "Gi1/0/1", "", []), (2, "Gi1/0/2", "", [])], driver
+        if iftype is None:    # the write path does not guess what it is (it could be a LAG), see the next test
+            with pytest.raises(snmp.SnmpError, match=r"ifType fehlt für Fa0 \(ifIndex 30\)"):
+                snmpwrite.build_cfg(W, driver)
+            continue
         cfg, _ = snmpwrite.build_cfg(W, driver)
         assert list(cfg["ports"]) == ["Gi1/0/1", "Gi1/0/2"] and cfg["trunks"] == {}, driver
-        assert _display(W, driver) == [(1, "Gi1/0/1", "", []), (2, "Gi1/0/2", "", [])], driver
+
+
+@pytest.mark.parametrize("driver", NON_PROCURVE)
+@pytest.mark.parametrize("ifi, name", [("5001", "Po1"), ("10104", "Gi1/0/4"), ("1", "Vl1")])
+def test_build_cfg_refuses_an_interface_without_its_iftype_row(ifi, name, driver):
+    """An interface with an ifName row but no ifType row would drop out of the port selection without a word. If it is the LAG, its
+    members turn into ordinary writable ports, Gi1/0/4 even onto its own bridge port 4. The strict walk cannot see a row missing
+    (snmpbulkwalk exits 0 when the agent ends the table early), so the write path checks the column: every numeric ifIndex in ifName
+    needs its ifType row (ifXEntry AUGMENTS ifEntry, so a conformant agent always has one). The display keeps going without it (it
+    shows what it can), and the ProCurve rule never reads ifType."""
+    W = edit_walks(W_CATALYST, ifType={ifi: None})
+    if ifi == "5001":
+        assert poller.select_ports(*_tables(W), driver)[1] == {}    # what would happen: Po1 gone, its members unprotected
+    with pytest.raises(snmp.SnmpError, match=rf"^Interface-Tabelle unvollständig gelesen: ifType fehlt für {name} \(ifIndex {ifi}\)$"):
+        snmpwrite.build_cfg(W, driver)
+    poller._build(_full(W), driver)
+    snmpwrite.build_cfg(W, "procurve")
+
+
+def test_a_non_numeric_ifname_index_needs_no_iftype_row():
+    """Only numeric ifIndexes can be ports, so only they need an ifType row; a malformed ifName index alone stays ignored."""
+    W = edit_walks(W_CATALYST, ifName={"8.0": "ghost"})
+    assert snmpwrite.build_cfg(W, "cisco") == snmpwrite.build_cfg(W_CATALYST, "cisco")
 
 
 @pytest.mark.parametrize("name, iftype", [
@@ -341,6 +368,7 @@ def test_a_propvirtual_lag_name_without_a_physical_member_is_no_trunk(name, stac
     ("CHASSIS1", PROP_VIRTUAL),
     ("Trunk1", PROP_VIRTUAL),
     ("uplink-Po1", PROP_VIRTUAL),      # a LAG name has to start the name
+    ("Po\uff11", PROP_VIRTUAL),         # a FULLWIDTH DIGIT ONE is a Unicode digit, but no 0-9
     ("Vl10", PROP_MULTIPLEXOR),        # the same for type 54
     ("ge-0/0/1.0", PROP_MULTIPLEXOR),
     ("mux1", PROP_MULTIPLEXOR),
@@ -452,6 +480,9 @@ def test_build_cfg_agrees_with_poller_non_procurve_on_random_switches():
         assert raw["port2bp"] == truth["port2bp"] and raw["ifindex"] == truth["ifindex"], case
         assert {n: {"u": st["u"], "t": st["t"]} for n, st in cfg["ports"].items()} == truth["state"], case
         _assert_agrees_with_the_display(W, driver, cfg, raw)
+        lost = rng.choice([i for i in poller._tbl(W["ifName"], IF_NAME) if i.isdigit()])    # one ifType row goes missing
+        with pytest.raises(snmp.SnmpError, match=rf"ifType fehlt für .* \(ifIndex {lost}\)"):
+            snmpwrite.build_cfg(edit_walks(W, ifType={lost: None}), driver)
 
 
 # ── read_cfg: ifType only where it selects ────────────────────────────────────────────────────────────────────────────────────────
@@ -464,7 +495,7 @@ async def test_read_cfg_walks_iftype_strictly_only_for_drivers_that_select_by_it
 
     async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
         calls.append((oid, hex_values, strict))
-        return list(CATALYST_RECORDING[oid])
+        return walk_answer(CATALYST_RECORDING[oid], oid, hex_values)
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     driver = DRIVERS[name]
@@ -472,6 +503,8 @@ async def test_read_cfg_walks_iftype_strictly_only_for_drivers_that_select_by_it
 
     assert all(strict is True for _, _, strict in calls)
     assert len(calls) == len({oid for oid, _, _ in calls})    # no walk twice
+    hexed = {oid for oid, hx, _ in calls if hx}
+    assert hexed == {VLAN_EGRESS, VLAN_UNTAGGED, IF_ALIAS, VLAN_NAME}    # the PortLists and, since R18, the free text
     if name == "procurve":
         assert IF_TYPE not in {oid for oid, _, _ in calls}
         assert len(calls) == len(BASES)
@@ -553,20 +586,39 @@ async def test_poll_switch_hands_the_rows_driver_to_build(app_db, monkeypatch, s
     assert IF_TYPE in {c["oid"] for c in calls}
     assert sorted(c["oid"] for c in calls) == sorted(poller.O.values())
     assert not any(c["strict"] for c in calls)
-    assert {c["oid"]: c["hex"] for c in calls}[IF_TYPE] is False
+    assert {c["oid"]: c["hex"] for c in calls} == {poller.O[k]: k in poller.HEX for k in poller.O}
+    assert {c["oid"]: c["hex"] for c in calls}[IF_TYPE] is False and {c["oid"]: c["hex"] for c in calls}[IF_ALIAS] is False
     want = [("Vl1", "", []), ("Vl10", "", [])] if used == "procurve" else CATALYST_STORED
     assert await _stored_ports(app_db, sid) == want
 
 
+NO_IFTYPE = "ifType-Walk lieferte keine Zeile, ifName schon: ohne ifType lassen sich die Ports nicht bestimmen"
+
+
+async def test_a_switch_without_any_interface_rows_still_polls(app_db, monkeypatch):
+    """No ifType row is only an error next to ifName rows: an agent that shows no interfaces at all (neither walk has a row) polls
+    as before, with no ports."""
+    sid = await _add_switch(app_db, "cisco")
+    _agent(monkeypatch, {})
+    assert await poller.poll_switch(sid) == {"ok": True, "ports": 0, "macs": 0}
+
+
+@pytest.mark.parametrize("how", ["timeout", "no rows"])
 @pytest.mark.parametrize("driver", ["cisco", "procurve"])
-async def test_a_failed_iftype_walk_fails_the_poll_only_where_the_ports_depend_on_it(app_db, monkeypatch, driver):
+async def test_a_failed_iftype_walk_fails_the_poll_only_where_the_ports_depend_on_it(app_db, monkeypatch, driver, how):
     """Without ifType a non-ProCurve switch would have no ports at all, so the poll fails like on a failed ifName walk (error on the
-    switch, the ports of the last good poll stay). A ProCurve does not use ifType: the poll goes through as before."""
+    switch, the ports of the last good poll stay): when the walk fails, and when it ends without a single row while ifName has rows
+    (an empty or forbidden view: exit 0, no error to raise). A ProCurve does not use ifType: the poll goes through as before."""
     sid = await _add_switch(app_db, driver)
     await app_db.execute("INSERT INTO ports (switch_id, ifindex, name) VALUES (?, ?, ?)", (sid, 10101, "Gi1/0/1"))    # last good poll
     await app_db.commit()
     recording = CATALYST_RECORDING if driver == "cisco" else RECORDING
-    _agent(monkeypatch, recording, failing=IF_TYPE)
+    if how == "timeout":
+        _agent(monkeypatch, recording, failing=IF_TYPE)
+        error = "Zeitüberschreitung bei der SNMP-Abfrage"
+    else:
+        _agent(monkeypatch, {oid: rows for oid, rows in recording.items() if oid != IF_TYPE})
+        error = NO_IFTYPE
 
     result = await poller.poll_switch(sid)
 
@@ -575,8 +627,8 @@ async def test_a_failed_iftype_walk_fails_the_poll_only_where_the_ports_depend_o
     async with app_db.execute("SELECT name FROM ports WHERE switch_id = ? ORDER BY ifindex", (sid,)) as cur:
         names = [r["name"] for r in await cur.fetchall()]
     if driver == "cisco":
-        assert result == {"ok": False, "error": "Zeitüberschreitung bei der SNMP-Abfrage"}
-        assert status == (0, "Zeitüberschreitung bei der SNMP-Abfrage")
+        assert result == {"ok": False, "error": error}
+        assert status == (0, error)
         assert names == ["Gi1/0/1"]    # the ports of the last good poll stay
     else:
         assert result["ok"] is True and status == (1, None)
