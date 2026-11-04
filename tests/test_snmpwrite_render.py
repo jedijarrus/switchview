@@ -19,8 +19,8 @@ It runs on hand-checked cases (the expected bytes are worked out by hand in the 
 and reverted the way the app reverts them, and on random switches with random, partly invalid requests, where the test's own reading
 of the rules decides whether render_ops has to refuse.
 
-Nothing here talks to net-snmp, a network or a database; the fixtures come from tests/switchfix.py. Modules are imported flat
-(app/ is on sys.path via pytest.ini), exactly as the app imports them.
+Nothing here talks to net-snmp, a network or a database; the fixtures and the simulated agent (agent, store) come from
+tests/switchfix.py. Modules are imported flat (app/ is on sys.path via pytest.ini), exactly as the app imports them.
 """
 import copy
 import random
@@ -31,27 +31,16 @@ import pytest
 import changes
 import snmpwrite
 from drivers import DRIVERS, Driver
-from switchfix import (BP2IF, CATALYST_VMVLAN, ETHERNET, IF_ADMIN, IF_ALIAS, IF_NAME, IF_STACK, IF_TYPE, PVID, VLAN_EGRESS, VLAN_NAME,
-                       VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, edit_walks, hex_text, portlist_hex,
-                       random_multivendor_switch, random_procurve_switch, walk_answer, walk_rows)
+from switchfix import (BP2IF, CATALYST_VMVLAN, ETHERNET, IF_ADMIN, IF_ALIAS, IF_NAME, IF_STACK, IF_TYPE, PORTLISTS, PVID, VLAN_EGRESS,
+                       VLAN_NAME, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, agent, edit_walks, hex_text,
+                       portlist_hex, random_multivendor_switch, random_procurve_switch, store, walk_rows)
 
 PROCURVE, CISCO, GENERIC, ARISTA = DRIVERS["procurve"], DRIVERS["cisco"], DRIVERS["generic"], DRIVERS["arista"]
 NON_PROCURVE = [name for name in DRIVERS if name != "procurve"]
 
-# The simulated switch: the walk a written base OID lands in and the snmpset type of its object (dot1qPvid is VlanIndex =
-# Unsigned32, the PortLists and ifAlias are OCTET STRINGs written as hex (ifAlias since R22), ifAdminStatus and vmVlan INTEGERs).
-WRITABLE = {VLAN_EGRESS: ("vlanEgress", "x"), VLAN_UNTAGGED: ("vlanUntagged", "x"), PVID: ("pvid", "u"), IF_ADMIN: ("ifAdmin", "i"),
-            IF_ALIAS: ("ifAlias", "x"), VMVLAN: ("vmVlan", "i")}
-PORTLISTS = {VLAN_EGRESS: "egress", VLAN_UNTAGGED: "untagged"}
 # The documented varbind order: memberships first (egress, then untagged, by VLAN), then the PVIDs (by bridge port), then vmVlan,
 # ifAdminStatus and ifAlias (by ifIndex).
 ORDER = [VLAN_EGRESS, VLAN_UNTAGGED, PVID, VMVLAN, IF_ADMIN, IF_ALIAS]
-
-
-def agent(W: dict) -> dict:
-    """A fixture switch as the simulated agent holds it and read_cfg walks it: the free text (ifAlias, vlanName) as hex (R18), every
-    other row as it is."""
-    return {k: walk_answer(rows, WALK_BASES[k], True) for k, rows in W.items()}
 
 
 # W_SAMPLE (tests/switchfix.py), a ProCurve: port (ifIndex) -> bridge port: 1 -> 3, 2 -> 1, 3 -> 2, 6 -> 5, Trk1 (289) -> 7; ports
@@ -84,33 +73,6 @@ def _read(W: dict, selection: str = "procurve") -> tuple[dict, dict]:
 def _bits(data: bytes) -> set[int]:
     """Bridge ports in a PortList, bit math written out here: bridge port n is bit 0x80 >> (n - 1) % 8 of byte (n - 1) // 8."""
     return {i * 8 + j + 1 for i, byte in enumerate(data) for j in range(8) if byte & (0x80 >> j)}
-
-
-def _store(W: dict, ops) -> dict:
-    """The simulated agent: W after one SET of `ops`. Each varbind replaces the row of exactly its OID, in the format the walk prints:
-    hex pairs for a PortList and for ifAlias, numbers bare (or adds it: an agent has a PVID / ifAlias for every bridge port /
-    interface even where a fixture leaves the row out). Refused like on a switch: an object that is not one of the six writable ones,
-    a type that is not the object's, a PortList of a VLAN the switch does not have, a number or hex value that is none, an
-    ifAdminStatus other than up / down, an OID twice in one PDU."""
-    edits: dict[str, dict[str, str]] = {}
-    for oid, typ, value in ops:
-        base, _, index = oid.rpartition(".")
-        assert base in WRITABLE, f"write to an object the switch does not have: {oid}"
-        key, want = WRITABLE[base]
-        assert typ == want, (oid, typ)
-        assert index.isascii() and index.isdigit(), oid
-        assert index not in edits.setdefault(key, {}), f"{oid} twice in one PDU"
-        if typ == "x":
-            assert re.fullmatch(r"(?:[0-9A-F]{2})*", value), (oid, value)
-            if base in PORTLISTS:
-                assert value and oid in dict(W[key]), f"PortList of a VLAN the switch does not have: {oid}"
-            value = " ".join(value[i:i + 2] for i in range(0, len(value), 2))
-        else:
-            assert value.isascii() and value.isdigit(), (oid, value)
-        if base == IF_ADMIN:
-            assert value in ("1", "2"), (oid, value)
-        edits[key][index] = value
-    return edit_walks(W, **edits)
 
 
 def _vlans_change(cfg: dict, p: str, d: dict) -> bool:
@@ -220,7 +182,7 @@ def _render_and_store(W: dict, driver, desired: dict, selection: str = "procurve
     cfg, raw = _read(W, selection)
     ops, shown = snmpwrite.render_ops(driver, cfg, raw, desired)
     assert {op[0] for op in ops} <= _allowed_oids(cfg, raw, desired), "a varbind outside what the change may touch"
-    cfg2, raw2 = _read(_store(W, ops), selection)
+    cfg2, raw2 = _read(store(W, ops), selection)
     assert changes.verify_ports(cfg2, {p: {k: v for k, v in d.items() if k != "pvid"} for p, d in desired.items()}) == []
     for p, d in desired.items():
         if "pvid" in d:    # R21: what verify_ports cannot see, read back from raw
@@ -280,7 +242,7 @@ def test_untagged_from_none():
 
 def _port3_in_99() -> dict:
     """SAMPLE after test_untagged_from_none's change: port 3 untagged in VLAN 99, PVID 99 (it was 1)."""
-    return _store(SAMPLE, snmpwrite.render_ops(PROCURVE, *_read(SAMPLE), {"3": {"u": "99"}})[0])
+    return store(SAMPLE, snmpwrite.render_ops(PROCURVE, *_read(SAMPLE), {"3": {"u": "99"}})[0])
 
 
 def test_revert_to_no_untagged_vlan_restores_the_pvid():
@@ -291,7 +253,7 @@ def test_revert_to_no_untagged_vlan_restores_the_pvid():
     ops, shown = _render_and_store(W1, PROCURVE, {"3": {"u": None, "pvid": "1"}})
     assert ops == [eg("99", "82"), un("99", "80"), (f"{PVID}.2", "u", "1")]
     assert shown == ["Port 3: VLAN ungetaggt 99 → –", "Port 3: PVID 99 → 1"]
-    W2 = _store(W1, ops)
+    W2 = store(W1, ops)
     assert _read(W2)[1]["pvid"]["3"] == "1" and W2 == SAMPLE
 
 
@@ -302,7 +264,7 @@ def test_without_an_explicit_pvid_u_to_none_writes_no_pvid():
     ops, shown = _render_and_store(W1, PROCURVE, {"3": {"u": None}})
     assert ops == [eg("99", "82"), un("99", "80")]
     assert shown == ["Port 3: VLAN ungetaggt 99 → –"]
-    cfg2, raw2 = _read(_store(W1, ops))
+    cfg2, raw2 = _read(store(W1, ops))
     assert cfg2 == _read(SAMPLE)[0]
     assert raw2["pvid"]["3"] == "99" and raw2["unmanaged"] == {}
 
@@ -334,7 +296,7 @@ def test_an_explicit_pvid_goes_before_the_implicit_one():
 def test_an_explicit_pvid_alone_repairs_it():
     """A pvid on its own: port 3 (tagged-only, PVID 99 left over) gets PVID 1 back, nothing else is written. On a port without a
     dot1qPvid row (W_ODD's A99, bridge port 13) the row is written: "–" before."""
-    ops, shown = _render_and_store(_store(SAMPLE, [(f"{PVID}.2", "u", "99")]), PROCURVE, {"3": {"pvid": "1"}})
+    ops, shown = _render_and_store(store(SAMPLE, [(f"{PVID}.2", "u", "99")]), PROCURVE, {"3": {"pvid": "1"}})
     assert (ops, shown) == ([(f"{PVID}.2", "u", "1")], ["Port 3: PVID 99 → 1"])
     ops, shown = _render_and_store(ODD, PROCURVE, {"A99": {"pvid": "5"}})
     assert (ops, shown) == ([(f"{PVID}.13", "u", "5")], ["Port A99: PVID – → 5"])
@@ -472,10 +434,10 @@ def test_a_name_lands_as_its_utf8_bytes_and_goes_back_byte_exact():
     bytes exactly: the switch is the one of the start."""
     ops, _ = _render_and_store(SAMPLE, PROCURVE, {"1": {"name": "Büro"}})
     assert ops == [(f"{IF_ALIAS}.1", "x", "42C3BC726F")]
-    W1 = _store(SAMPLE, ops)
+    W1 = store(SAMPLE, ops)
     assert dict(W1["ifAlias"])[f"{IF_ALIAS}.1"] == "42 C3 BC 72 6F"
     ops2, shown2 = _render_and_store(W1, PROCURVE, {"1": {"name": "Platz-107"}})
-    assert shown2 == ['Port 1: Name "Büro" → "Platz-107"'] and _store(W1, ops2) == SAMPLE
+    assert shown2 == ['Port 1: Name "Büro" → "Platz-107"'] and store(W1, ops2) == SAMPLE
 
 
 def test_an_old_name_with_control_characters_is_shown_escaped():
@@ -802,12 +764,12 @@ def test_a_planned_change_and_its_revert_round_trip(monkeypatch, W, selection, d
     pvids = {p: raw0["pvid"][p] for p, d in plan["desired"].items()
              if "u" in d and p in raw0["pvid"] and driver.vlan_strategy == "qbridge"}
     ops, _ = _render_and_store(W, driver, plan["desired"], selection)
-    W1 = _store(W, ops)
+    W1 = store(W, ops)
     revert = changes.plan_ports("K.15.99.0001", inv, _read(W1, selection)[0], {"desired": plan["before"]})
     assert revert["blocked"] == [] and revert["desired"] == plan["before"]
     desired = {p: {**d, **({"pvid": pvids[p]} if p in pvids else {})} for p, d in revert["desired"].items()}
     ops2, _ = _render_and_store(W1, driver, desired, selection)
-    assert _store(W1, ops2) == W
+    assert store(W1, ops2) == W
 
 
 # ── property: random switches, random requests ─────────────────────────────────────────────────────────────────────────────────────

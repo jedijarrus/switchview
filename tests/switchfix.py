@@ -1,7 +1,7 @@
 """Walk fixtures shared by the SNMP tests (tests/test_snmpwrite_read.py, tests/test_port_discovery.py and the write-path tests
 after them): the base OIDs, hand-written walk rows of sample switches with what they mean, random switch generators that return
-their own truth, and small helpers to build and edit walk rows. W is always walk key -> [(oid, value), ...], as poller.poll_switch
-collects it and snmpwrite.build_cfg reads it.
+their own truth, small helpers to build and edit walk rows, and the simulated agent the write-path tests set and read back (agent,
+store). W is always walk key -> [(oid, value), ...], as poller.poll_switch collects it and snmpwrite.build_cfg reads it.
 
 A plain module, not a conftest: the tests import it by name (`from switchfix import ...`), which works because pytest puts tests/
 on sys.path for the test modules there (default prepend import mode); pytest.ini forbids a root-level conftest.py. Nothing here
@@ -10,6 +10,7 @@ under test.
 """
 import copy
 import random
+import re
 
 HOST = "203.0.113.21"
 
@@ -504,3 +505,45 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
         "state": state,
     }
     return W, truth
+
+
+# ── The simulated agent: the oracle of the write-path tests ──────────────────────────────────────────────────────────────────────────
+# A switch held the way read_cfg walks it (agent), which takes one SET of rendered varbinds (store) and is then read back. WRITABLE:
+# the walk a written base OID lands in and the snmpset type of its object (dot1qPvid is VlanIndex = Unsigned32, the PortLists and
+# ifAlias are OCTET STRINGs written as hex (ifAlias since R22), ifAdminStatus and vmVlan INTEGERs).
+WRITABLE = {VLAN_EGRESS: ("vlanEgress", "x"), VLAN_UNTAGGED: ("vlanUntagged", "x"), PVID: ("pvid", "u"), IF_ADMIN: ("ifAdmin", "i"),
+            IF_ALIAS: ("ifAlias", "x"), VMVLAN: ("vmVlan", "i")}
+PORTLISTS = {VLAN_EGRESS: "egress", VLAN_UNTAGGED: "untagged"}
+
+
+def agent(W: dict) -> dict:
+    """A fixture switch as the simulated agent holds it and read_cfg walks it: the free text (ifAlias, vlanName) as hex (R18), every
+    other row as it is."""
+    return {k: walk_answer(rows, WALK_BASES[k], True) for k, rows in W.items()}
+
+
+def store(W: dict, ops) -> dict:
+    """The simulated agent: W after one SET of `ops`. Each varbind replaces the row of exactly its OID, in the format the walk prints:
+    hex pairs for a PortList and for ifAlias, numbers bare (or adds it: an agent has a PVID / ifAlias for every bridge port /
+    interface even where a fixture leaves the row out). Refused like on a switch: an object that is not one of the six writable ones,
+    a type that is not the object's, a PortList of a VLAN the switch does not have, a number or hex value that is none, an
+    ifAdminStatus other than up / down, an OID twice in one PDU."""
+    edits: dict[str, dict[str, str]] = {}
+    for oid, typ, value in ops:
+        base, _, index = oid.rpartition(".")
+        assert base in WRITABLE, f"write to an object the switch does not have: {oid}"
+        key, want = WRITABLE[base]
+        assert typ == want, (oid, typ)
+        assert index.isascii() and index.isdigit(), oid
+        assert index not in edits.setdefault(key, {}), f"{oid} twice in one PDU"
+        if typ == "x":
+            assert re.fullmatch(r"(?:[0-9A-F]{2})*", value), (oid, value)
+            if base in PORTLISTS:
+                assert value and oid in dict(W[key]), f"PortList of a VLAN the switch does not have: {oid}"
+            value = " ".join(value[i:i + 2] for i in range(0, len(value), 2))
+        else:
+            assert value.isascii() and value.isdigit(), (oid, value)
+        if base == IF_ADMIN:
+            assert value in ("1", "2"), (oid, value)
+        edits[key][index] = value
+    return edit_walks(W, **edits)
