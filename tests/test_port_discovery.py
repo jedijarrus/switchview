@@ -20,7 +20,7 @@ which trunks (LAGs) they form. The display poller (poller._build, run for every 
 
 Nothing here touches net-snmp, the network or a switch: snmp.walk is faked, and the poll_switch tests run against an in-memory
 database built from db.SCHEMA. Modules are imported flat (app/ is on sys.path via pytest.ini), exactly as the app imports them. The
-walk-row helpers and the ProCurve fixtures come from tests/test_snmpwrite_read.py, imported as t7.
+walk rows, fixtures and generators come from tests/switchfix.py, shared with the other SNMP tests.
 """
 import json
 import random
@@ -34,18 +34,11 @@ import poller
 import snmp
 import snmpwrite
 from drivers import DRIVERS
+from switchfix import (BASES, BP2IF, CATALYST_DISPLAY, CATALYST_PORTS, CATALYST_RECORDING, CATALYST_VMVLAN, ETHERNET, GIGABIT,
+                       IF_ADMIN, IF_ALIAS, IF_NAME, IF_STACK, IF_TYPE, L2VLAN, L3IPVLAN, LAG, LOOPBACK, OTHER, PROP_MULTIPLEXOR,
+                       PROP_VIRTUAL, PVID, RECORDING, ROW, TUNNEL, VLAN_EGRESS, VLAN_NAME, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_ODD,
+                       W_SAMPLE, edit_walks, random_multivendor_switch, random_procurve_switch, walk_rows)
 
-import test_snmpwrite_read as t7    # the Task 7 fixtures and walk-row helpers (a test module, imported like any other)
-
-IF_TYPE = t7.IF_TYPE    # ifType, .<ifIndex>; snmp.walk prints the IANAifType enum as a number (-Oe)
-IF_NAME, IF_ALIAS, IF_ADMIN, BP2IF, IF_STACK = t7.IF_NAME, t7.IF_ALIAS, t7.IF_ADMIN, t7.BP2IF, t7.IF_STACK
-VLAN_NAME, VLAN_EGRESS, VLAN_UNTAGGED, PVID, VMVLAN = t7.VLAN_NAME, t7.VLAN_EGRESS, t7.VLAN_UNTAGGED, t7.PVID, t7.VMVLAN
-NAC = t7.NAC
-_rows = t7._rows
-
-# IANAifType values. Ports: physical (6, 117) and LAG (161). Never ports: everything else, e.g. these.
-ETHERNET, GIGABIT, LAG = "6", "117", "161"    # ethernetCsmacd, gigabitEthernet (deprecated, still in use), ieee8023adLag
-OTHER, LOOPBACK, PROP_VIRTUAL, PROP_MULTIPLEXOR, TUNNEL, L2VLAN, L3IPVLAN = "1", "24", "53", "54", "131", "135", "136"
 
 # Every driver except procurve selects by ifType, and so does a driver name the registry does not know (drivers.driver_for makes it
 # generic; poll_switch passes the row's name through as it is).
@@ -84,60 +77,6 @@ def _legacy_selection(ifname: dict, ifstack: dict) -> tuple[list, dict, dict]:
     return ports, member_of, members
 
 
-# ── A classic Catalyst (IOS 12.2 / 15.x) ─────────────────────────────────────────────────────────────────────────────────────────
-# Ports from ifIndex 10101 on, Port-channels from 5001, the SVIs at their VLAN ID. Like on a ProCurve, members of a LAG have no
-# bridge port of their own, except Gi1/0/4 here: it keeps one (bp 4, untagged in VLAN 20, PVID 20) that must not count.
-#   interface (ifIndex)   ifType           bridge port   VLANs                                 ifAdminStatus   ifAlias
-#   Vl1 (1), Vl10 (10)    53 propVirtual   -             (SVIs: no ports)                      up
-#   Po1 (5001)            161 LAG          56            untagged 1, tagged 10 + 20            up              "uplink-core"
-#   Gi1/0/1 (10101)       6                1             untagged 10                           up              "Drucker"
-#   Gi1/0/2 (10102)       6                2             untagged 1, tagged 20                 down
-#   Gi1/0/3 (10103)       6                -             as Po1 (member)                       up
-#   Gi1/0/4 (10104)       6                4 (its own)   as Po1 (member)                       up
-#   Nu0 (14501)           1 other          -             (Null0: no port)                      up
-#   Lo0 (20567)           24 loopback      -             (no port)                             up
-# PortList bits: bp 1 = 0x80, bp 2 = 0x40, bp 4 = 0x10 in byte 0; bp 56 = 0x01 in byte 6.
-W_CATALYST = {
-    "ifName": _rows(IF_NAME, {"1": "Vl1", "10": "Vl10", "5001": "Po1", "10101": "Gi1/0/1", "10102": "Gi1/0/2", "10103": "Gi1/0/3",
-                              "10104": "Gi1/0/4", "14501": "Nu0", "20567": "Lo0"}),
-    "ifType": _rows(IF_TYPE, {"1": PROP_VIRTUAL, "10": PROP_VIRTUAL, "5001": LAG, "10101": ETHERNET, "10102": ETHERNET,
-                              "10103": ETHERNET, "10104": ETHERNET, "14501": OTHER, "20567": LOOPBACK}),
-    "ifAlias": _rows(IF_ALIAS, {"1": "", "10": "Clients", "5001": "uplink-core", "10101": "Drucker", "10102": "", "10103": "",
-                                "10104": "", "14501": "", "20567": ""}),
-    "ifAdmin": _rows(IF_ADMIN, {"1": "1", "10": "1", "5001": "1", "10101": "1", "10102": "2", "10103": "1", "10104": "1", "14501": "1",
-                                "20567": "1"}),
-    "bp2if": _rows(BP2IF, {"1": "10101", "2": "10102", "4": "10104", "56": "5001"}),
-    "vlanName": _rows(VLAN_NAME, {"1": "default", "10": "Daten", "20": "Voice"}),
-    "vlanEgress": _rows(VLAN_EGRESS, {
-        "1": "40 00 00 00 00 00 01 00",     # bp 2 (Gi1/0/2), bp 56 (Po1)
-        "10": "80 00 00 00 00 00 01 00",    # bp 1 (Gi1/0/1), bp 56
-        "20": "50 00 00 00 00 00 01 00",    # bp 2, bp 4 (Gi1/0/4's own), bp 56
-    }),
-    "vlanUntagged": _rows(VLAN_UNTAGGED, {
-        "1": "40 00 00 00 00 00 01 00",     # Gi1/0/2, Po1
-        "10": "80 00 00 00 00 00 00 00",    # Gi1/0/1
-        "20": "10 00 00 00 00 00 00 00",    # bp 4 only
-    }),
-    "pvid": _rows(PVID, {"1": "10", "2": "1", "4": "20", "56": "1"}),
-    "ifStack": _rows(IF_STACK, {"0.1": "1", "0.10": "1", "0.5001": "1", "0.10101": "1", "0.10102": "1", "0.14501": "1", "0.20567": "1",
-                                "1.0": "1", "10.0": "1", "5001.10103": "1", "5001.10104": "1", "10101.0": "1", "10102.0": "1",
-                                "10103.0": "1", "10104.0": "1", "14501.0": "1", "20567.0": "1"}),
-}
-CATALYST_PORTS = {    # in ifIndex order
-    "Po1": {"u": "1", "t": ["10", "20"], "name": "uplink-core", "en": True, **NAC, "poe": None},
-    "Gi1/0/1": {"u": "10", "t": [], "name": "Drucker", "en": True, **NAC, "poe": None},
-    "Gi1/0/2": {"u": "1", "t": ["20"], "name": "", "en": False, **NAC, "poe": None},
-    "Gi1/0/3": {"u": "1", "t": ["10", "20"], "name": "", "en": True, **NAC, "poe": None},    # a member: Po1's VLANs
-    "Gi1/0/4": {"u": "1", "t": ["10", "20"], "name": "", "en": True, **NAC, "poe": None},    # Po1's, not those of its own bp 4
-}
-# What the display poller stores per port: (ifIndex, name, trunk, members)
-CATALYST_DISPLAY = [(5001, "Po1", "Po1", ["Gi1/0/3", "Gi1/0/4"]), (10101, "Gi1/0/1", "", []), (10102, "Gi1/0/2", "", []),
-                    (10103, "Gi1/0/3", "Po1", []), (10104, "Gi1/0/4", "Po1", [])]
-# vmVlan for the cisco driver: Gi1/0/1 and Gi1/0/2 are access ports, Po1 and its members are no access ports (no row)
-CATALYST_VMVLAN = _rows(VMVLAN, {"10101": "10", "10102": "1"})
-CATALYST_RECORDING = {t7.WALK_BASES[k]: rows for k, rows in W_CATALYST.items()} | {VMVLAN: CATALYST_VMVLAN}    # by base OID
-
-
 def _display(W: dict, *driver: str) -> list[tuple]:
     return [(p["if"], p["name"], p["trunk"], p["members"]) for p in poller._build(_full(W), *driver)["ports"]]
 
@@ -152,14 +91,14 @@ def test_iftype_is_a_poller_walk():
 def _fixtures_for_procurve():
     """(name, W): the ProCurve fixtures of Task 7 (sample, odd agent rows, 400 random switches), and other vendors' layouts (the
     Catalyst, 100 random multivendor switches), which a switch configured as procurve must read exactly as before as well."""
-    yield "sample", t7.W_SAMPLE
-    yield "odd rows", t7.W_ODD
+    yield "sample", W_SAMPLE
+    yield "odd rows", W_ODD
     yield "catalyst", W_CATALYST
     rng = random.Random(20261104)
     for case in range(400):
-        yield f"random procurve {case}", t7._random_switch(rng)[0]
+        yield f"random procurve {case}", random_procurve_switch(rng)[0]
     for case in range(100):
-        yield f"random multivendor {case}", _random_multivendor_switch(rng)[0]
+        yield f"random multivendor {case}", random_multivendor_switch(rng)[0]
 
 
 def test_procurve_selection_unchanged():
@@ -180,10 +119,10 @@ def test_procurve_selection_unchanged():
 def test_procurve_display_keeps_its_trunk_fields():
     """What the poller stores per ProCurve port: the default driver is procurve; every Trk... port is its own trunk, an empty one
     too (Trk3), and a member names its trunk."""
-    assert _display(t7.W_SAMPLE) == _display(t7.W_SAMPLE, "procurve") == [
+    assert _display(W_SAMPLE) == _display(W_SAMPLE, "procurve") == [
         (1, "1", "", []), (2, "2", "", []), (3, "3", "", []), (4, "4", "Trk1", []), (5, "5", "Trk1", []), (6, "6", "", []),
         (289, "Trk1", "Trk1", ["4", "5"])]
-    assert _display(t7.W_ODD) == [
+    assert _display(W_ODD) == [
         (1, "A1", "", []), (2, "A2", "Trk2", []), (3, "A3", "", []), (4, "A4", "Trk2", []), (290, "Trk2", "Trk2", ["A2", "A4"]),
         (291, "Trk3", "Trk3", []), (999, "A99", "", [])]
 
@@ -191,18 +130,18 @@ def test_procurve_display_keeps_its_trunk_fields():
 def test_procurve_display_and_cfg_do_not_depend_on_iftype_rows():
     """A ProCurve's ifType rows (now walked by every poll) change neither the display nor build_cfg, whatever they say; and a W
     without the ifType walk at all (as callers built it before) still works for procurve."""
-    W = {**t7.W_SAMPLE, "ifType": _rows(IF_TYPE, {"1": LAG, "2": PROP_VIRTUAL, "289": ETHERNET, "1001": ETHERNET, "4097": LAG})}
-    assert poller._build(_full(W)) == poller._build(_full(t7.W_SAMPLE))
-    assert snmpwrite.build_cfg(W) == snmpwrite.build_cfg(t7.W_SAMPLE)
-    without = {k: rows for k, rows in _full(t7.W_SAMPLE).items() if k != "ifType"}
-    assert poller._build(without) == poller._build(without, "procurve") == poller._build(_full(t7.W_SAMPLE))
+    W = {**W_SAMPLE, "ifType": walk_rows(IF_TYPE, {"1": LAG, "2": PROP_VIRTUAL, "289": ETHERNET, "1001": ETHERNET, "4097": LAG})}
+    assert poller._build(_full(W)) == poller._build(_full(W_SAMPLE))
+    assert snmpwrite.build_cfg(W) == snmpwrite.build_cfg(W_SAMPLE)
+    without = {k: rows for k, rows in _full(W_SAMPLE).items() if k != "ifType"}
+    assert poller._build(without) == poller._build(without, "procurve") == poller._build(_full(W_SAMPLE))
 
 
 @pytest.mark.parametrize("driver", ["procurve", "cisco"])
 def test_ports_come_in_ifindex_order_whatever_the_row_order(driver):
     """The ports are sorted by ifIndex as a number, not taken in the order the ifName / ifType rows came (reversed here; as strings
     "10101" would also sort before "5001"), for the display and for build_cfg alike. (Trunk members keep the ifStack order.)"""
-    W = W_CATALYST if driver == "cisco" else t7.W_SAMPLE
+    W = W_CATALYST if driver == "cisco" else W_SAMPLE
     backwards = {k: list(reversed(rows)) if k in ("ifName", "ifType") else rows for k, rows in W.items()}
     assert poller.select_ports(*_tables(backwards), driver)[0] == poller.select_ports(*_tables(W), driver)[0]
     assert _display(backwards, driver) == _display(W, driver)
@@ -241,16 +180,16 @@ def _with_interface(name: str, iftype: str | None, stack: dict | None = None) ->
     """A small switch: Gi1/0/1 and Gi1/0/2 (ifIndex 1, 2; bridge ports 1, 2; untagged in VLAN 1), plus one more interface at ifIndex 30,
     well below the ProCurve ceiling, with the given name and ifType (None: no ifType row) and, if given, ifStack rows."""
     return {
-        "ifName": _rows(IF_NAME, {"1": "Gi1/0/1", "2": "Gi1/0/2", "30": name}),
-        "ifType": _rows(IF_TYPE, {"1": ETHERNET, "2": ETHERNET, **({"30": iftype} if iftype else {})}),
-        "ifAlias": _rows(IF_ALIAS, {}),
-        "ifAdmin": _rows(IF_ADMIN, {"1": "1", "2": "1", "30": "1"}),
-        "bp2if": _rows(BP2IF, {"1": "1", "2": "2"}),
-        "vlanName": _rows(VLAN_NAME, {"1": "default"}),
-        "vlanEgress": _rows(VLAN_EGRESS, {"1": "C0"}),
-        "vlanUntagged": _rows(VLAN_UNTAGGED, {"1": "C0"}),
-        "pvid": _rows(PVID, {"1": "1", "2": "1"}),
-        "ifStack": _rows(IF_STACK, stack or {}),
+        "ifName": walk_rows(IF_NAME, {"1": "Gi1/0/1", "2": "Gi1/0/2", "30": name}),
+        "ifType": walk_rows(IF_TYPE, {"1": ETHERNET, "2": ETHERNET, **({"30": iftype} if iftype else {})}),
+        "ifAlias": walk_rows(IF_ALIAS, {}),
+        "ifAdmin": walk_rows(IF_ADMIN, {"1": "1", "2": "1", "30": "1"}),
+        "bp2if": walk_rows(BP2IF, {"1": "1", "2": "2"}),
+        "vlanName": walk_rows(VLAN_NAME, {"1": "default"}),
+        "vlanEgress": walk_rows(VLAN_EGRESS, {"1": "C0"}),
+        "vlanUntagged": walk_rows(VLAN_UNTAGGED, {"1": "C0"}),
+        "pvid": walk_rows(PVID, {"1": "1", "2": "1"}),
+        "ifStack": walk_rows(IF_STACK, stack or {}),
     }
 
 
@@ -295,7 +234,7 @@ def test_lag_members(lag):
     """An ifType-161 interface is a trunk under any vendor's name, and its members are the interfaces stacked below it. build_cfg
     gives each member the LAG's bridge port (56) for its VLANs and PVID, never the one it may own (Gi1/0/4: bp 4, untagged in VLAN
     20, PVID 20). The display names the LAG as its own trunk with its members, and each member's trunk is the LAG."""
-    W = t7._edit(W_CATALYST, ifName={"5001": lag})
+    W = edit_walks(W_CATALYST, ifName={"5001": lag})
     _, member_of, members = poller.select_ports(*_tables(W), "cisco")
     assert member_of == {"10103": "5001", "10104": "5001"}
     assert members == {"5001": ["10103", "10104"]}
@@ -319,9 +258,9 @@ def test_an_empty_lag_is_a_trunk_and_other_stacking_makes_no_members():
     an empty Trk is a trunk by its name). Interfaces
     stacked below something that is no LAG (Gi1/0/1 below the subinterface Gi1/0/1.100, Po1 below the logical unit Po1.0) are no
     members: only what sits directly below a LAG is."""
-    W = t7._edit(W_CATALYST, ifName={"5002": "Po2", "10105": "Gi1/0/1.100", "10106": "Po1.0"},
-                 ifType={"5002": LAG, "10105": L2VLAN, "10106": PROP_VIRTUAL}, ifAdmin={"5002": "1", "10105": "1", "10106": "1"},
-                 ifStack={"0.5002": "1", "5002.0": "1", "0.10105": "1", "10105.10101": "1", "0.10106": "1", "10106.5001": "1"})
+    W = edit_walks(W_CATALYST, ifName={"5002": "Po2", "10105": "Gi1/0/1.100", "10106": "Po1.0"},
+                   ifType={"5002": LAG, "10105": L2VLAN, "10106": PROP_VIRTUAL}, ifAdmin={"5002": "1", "10105": "1", "10106": "1"},
+                   ifStack={"0.5002": "1", "5002.0": "1", "0.10105": "1", "10105.10101": "1", "0.10106": "1", "10106.5001": "1"})
     ports, member_of, members = poller.select_ports(*_tables(W), "cisco")
     assert ports == ["5001", "5002", "10101", "10102", "10103", "10104"]
     assert member_of == {"10103": "5001", "10104": "5001"}
@@ -350,7 +289,7 @@ def test_a_propvirtual_port_channel_with_physical_members_is_a_trunk(lag, kind):
     """The Catalyst with its Po1 reported as ifType 53 or 54, under each LAG name in any case: a trunk exactly as with 161. Its
     members are protected (member_of / members, the display names the LAG as their trunk), and build_cfg gives them the LAG's bridge
     port 56 for VLANs and PVID, never Gi1/0/4's own bridge port 4."""
-    W = t7._edit(W_CATALYST, ifName={"5001": lag}, ifType={"5001": kind})
+    W = edit_walks(W_CATALYST, ifName={"5001": lag}, ifType={"5001": kind})
     ports, member_of, members = poller.select_ports(*_tables(W), "cisco")
     assert ports == ["5001", "10101", "10102", "10103", "10104"]
     assert member_of == {"10103": "5001", "10104": "5001"} and members == {"5001": ["10103", "10104"]}
@@ -361,13 +300,13 @@ def test_a_propvirtual_port_channel_with_physical_members_is_a_trunk(lag, kind):
     assert cfg["ports"] == {(lag if n == "Po1" else n): st for n, st in CATALYST_PORTS.items()}
     assert _display(W, "cisco") == [(5001, lag, lag, ["Gi1/0/3", "Gi1/0/4"]), *CATALYST_DISPLAY[1:3], (10103, "Gi1/0/3", lag, []),
                                     (10104, "Gi1/0/4", lag, [])]
-    _assert_same_switch_as_the_poller(W, "cisco", cfg, raw)
+    _assert_agrees_with_the_display(W, "cisco", cfg, raw)
 
 
 def _catalyst_with(name: str, iftype: str, stack: dict, **edits) -> dict:
     """The Catalyst plus one more interface at ifIndex 30 (admin up) with the given name, ifType and ifStack rows."""
-    return t7._edit(W_CATALYST, ifName={"30": name, **edits.pop("ifName", {})}, ifType={"30": iftype, **edits.pop("ifType", {})},
-                    ifAdmin={"30": "1"}, ifStack=stack, **edits)
+    return edit_walks(W_CATALYST, ifName={"30": name, **edits.pop("ifName", {})}, ifType={"30": iftype, **edits.pop("ifType", {})},
+                      ifAdmin={"30": "1"}, ifStack=stack, **edits)
 
 
 @pytest.mark.parametrize("kind", [PROP_VIRTUAL, PROP_MULTIPLEXOR])
@@ -425,22 +364,22 @@ def test_a_junos_logical_unit_is_no_trunk_and_its_port_stays_a_port():
     it. ge-0/0/0 stays an ordinary port with its own bridge port and VLANs; ge-0/0/1 and ge-0/0/2 are members of ae0 and use its
     bridge port."""
     W = {
-        "ifName": _rows(IF_NAME, {"513": "ge-0/0/0", "514": "ge-0/0/1", "515": "ge-0/0/2", "530": "ge-0/0/0.0", "600": "ae0",
-                                  "601": "ae0.0"}),
-        "ifType": _rows(IF_TYPE, {"513": ETHERNET, "514": ETHERNET, "515": ETHERNET, "530": PROP_VIRTUAL, "600": LAG,
-                                  "601": PROP_VIRTUAL}),
-        "ifAlias": _rows(IF_ALIAS, {"513": "Drucker", "600": "uplink"}),
-        "ifAdmin": _rows(IF_ADMIN, {"513": "1", "514": "1", "515": "1", "530": "1", "600": "1", "601": "1"}),
-        "bp2if": _rows(BP2IF, {"1": "513", "2": "600"}),
-        "vlanName": _rows(VLAN_NAME, {"10": "Daten", "20": "Voice"}),
-        "vlanEgress": _rows(VLAN_EGRESS, {"10": "C0", "20": "40"}),      # bp 1 (ge-0/0/0) and bp 2 (ae0) in VLAN 10, bp 2 in VLAN 20
-        "vlanUntagged": _rows(VLAN_UNTAGGED, {"10": "C0", "20": "00"}),
-        "pvid": _rows(PVID, {"1": "10", "2": "10"}),
-        "ifStack": _rows(IF_STACK, {"0.530": "1", "530.513": "1", "513.0": "1", "0.601": "1", "601.600": "1", "600.514": "1",
-                                    "600.515": "1", "514.0": "1", "515.0": "1"}),
+        "ifName": walk_rows(IF_NAME, {"513": "ge-0/0/0", "514": "ge-0/0/1", "515": "ge-0/0/2", "530": "ge-0/0/0.0", "600": "ae0",
+                                      "601": "ae0.0"}),
+        "ifType": walk_rows(IF_TYPE, {"513": ETHERNET, "514": ETHERNET, "515": ETHERNET, "530": PROP_VIRTUAL, "600": LAG,
+                                      "601": PROP_VIRTUAL}),
+        "ifAlias": walk_rows(IF_ALIAS, {"513": "Drucker", "600": "uplink"}),
+        "ifAdmin": walk_rows(IF_ADMIN, {"513": "1", "514": "1", "515": "1", "530": "1", "600": "1", "601": "1"}),
+        "bp2if": walk_rows(BP2IF, {"1": "513", "2": "600"}),
+        "vlanName": walk_rows(VLAN_NAME, {"10": "Daten", "20": "Voice"}),
+        "vlanEgress": walk_rows(VLAN_EGRESS, {"10": "C0", "20": "40"}),      # bp 1 (ge-0/0/0) and bp 2 (ae0) in VLAN 10, bp 2 in VLAN 20
+        "vlanUntagged": walk_rows(VLAN_UNTAGGED, {"10": "C0", "20": "00"}),
+        "pvid": walk_rows(PVID, {"1": "10", "2": "10"}),
+        "ifStack": walk_rows(IF_STACK, {"0.530": "1", "530.513": "1", "513.0": "1", "0.601": "1", "601.600": "1", "600.514": "1",
+                                        "600.515": "1", "514.0": "1", "515.0": "1"}),
     }
     assert poller.select_ports(*_tables(W), "juniper") == (["513", "514", "515", "600"], {"514": "600", "515": "600"},
-                                                            {"600": ["514", "515"]})
+                                                           {"600": ["514", "515"]})
     cfg, raw = snmpwrite.build_cfg(W, "juniper")
     assert cfg["trunks"] == {"ae0": ["ge-0/0/1", "ge-0/0/2"]}
     assert raw["port2bp"] == {"ge-0/0/0": 1, "ge-0/0/1": 2, "ge-0/0/2": 2, "ae0": 2}
@@ -448,7 +387,7 @@ def test_a_junos_logical_unit_is_no_trunk_and_its_port_stays_a_port():
         "ge-0/0/0": ("10", [], "Drucker"), "ge-0/0/1": ("10", ["20"], ""), "ge-0/0/2": ("10", ["20"], ""), "ae0": ("10", ["20"], "uplink")}
     assert _display(W, "juniper") == [(513, "ge-0/0/0", "", []), (514, "ge-0/0/1", "ae0", []), (515, "ge-0/0/2", "ae0", []),
                                       (600, "ae0", "ae0", ["ge-0/0/1", "ge-0/0/2"])]
-    _assert_same_switch_as_the_poller(W, "juniper", cfg, raw)
+    _assert_agrees_with_the_display(W, "juniper", cfg, raw)
 
 
 @pytest.mark.parametrize("driver", ["cisco", "juniper"])
@@ -463,7 +402,7 @@ def test_without_iftype_rows_a_non_procurve_switch_is_a_caller_bug(driver):
 
 
 # ── display and write path agree, also for other vendors ──────────────────────────────────────────────────────────────────────────
-def _assert_same_switch_as_the_poller(W: dict, driver: str, cfg: dict, raw: dict):
+def _assert_agrees_with_the_display(W: dict, driver: str, cfg: dict, raw: dict):
     """The oracle of Task 7 for any non-ProCurve driver: poller._build on the very same rows describes every port alike. Q-BRIDGE
     reads only (the poller knows nothing of vmVlan). A trunk is driver-neutral here: the display names a LAG port as its own trunk,
     and exactly those ports are the keys of cfg["trunks"], an empty LAG included."""
@@ -497,143 +436,7 @@ def _assert_same_switch_as_the_poller(W: dict, driver: str, cfg: dict, raw: dict
 @pytest.mark.parametrize("driver", NON_PROCURVE)
 def test_build_cfg_agrees_with_poller_non_procurve(driver):
     cfg, raw = snmpwrite.build_cfg(W_CATALYST, driver)
-    _assert_same_switch_as_the_poller(W_CATALYST, driver, cfg, raw)
-
-
-# Port and LAG names per vendor, and interfaces that are never ports (name pattern, ifType)
-STYLES = [("Gi1/0/{}", "Po{}"), ("ge-0/0/{}", "ae{}"), ("1/1/{}", "lag{}"), ("GigabitEthernet1/0/{}", "Bridge-Aggregation{}"),
-          ("ether{}", "bond{}")]
-NO_PORTS = [("Vl{}", PROP_VIRTUAL), ("Nu{}", OTHER), ("Lo{}", LOOPBACK), ("vlan{}", L3IPVLAN), ("Tunnel{}", TUNNEL), ("unit{}", L2VLAN),
-            ("StackPort{}", PROP_VIRTUAL)]
-
-
-def _random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
-    """A random, well-formed switch of another vendor: W in walk order (ifType included) and the generator's own truth.
-
-    Its physical ports (ifType 6 or 117) are numbered from wherever the vendor starts (1, 1001, 10101 or 49153). It has up to two
-    LAGs with members stacked below them, now and then none. A LAG is mostly of type 161; now and then it is of type 53 or 54 as on
-    classic IOS (only for the LAG names of R17, in any case, not "bond"), and then it is a trunk only with a member, otherwise no
-    port at all.
-    There are interfaces that are no ports, under any name and at any ifIndex (VLAN interfaces, loopback, null, tunnel,
-    subinterface, stack port, one without an ifType row), some of them stacked over a port or a LAG, and logical units of type 53
-    named after a port or LAG ("Po1.0", "ge-0/0/1.0") stacked on it. Now and then there is a non-numeric index (even with a
-    physical type) and an ifType row of an interface without ifName. Bridge ports and VLAN bits as in the ProCurve generator of
-    Task 7: members and dropped interfaces may own a bridge port with arbitrary bits, which must not count.
-
-    The truth comes from what the generator drew, not from select_ports: the ports in ifIndex order, every LAG that is a trunk with
-    its members (an empty 161 LAG too), and per port the effective bridge port (a member uses its LAG's) with u / t from the drawn
-    VLAN sets."""
-    taken: set[int] = set()
-
-    def fresh(low: int, high: int) -> str:
-        while True:
-            i = rng.randint(low, high)
-            if i not in taken:
-                taken.add(i)
-                return str(i)
-
-    port_fmt, lag_fmt = rng.choice(STYLES)
-    first = rng.choice((1, 1001, 10101, 49153))
-    phys = [fresh(first, first + 300) for _ in range(rng.randint(1, 10))]
-    names = {ifi: port_fmt.format(k + 1) for k, ifi in enumerate(phys)}
-    types = {ifi: rng.choice((ETHERNET, ETHERNET, GIGABIT)) for ifi in phys}
-    free, drawn = list(phys), {}                             # LAG ifIndex -> member ifIndexes (all physical)
-    for n in range(rng.randint(0, 2)):
-        ifi = fresh(1, 6000)
-        drawn[ifi] = rng.sample(free, rng.randint(0, min(3, len(free))))
-        free = [p for p in free if p not in drawn[ifi]]
-        names[ifi] = rng.choice((str, str.lower, str.upper))(lag_fmt.format(n + 1))    # a LAG name counts in any case
-        types[ifi] = rng.choice((PROP_VIRTUAL, PROP_MULTIPLEXOR)) if lag_fmt != "bond{}" and rng.random() < 0.35 else LAG
-    lags = {lag: mem for lag, mem in drawn.items() if types[lag] == LAG or mem}    # the trunks: a 53 / 54 LAG needs a member
-    kept = {i: name for i, name in names.items() if i in phys or i in lags}       # ifIndex -> port name
-    dropped = {i: name for i, name in names.items() if i not in kept}             # a 53 / 54 LAG without members: no port
-    noise = {}
-    for _ in range(rng.randint(0, 4)):
-        fmt, kind = rng.choice(NO_PORTS)
-        ifi = fresh(1, 30000)
-        noise[ifi], types[ifi] = fmt.format(ifi), kind
-    if rng.random() < 0.3:
-        noise[fresh(1, 30000)] = "mystery"                   # no ifType row
-    units = {}                                               # logical unit (53) -> the port or LAG it sits on
-    for target in rng.sample(list(kept), rng.randint(0, min(2, len(kept)))):
-        ifi = fresh(40001, 50000)
-        units[ifi], names[ifi], types[ifi] = target, f"{kept[target]}.0", PROP_VIRTUAL
-        dropped[ifi] = names[ifi]
-    dropped.update(noise)
-    names.update(noise)
-    member_of = {m: lag for lag, mem in lags.items() for m in mem}
-    owners = [i for i in kept if (i not in member_of or rng.random() < 0.3) and rng.random() < 0.85]
-    owners += [i for i in dropped if rng.random() < 0.3]
-    bp_of = dict(zip(owners, rng.sample(range(1, 64), len(owners))))
-    vids = [str(v) for v in rng.sample(range(1, 4095), rng.randint(1, 5))]
-    egress, untagged, pvids = {v: set() for v in vids}, {v: set() for v in vids}, {}
-    for ifi, bp in bp_of.items():
-        if ifi in member_of or ifi in dropped:               # nobody's effective bridge port: any bits
-            for v in rng.sample(vids, rng.randint(0, len(vids))):
-                egress[v].add(bp)
-                untagged[v].add(bp)
-            if rng.random() < 0.85:
-                pvids[bp] = rng.choice([*vids, "1"])
-            continue
-        u = rng.choice([None, *vids])
-        for v in rng.sample([v for v in vids if v != u], rng.randint(0, len(vids) - (u is not None))):
-            egress[v].add(bp)
-        if u:
-            egress[u].add(bp)
-            untagged[u].add(bp)
-        roll = rng.random()                                  # the PVID: as a rule the untagged VLAN, now and then another, or no row
-        if u and roll < 0.75:
-            pvids[bp] = u
-        elif roll < 0.9:
-            pvids[bp] = rng.choice([*vids, "1"])
-    size = 8 + rng.randint(0, 2)                             # bridge ports up to 63 fit into 8 bytes
-    stack = {f"{lag}.{m}": "1" for lag, mem in lags.items() for m in mem}
-    stack.update({f"{lag}.0": "1" for lag, mem in drawn.items() if not mem})
-    stack.update({f"0.{i}": "1" for i in kept if i not in member_of})
-    stack.update({f"{i}.0": "1" for i in phys})
-    for i in noise:
-        if rng.random() < 0.5:                               # a virtual interface over a port or a LAG: no membership
-            stack[f"{i}.{rng.choice(list(kept))}"] = "1"
-    stack.update({f"{unit}.{target}": "1" for unit, target in units.items()})    # nor is a unit a LAG of what it sits on
-    ifname_rows, type_rows = _rows(IF_NAME, names), _rows(IF_TYPE, types)
-    if rng.random() < 0.3:
-        ifname_rows.append((f"{IF_NAME}.{phys[0]}.0", "ghost"))    # a non-numeric index, with a port type even
-        type_rows.append((f"{IF_TYPE}.{phys[0]}.0", rng.choice((ETHERNET, LAG))))
-    if rng.random() < 0.3:
-        type_rows.append((f"{IF_TYPE}.{fresh(30001, 40000)}", ETHERNET))    # an ifType row without an ifName row
-    W = {
-        "ifName": ifname_rows,
-        "ifType": type_rows,
-        "ifAlias": _rows(IF_ALIAS, {i: rng.choice(("", "uplink", "AP Flur 3")) for i in names if rng.random() < 0.75}),
-        "ifAdmin": _rows(IF_ADMIN, {i: rng.choice(("1", "2", "3")) for i in names if i in kept or rng.random() < 0.5}),
-        "bp2if": _rows(BP2IF, {str(bp): ifi for ifi, bp in bp_of.items()}),
-        "vlanName": _rows(VLAN_NAME, {v: rng.choice(("", f"VLAN-{v}", "Clients")) for v in vids}),
-        "vlanEgress": _rows(VLAN_EGRESS, {v: t7._portlist(egress[v], size) for v in vids}),
-        "vlanUntagged": _rows(VLAN_UNTAGGED, {v: t7._portlist(untagged[v], size) for v in vids}),
-        "pvid": _rows(PVID, {str(bp): v for bp, v in pvids.items()}),
-        "ifStack": _rows(IF_STACK, stack),
-    }
-    W = {k: sorted(rows, key=t7._oid_key) for k, rows in W.items()}
-
-    order = sorted(kept, key=int)
-    port2bp, state = {}, {}
-    for ifi in order:
-        name, bp = kept[ifi], bp_of.get(member_of.get(ifi, ifi))    # a member counts with its LAG's bridge port, never its own
-        un = sorted((v for v in vids if bp in untagged[v]), key=int)
-        u = un[0] if len(un) == 1 else None
-        if u is not None and bp in pvids and pvids[bp] != u:
-            u = None                                         # a PVID that is not the untagged VLAN: unmanaged, no u
-        state[name] = {"u": u, "t": sorted((v for v in vids if bp in egress[v] and bp not in untagged[v]), key=int)}
-        if bp:
-            port2bp[name] = bp
-    truth = {
-        "ports": [kept[i] for i in order],
-        "trunks": {kept[lag]: [kept[m] for m in sorted(lags[lag], key=int)] for lag in sorted(lags, key=int)},
-        "port2bp": port2bp,
-        "ifindex": {kept[i]: int(i) for i in order},
-        "state": state,
-    }
-    return W, truth
+    _assert_agrees_with_the_display(W_CATALYST, driver, cfg, raw)
 
 
 def test_build_cfg_agrees_with_poller_non_procurve_on_random_switches():
@@ -642,13 +445,13 @@ def test_build_cfg_agrees_with_poller_non_procurve_on_random_switches():
     rng = random.Random(15)
     for case in range(400):
         driver = rng.choice(NON_PROCURVE)
-        W, truth = _random_multivendor_switch(rng)
+        W, truth = random_multivendor_switch(rng)
         cfg, raw = snmpwrite.build_cfg(W, driver)
         assert list(cfg["ports"]) == truth["ports"], case
         assert list(cfg["trunks"].items()) == list(truth["trunks"].items()), case
         assert raw["port2bp"] == truth["port2bp"] and raw["ifindex"] == truth["ifindex"], case
         assert {n: {"u": st["u"], "t": st["t"]} for n, st in cfg["ports"].items()} == truth["state"], case
-        _assert_same_switch_as_the_poller(W, driver, cfg, raw)
+        _assert_agrees_with_the_display(W, driver, cfg, raw)
 
 
 # ── read_cfg: ifType only where it selects ────────────────────────────────────────────────────────────────────────────────────────
@@ -665,17 +468,17 @@ async def test_read_cfg_walks_iftype_strictly_only_for_drivers_that_select_by_it
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     driver = DRIVERS[name]
-    cfg, _ = await snmpwrite.read_cfg(t7.ROW, driver)
+    cfg, _ = await snmpwrite.read_cfg(ROW, driver)
 
     assert all(strict is True for _, _, strict in calls)
     assert len(calls) == len({oid for oid, _, _ in calls})    # no walk twice
     if name == "procurve":
         assert IF_TYPE not in {oid for oid, _, _ in calls}
-        assert len(calls) == len(t7.BASES)
+        assert len(calls) == len(BASES)
         assert list(cfg["ports"]) == ["Vl1", "Vl10"]    # what the ProCurve rule makes of a Catalyst: unchanged, and not our case
     else:
         assert [c for c in calls if c[0] == IF_TYPE] == [(IF_TYPE, False, True)]
-        assert len(calls) == len(t7.BASES) + 1 + (driver.vlan_strategy == "cisco_vmps")
+        assert len(calls) == len(BASES) + 1 + (driver.vlan_strategy == "cisco_vmps")
         assert list(cfg["ports"]) == list(CATALYST_PORTS)
         assert cfg["trunks"] == {"Po1": ["Gi1/0/3", "Gi1/0/4"]}
 
@@ -762,7 +565,7 @@ async def test_a_failed_iftype_walk_fails_the_poll_only_where_the_ports_depend_o
     sid = await _add_switch(app_db, driver)
     await app_db.execute("INSERT INTO ports (switch_id, ifindex, name) VALUES (?, ?, ?)", (sid, 10101, "Gi1/0/1"))    # last good poll
     await app_db.commit()
-    recording = CATALYST_RECORDING if driver == "cisco" else t7.RECORDING
+    recording = CATALYST_RECORDING if driver == "cisco" else RECORDING
     _agent(monkeypatch, recording, failing=IF_TYPE)
 
     result = await poller.poll_switch(sid)
