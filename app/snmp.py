@@ -51,7 +51,14 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
     return text
 
 
-def _parse(text: str) -> list[tuple[str, str]]:
+_HEX_VALUE = re.compile(r"[0-9A-Fa-f\s]*")
+
+
+def _parse(text: str, hex_strict: bool = False) -> list[tuple[str, str]]:
+    """Zeilen "OID Wert" -> [(oid, wert)]; eine Zeile ohne OID gehoert als Fortsetzung zum Wert davor (lange Werte bricht net-snmp
+    um). hex_strict (ein strikter Hex-Walk): jeder Wert, mit seinen Fortsetzungszeilen, muss reines Hex sein, sonst SnmpError. Eine
+    fremde Zeile hinter einer PortList (etwa "End of MIB") wuerde sonst angehaengt, und hex_to_bytes machte aus ihren Buchstaben a-f
+    Bits fuer Bridge-Ports, die es nicht gibt."""
     rows: list[tuple[str, str]] = []
     for line in text.splitlines():
         if line.startswith("."):
@@ -67,6 +74,8 @@ def _parse(text: str) -> list[tuple[str, str]]:
             continue
         if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
             val = val[1:-1]
+        if hex_strict and not _HEX_VALUE.fullmatch(val):
+            raise SnmpError(f"Unerwartete Ausgabe in einem Hex-Wert ({oid}): {val[:80]!r}")
         out.append((oid, val))
     return out
 
@@ -74,13 +83,14 @@ def _parse(text: str) -> list[tuple[str, str]]:
 async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeout: float = 60, strict: bool = False) -> list[tuple[str, str]]:
     """snmpbulkwalk unter oid. snmpbulkwalk gibt jede Zeile sofort aus; bricht der Walk mittendrin ab (Timeout, Fehlerpaket), endet
     es mit Exit-Code != 0, die Zeilen bis dahin stehen aber schon in stdout. strict=False (Standard, der Poller): das gilt als
-    Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle.
+    Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle;
+    mit hex_values muss dann auch jeder Wert reines Hex sein (siehe _parse).
     """
     cmd = ["snmpbulkwalk", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25"]
     if hex_values:
         cmd.append("-Ox")
     cmd += [host, oid]
-    return _parse(await _run(cmd, timeout, strict=strict))
+    return _parse(await _run(cmd, timeout, strict=strict), hex_strict=strict and hex_values)
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:

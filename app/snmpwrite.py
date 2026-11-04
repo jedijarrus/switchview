@@ -8,9 +8,10 @@ einzelne Bits aendert und zuruecklesen kann. Aus genau diesem Read stammt auch `
 Die Port-Logik spiegelt poller._build: dieselben Ports unter denselben Namen (ifName), dieselbe Trunk-Erkennung (ifStack unter TrkN)
 und dieselbe VLAN-Zugehoerigkeit ueber den EFFEKTIVEN Bridge-Port (ein Trunk-Mitglied zaehlt mit dem Bridge-Port seines Trunks). So
 sehen Oberflaeche, Inventar (main.build_map) und Schreibweg denselben Switch; tests/test_snmpwrite_read.py legt beides auf dieselben
-Walk-Zeilen. Wer poller._build aendert, muss build_cfg mitziehen (oder bewusst abweichen). Zwei Abweichungen gibt es nur hier: ein
-Port, der in mehreren VLANs ungetaggt ist (Hybrid-/General-Port), steht ohne u in raw["unmanaged"]; und bei vlan_strategy cisco_vmps
-kommt das Access-VLAN aus vmVlan, dem Objekt, das der Schreibweg dort setzt, damit das Pruefen zuruecklies, was geschrieben wurde.
+Walk-Zeilen. Wer poller._build aendert, muss build_cfg mitziehen (oder bewusst abweichen). Abweichungen gibt es nur hier: ein Port,
+den cfg nicht eindeutig beschreiben kann (in mehreren VLANs ungetaggt, oder eine PVID, die nicht sein ungetaggtes VLAN ist), steht
+ohne u in raw["unmanaged"]; und bei vlan_strategy cisco_vmps ist ein Port mit vmVlan-Zeile ein Access-Port, dessen VLAN aus vmVlan
+kommt, dem Objekt, das der Schreibweg dort setzt (so liest das Pruefen zurueck, was geschrieben wurde).
 
 Zwei Index-Raeume, nie vermischen:
   Bridge-Port (dot1dBasePort)  dot1qPvid und die Bits der PortLists (Egress / Untagged)
@@ -33,42 +34,58 @@ def _vids(vids) -> str:
     return ", ".join(sorted(vids, key=lambda v: (len(v), v)))
 
 
-def build_cfg(W: dict) -> tuple[dict, dict]:
+def build_cfg(W: dict, *, vmvlan_base: str | None = None) -> tuple[dict, dict]:
     """(cfg, raw) aus den Walk-Zeilen W: Schluessel wie in WALKS -> [(oid, wert), ...], so wie poller.poll_switch sie sammelt, dazu
-    optional "vmVlan" (nur bei vlan_strategy cisco_vmps); weitere Schluessel stoeren nicht. Rein, ohne I/O.
+    bei vlan_strategy cisco_vmps "vmVlan" (dann ist vmvlan_base die OID, unter der diese Zeilen gewalkt wurden; wie bei jedem
+    anderen Walk zaehlen nur Zeilen darunter). Weitere Schluessel stoeren nicht. Rein, ohne I/O.
 
     cfg hat genau die Schluessel von cfgparse.parse_config. Vom Switch gelesen sind vlans ({vid: Name}, nach Nummer), trunks
     ({TrkN: [Mitglieder]}) und ports. Jeder Port hat die Felder von cfgparse._empty_port plus "poe": u ist das VLAN, in dessen
-    Untagged-Liste das Bit des Ports steht (sonst None), bei einer vmVlan-Zeile fuer den Port deren Wert (0 = kein VLAN = None);
-    t sind die uebrigen VLANs mit Egress-Bit (nach Nummer), name ist ifAlias, en ist ifAdminStatus == 1 (up). Alles andere liest SNMP
-    hier nicht und steht auf dem Wert einer leeren Konfiguration: hostname "" (read_cfg traegt sys_name ein), primary_vlan "1",
-    mgmt_vlan None, auth_active / eap_radius / login_radius False, addr_format None, voice_vlans [], radius {}; pro Port x / m False,
-    cl / al / xuv / muv None (802.1X / MAC-Auth nur ueber die CLI) und poe None.
+    Untagged-Liste das Bit des Ports steht (sonst None), t sind die uebrigen VLANs mit Egress-Bit (nach Nummer), name ist ifAlias,
+    en ist ifAdminStatus == 1 (up). Ein Port mit vmVlan-Zeile ist ein Access-Port: u ist der vmVlan-Wert (0 = kein VLAN = None),
+    t ist leer, die Q-BRIDGE-Sicht auf u / t zaehlt fuer ihn nicht. Alles andere liest SNMP hier nicht und steht auf dem Wert einer
+    leeren Konfiguration: hostname "" (read_cfg traegt sys_name ein), primary_vlan "1", mgmt_vlan None, auth_active / eap_radius /
+    login_radius False, addr_format None, voice_vlans [], radius {}; pro Port x / m False, cl / al / xuv / muv None (802.1X /
+    MAC-Auth nur ueber die CLI) und poe None.
 
     raw: egress / untagged {vid: Bytes der PortList, wie gelesen}; pvid {Port: vid} ueber den effektiven Bridge-Port; admin
     {Port: int}; alias {Port: str}, nur wo der Switch eine Zeile liefert; poe {}; port2bp {Port: effektiver Bridge-Port};
     bp2port {Bridge-Port: Port, dem er gehoert}; ifindex {Port: ifIndex}; unmanaged {Port: Grund}, Ports, die der Schreibweg nicht
     anfassen darf; vmvlan {Port: vmVlan wie gelesen}, nur Ports mit vmVlan-Zeile. Ein Port ohne Bridge-Port fehlt in port2bp und pvid.
 
-    Ein Port, der in mehr als einem VLAN ungetaggt ist (Hybrid-/General-Port), kommt nach raw["unmanaged"] und hat kein u (cfg kennt
-    nur eines, Planen und Pruefen waeren mehrdeutig), auch wenn vmVlan eines nennt; t und raw bleiben, wie gelesen. Der Rest des
-    Switches bleibt lesbar. Fuer den ganzen Switch geschlossen aus (snmp.SnmpError statt eines cfg, das ihn falsch beschreibt), wenn
+    Nur der Port faellt heraus (raw["unmanaged"], kein u; t und raw bleiben, wie gelesen), wenn er in mehr als einem VLAN ungetaggt
+    ist (Hybrid-/General-Port; das gilt auch mit vmVlan-Zeile), oder wenn er ohne vmVlan-Zeile genau ein ungetaggtes VLAN hat, sein
+    Bridge-Port aber eine andere PVID (ungetaggt Ankommendes landete in einem anderen VLAN, als cfg sagt). Fuer den ganzen Switch
+    geschlossen aus (snmp.SnmpError statt eines cfg, das ihn falsch beschreibt), wenn
       - Name, Egress- und Untagged-Liste nicht fuer dieselben VLANs vorliegen (Spalten derselben Tabellenzeile),
       - ein Port kein lesbares ifAdminStatus hat (er gaelte sonst als aus, und ein Revert wuerde ihn abschalten),
       - ein Portname doppelt vorkommt (ein Schreibzugriff auf diesen Port waere nicht eindeutig),
-      - die vmVlan-Zeile eines Ports keine Zahl ist (sein Access-VLAN waere unbekannt).
+      - die vmVlan-Zeile eines Ports keine Zahl ist oder ein vmVlan-Index kein ifIndex (falsche Basis-OID),
+      - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0"; hier wird jeder ValueError / KeyError zu SnmpError).
     """
-    tbl = {k: poller._tbl(W[k], poller.O[k]) for k in WALKS}
+    rows = {k: W[k] for k in WALKS}
+    if "vmVlan" in W and not vmvlan_base:
+        raise TypeError("build_cfg: vmVlan-Zeilen ohne vmvlan_base (die OID, unter der sie gewalkt wurden)")
+    try:
+        return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {})
+    except (ValueError, KeyError) as e:
+        raise snmp.SnmpError(f"Unerwartete SNMP-Daten (Index oder Wert nicht lesbar): {e}") from e
+
+
+def _synth(rows: dict, vmvlan: dict[str, str]) -> tuple[dict, dict]:
+    """Der Kern von build_cfg: rows = die Walks aus WALKS, vmvlan = {ifIndex: vmVlan} (leer ohne vmVlan-Walk)."""
+    tbl = {k: poller._tbl(rows[k], poller.O[k]) for k in WALKS}
     ifname, alias, admin, pvid, vname = tbl["ifName"], tbl["ifAlias"], tbl["ifAdmin"], tbl["pvid"], tbl["vlanName"]
     eg_hex, un_hex, bp2if = tbl["vlanEgress"], tbl["vlanUntagged"], tbl["bp2if"]
     if not set(vname) == set(eg_hex) == set(un_hex):
         odd = (set(vname) | set(eg_hex) | set(un_hex)) - (set(vname) & set(eg_hex) & set(un_hex))
         raise snmp.SnmpError(f"VLAN-Tabelle unvollständig gelesen: Name, Egress- und Untagged-Liste passen nicht zusammen (VLAN {_vids(odd)})")
+    bad = [k for k in vmvlan if not k.isdigit()]
+    if bad:
+        raise snmp.SnmpError(f"vmVlan: Index {bad[0]} ist kein ifIndex (zeigt die OID des Treibers nicht auf die Spalte vmVlan?)")
     if2bp = {v: k for k, v in bp2if.items()}
     egress = {k: snmp.bitmap_ports(v) for k, v in eg_hex.items()}
     untag = {k: snmp.bitmap_ports(v) for k, v in un_hex.items()}
-    # vmVlan hat den ifIndex als einzigen Index, also ist er die letzte Stelle der OID, gleich unter welcher Basis der Treiber walkt
-    vmvlan = {oid.rpartition(".")[2]: val for oid, val in W.get("vmVlan", [])}
 
     member_of: dict[str, str] = {}
     members: dict[str, list[str]] = {}
@@ -103,13 +120,16 @@ def build_cfg(W: dict) -> tuple[dict, dict]:
         tg = sorted([v for v in vname if b and b in egress.get(v, set()) and b not in untag.get(v, set())], key=int)
         u = un[0] if un else None
         vm = vmvlan.get(ifi)
-        if vm is not None:
+        if vm is not None:  # cisco_vmps-Access-Port: vmVlan ist sein VLAN, getaggte VLANs hat er nicht
             if not vm.isdigit():
                 raise snmp.SnmpError(f"Port {name}: vmVlan unlesbar ({vm!r})")
             raw["vmvlan"][name] = vm
-            u = str(int(vm)) if int(vm) else None
+            u, tg = (str(int(vm)) if int(vm) else None), []
         if len(un) > 1:
             raw["unmanaged"][name] = f"ungetaggt in mehreren VLANs ({', '.join(un)}): Hybrid-/General-Port, per SNMP nicht verwaltbar"
+            u = None
+        elif vm is None and u is not None and eff in pvid and pvid[eff] != u:
+            raw["unmanaged"][name] = f"PVID {pvid[eff]} weicht vom ungetaggten VLAN {u} ab – erst am Switch bereinigen"
             u = None
         st = cfgparse._empty_port()
         st.update(u=u, t=tg, name=alias.get(ifi, ""), en=admin[ifi] == "1", poe=None)
@@ -140,23 +160,25 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
     """Den Switch `row` (switches-Zeile) jetzt per SNMP lesen: (cfg, raw) wie build_cfg, mit cfg["hostname"] = sys_name der Zeile.
 
     Liest mit der LESE-Identitaet (poller.creds_of(row)), alle Walks parallel und strikt (snmp.walk(strict=True)): ein Walk, der
-    mittendrin abbricht, ist ein Fehler, keine kuerzere Tabelle. Bei driver.vlan_strategy "cisco_vmps" kommt driver.oids["vmvlan"]
-    als weiterer Walk dazu (W["vmVlan"], siehe build_cfg). Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch
-    den Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
+    mittendrin abbricht, oder eine fremde Zeile in einer PortList ist ein Fehler, keine kuerzere oder falsche Tabelle. Bei
+    driver.vlan_strategy "cisco_vmps" kommt driver.oids["vmvlan"] als weiterer Walk dazu (W["vmVlan"], siehe build_cfg). Schreibt
+    nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht
+    reentrant).
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
     damit nach dem Ruecksprung keine Abfrage mehr am Switch laeuft. Zeilen, die den Switch nicht sicher beschreiben: siehe build_cfg.
     """
     host, cred, hostname = row["host"], poller.creds_of(row), row["sys_name"] or ""
+    vm_base = driver.oids["vmvlan"] if driver.vlan_strategy == "cisco_vmps" else None
     walks = {k: (poller.O[k], k in poller.HEX) for k in WALKS}  # Schluessel -> (OID, als Hex)
-    if driver.vlan_strategy == "cisco_vmps":
-        walks["vmVlan"] = (driver.oids["vmvlan"], False)
+    if vm_base:
+        walks["vmVlan"] = (vm_base, False)
     results = await asyncio.gather(*(snmp.walk(host, cred, oid, hex_values=hx, strict=True) for oid, hx in walks.values()),
                                    return_exceptions=True)
     for r in results:
         if isinstance(r, BaseException):
             raise r
-    cfg, raw = build_cfg(dict(zip(walks, results)))
+    cfg, raw = build_cfg(dict(zip(walks, results)), vmvlan_base=vm_base)
     cfg["hostname"] = hostname
     return cfg, raw

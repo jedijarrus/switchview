@@ -4,7 +4,8 @@ snmpbulkwalk prints every varbind as it arrives. If the agent stops answering in
 snmpbulkwalk reports that on stderr and exits non-zero, but the rows it got so far are already on stdout. snmp._run only raises
 when stdout is empty, so by default (what the display poller relies on) such a partial walk still counts as a result, exactly as
 before. strict=True, which the SNMP write path uses (snmpwrite.read_cfg), turns EVERY non-zero exit into an SnmpError, so a write is
-never planned or verified against half a table.
+never planned or verified against half a table. A strict hex walk (the PortLists) also refuses any value that is not pure hex, so
+no stray line can turn into bridge-port bits.
 
 These tests keep the real snmp._run and only fake the process it starts. snmp is imported flat (app/ is on sys.path via pytest.ini),
 exactly as the app imports it.
@@ -94,6 +95,58 @@ async def test_no_answer_at_all_fails_in_both_modes(process, strict):
     process.answer(err=TIMEOUT, returncode=1)
     with pytest.raises(snmp.SnmpError, match=f"^Timeout: No Response from {HOST}$"):
         await snmp.walk(HOST, CRED, IF_NAME, strict=strict)
+
+
+# ── strict hex walks: a PortList value is hex and nothing else ──────────────────────────────────────────────────────────────────
+# _parse appends every line that does not start with an OID to the value before it (net-snmp wraps long values). Behind a PortList
+# a stray line such as "End of MIB" would end up in the value, and hex_to_bytes would read its letters E, d, f, B as two more
+# bytes: bits for bridge ports that do not exist, which a read-modify-write would send back to the switch. So a strict hex walk
+# only accepts hex digits and whitespace in a value, also on its continuation lines.
+EGRESS = "1.3.6.1.2.1.17.7.1.4.3.1.2"       # dot1qVlanStaticEgressPorts, walked with -Ox
+IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
+STRAY = f".{EGRESS}.20 80 00\nEnd of MIB\n".encode()
+
+
+async def test_strict_hex_walk_refuses_a_stray_line_after_a_portlist(process):
+    process.answer(out=STRAY)
+    with pytest.raises(snmp.SnmpError, match=rf"^Unerwartete Ausgabe in einem Hex-Wert \({EGRESS}\.20\)"):
+        await snmp.walk(HOST, CRED, EGRESS, hex_values=True, strict=True)
+
+
+async def test_lenient_hex_walk_keeps_the_old_behaviour(process):
+    """The display poller (lenient) still gets the joined value, phantom bytes included: exactly what the strict check keeps out."""
+    process.answer(out=STRAY)
+    rows = await snmp.walk(HOST, CRED, EGRESS, hex_values=True)
+    assert rows == [(f"{EGRESS}.20", "80 00\nEnd of MIB")]
+    assert snmp.hex_to_bytes(rows[0][1]) == bytes.fromhex("8000EDFB")
+
+
+async def test_strict_hex_walk_refuses_a_value_that_is_no_hex(process):
+    process.answer(out=f".{EGRESS}.20 kaputt\n".encode())
+    with pytest.raises(snmp.SnmpError, match="Hex-Wert"):
+        await snmp.walk(HOST, CRED, EGRESS, hex_values=True, strict=True)
+
+
+async def test_strict_hex_walk_takes_a_wrapped_value(process):
+    """A long PortList that net-snmp wraps over two lines is pure hex on both lines: it parses, byte for byte (bridge ports 1, 144)."""
+    first = " ".join(["80"] + ["00"] * 15)
+    process.answer(out=f".{EGRESS}.20 {first}\n00 01 \n".encode())
+    rows = await snmp.walk(HOST, CRED, EGRESS, hex_values=True, strict=True)
+    assert len(rows) == 1 and rows[0][0] == f"{EGRESS}.20"
+    assert snmp.hex_to_bytes(rows[0][1]) == bytes([0x80] + [0] * 16 + [0x01])
+    assert snmp.bitmap_ports(rows[0][1]) == {1, 144}
+
+
+async def test_strict_hex_walk_still_drops_missing_values_and_keeps_empty_ones(process):
+    """The usual markers for "nothing there" are dropped before the hex check, an empty octet string ("") is a valid value."""
+    process.answer(out=f'.{EGRESS}.20 ""\n.{EGRESS}.30 No Such Instance currently exists at this OID\n'.encode())
+    assert await snmp.walk(HOST, CRED, EGRESS, hex_values=True, strict=True) == [(f"{EGRESS}.20", "")]
+
+
+async def test_strict_text_walk_keeps_multi_line_strings(process):
+    """The hex check is only for hex walks: a string over two lines (an ifAlias with a line break) stays a valid value."""
+    process.answer(out=f'.{IF_ALIAS}.1 "Platz 107\nTuer links"\n'.encode())
+    assert await snmp.walk(HOST, CRED, IF_ALIAS, strict=True) == [(f"{IF_ALIAS}.1", "Platz 107\nTuer links")]
 
 
 async def test_strict_does_not_change_the_command(process):

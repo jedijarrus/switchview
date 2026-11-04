@@ -12,12 +12,13 @@ wrong state of a live switch, so the tests pin three things:
   * agreement with the display poller: the same walk rows fed to poller._build give the same untagged / tagged / admin / alias /
     pvid for every port (on the fixture, on odd agent rows and on a few hundred random switches), so the UI, the inventory and
     the write path see one and the same switch;
-  * fail closed: a failed walk (read_cfg walks strictly, so a walk cut short counts as failed), or rows that cannot describe the
-    switch safely (a port name twice, a VLAN table or ifAdminStatus read incompletely), raise instead of returning a partial cfg.
-    A port untagged in more than one VLAN (hybrid / general port) only takes that port out: it is listed in raw["unmanaged"]
-    and has no u;
-  * cisco_vmps: the access VLAN of a port comes from vmVlan, the very object the write path sets for it, so verify reads back
-    what was written.
+  * fail closed: a failed walk (read_cfg walks strictly, so a walk cut short or a stray line in a PortList counts as failed), or
+    rows that cannot describe the switch safely (a port name twice, a VLAN table or ifAdminStatus read incompletely, a malformed
+    index), raise SnmpError instead of returning a partial cfg. A port the cfg cannot describe on its own only takes that port
+    out: untagged in more than one VLAN (hybrid / general port), or a PVID that differs from its untagged VLAN. It is listed in
+    raw["unmanaged"] with the reason and has no u;
+  * cisco_vmps: a port with a vmVlan row is an access port; its VLAN comes from vmVlan, the very object the write path sets for
+    it (so verify reads back what was written), and it has no tagged VLANs.
 
 Nothing here touches net-snmp, the network, a switch or the app database: snmp.walk is replaced by a fake agent that answers from
 the fixture by OID. Modules are imported flat (app/ is on sys.path via pytest.ini), exactly as the app imports them.
@@ -133,8 +134,9 @@ ROW = {"id": 7, "name": "SW-EK-01", "host": HOST, "sys_name": "SW-EK-01", "drive
        "snmp_priv_pass": None}
 
 
-def _oid_key(row: tuple[str, str]) -> list[int]:
-    return [int(part) for part in row[0].split(".")]
+def _oid_key(row: tuple[str, str]) -> list[tuple[int, int | str]]:
+    """Walk order: numeric OID components compared as numbers (a malformed, non-numeric one sorts behind them)."""
+    return [(0, int(part)) if part.isdigit() else (1, part) for part in row[0].split(".")]
 
 
 def _edit(W: dict, **edits) -> dict:
@@ -158,17 +160,21 @@ def _variant(**edits) -> dict:
 
 def _assert_same_switch_as_the_poller(W: dict, cfg: dict, raw: dict):
     """The oracle: poller._build on the very same rows (the walks read_cfg does not do are empty) must describe every port alike.
-    Only for Q-BRIDGE reads: the poller knows nothing of vmVlan. A port the poller sees untagged in several VLANs is the one
-    build_cfg lists as unmanaged, without u; everything else must match."""
+    Only for Q-BRIDGE reads: the poller knows nothing of vmVlan. The ports build_cfg lists as unmanaged, without u, are the ones
+    the poller sees untagged in several VLANs, or untagged in one VLAN with a PVID that differs from it; everything else matches."""
     assert "vmVlan" not in W
     built = poller._build({k: W.get(k, []) for k in poller.O})
     assert list(cfg["ports"]) == [p["name"] for p in built["ports"]]    # the same ports, under the same names, in the same order
     assert list(cfg["vlans"].items()) == list(built["vlans"].items())
-    assert set(raw["unmanaged"]) == {p["name"] for p in built["ports"] if len(p["untagged"]) > 1}
+
+    def unmanaged(p):
+        return len(p["untagged"]) > 1 or (len(p["untagged"]) == 1 and p["pvid"] not in ("", p["untagged"][0]))
+
+    assert set(raw["unmanaged"]) == {p["name"] for p in built["ports"] if unmanaged(p)}
     for p in built["ports"]:
         n = p["name"]
         st = cfg["ports"][n]
-        assert st["u"] == (p["untagged"][0] if len(p["untagged"]) == 1 else None), n
+        assert st["u"] == (None if unmanaged(p) or not p["untagged"] else p["untagged"][0]), n
         assert st["t"] == p["tagged"], n
         assert st["en"] is (p["admin"] == 1), n
         assert (raw["admin"][n] == 1) is (p["admin"] == 1), n
@@ -336,10 +342,13 @@ def _portlist(bridge_ports, size: int) -> str:
     return " ".join(f"{b:02X}" for b in buf)
 
 
-def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
-    """A random but well-formed switch: W in walk order, plus the ground truth of the generator (effective bridge port per port,
-    owner per bridge port). Well-formed means: unique port names, and the VLAN table and ifAdminStatus read completely (build_cfg
-    refuses anything else, see the fail-closed tests below). Now and then a port is untagged in two VLANs (a hybrid port)."""
+def _random_switch(rng: random.Random) -> tuple[dict, dict]:
+    """A random but well-formed switch: W in walk order, plus the generator's own ground truth. Well-formed means unique port names
+    and the VLAN table and ifAdminStatus read completely (build_cfg refuses anything else, see the fail-closed tests below); now and
+    then a port is untagged in two VLANs (hybrid) or has a PVID other than its untagged VLAN.
+
+    The truth comes from the sets the generator drew, not through bitmap_ports or a copy of the port loop: per port u / t / name /
+    en and the unmanaged reason, and the raw maps (effective bridge port, owner per bridge port, PVID, ...), trunks and VLANs."""
     phys = [str(i) for i in rng.sample(range(1, 300), rng.randint(1, 10))]
     names = {ifi: rng.choice(("", "A", "B")) + str(k + 1) for k, ifi in enumerate(phys)}
     free, trunks = list(phys), {}                            # trunk ifIndex -> member ifIndexes
@@ -356,12 +365,14 @@ def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
     owners += [i for i in dropped if rng.random() < 0.3]
     bp_of = dict(zip(owners, rng.sample(range(1, 48), len(owners))))
     vids = [str(v) for v in rng.sample(range(1, 4095), rng.randint(1, 5))]
-    egress, untagged = {v: set() for v in vids}, {v: set() for v in vids}
+    egress, untagged, pvids = {v: set() for v in vids}, {v: set() for v in vids}, {}
     for ifi, bp in bp_of.items():
         if ifi in member_of or ifi in dropped:               # nobody's effective bridge port: any bits, even untagged everywhere
             for v in rng.sample(vids, rng.randint(0, len(vids))):
                 egress[v].add(bp)
                 untagged[v].add(bp)
+            if rng.random() < 0.85:
+                pvids[bp] = rng.choice([*vids, "1"])
             continue
         u = rng.choice([None, *vids])
         for v in rng.sample([v for v in vids if v != u], rng.randint(0, len(vids) - (u is not None))):
@@ -373,6 +384,11 @@ def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
                 second = rng.choice([v for v in vids if v != u])
                 egress[second].add(bp)
                 untagged[second].add(bp)
+        roll = rng.random()                                  # the PVID: as a rule the untagged VLAN, now and then another, or no row
+        if u and roll < 0.75:
+            pvids[bp] = u
+        elif roll < 0.9:
+            pvids[bp] = rng.choice([*vids, "1"])
     for bp in rng.sample(range(48, 65), rng.randint(0, 2)):    # bits for bridge ports nobody owns
         egress[rng.choice(vids)].add(bp)
         untagged[rng.choice(vids)].add(bp)
@@ -386,34 +402,67 @@ def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
     ifname_rows = _rows(IF_NAME, names)
     if rng.random() < 0.3:
         ifname_rows.append((f"{IF_NAME}.{phys[0]}.0", "ghost"))    # a non-numeric index
+    aliases = {i: rng.choice(("", "uplink", "Platz-107", "AP Flur 3")) for i in names if rng.random() < 0.75}
+    admins = {i: rng.choice(("1", "2", "3")) for i in names if i in kept or rng.random() < 0.5}    # 3 = testing
+    vnames = {v: rng.choice(("", f"VLAN-{v}", "Clients")) for v in vids}
     W = {
         "ifName": ifname_rows,
-        "ifAlias": _rows(IF_ALIAS, {i: rng.choice(("", "uplink", "Platz-107", "AP Flur 3")) for i in names if rng.random() < 0.75}),
-        "ifAdmin": _rows(IF_ADMIN, {i: rng.choice(("1", "2", "3")) for i in names if i in kept or rng.random() < 0.5}),    # 3 = testing
+        "ifAlias": _rows(IF_ALIAS, aliases),
+        "ifAdmin": _rows(IF_ADMIN, admins),
         "bp2if": _rows(BP2IF, {str(bp): ifi for ifi, bp in bp_of.items()}),
-        "vlanName": _rows(VLAN_NAME, {v: rng.choice(("", f"VLAN-{v}", "Clients")) for v in vids}),
+        "vlanName": _rows(VLAN_NAME, vnames),
         "vlanEgress": _rows(VLAN_EGRESS, {v: _portlist(egress[v], size) for v in vids}),
         "vlanUntagged": _rows(VLAN_UNTAGGED, {v: _portlist(untagged[v], size) for v in vids}),
-        "pvid": _rows(PVID, {str(bp): rng.choice([*vids, "1"]) for bp in bp_of.values() if rng.random() < 0.85}),
+        "pvid": _rows(PVID, {str(bp): v for bp, v in pvids.items()}),
         "ifStack": _rows(IF_STACK, stack),
     }
     W = {k: sorted(rows, key=_oid_key) for k, rows in W.items()}
-    eff = {kept[i]: bp_of[member_of[i]] if i in member_of else bp_of[i]
-           for i in kept if (member_of.get(i) or i) in bp_of}
-    owner = {bp: kept[i] for i, bp in bp_of.items() if i in kept}
-    return W, eff, owner
+
+    ports, port2bp, pvid_of = {}, {}, {}
+    for ifi in sorted(kept, key=int):
+        name, bp = kept[ifi], bp_of.get(member_of.get(ifi, ifi))    # a member counts with its trunk's bridge port, never its own
+        un = sorted((v for v in vids if bp in untagged[v]), key=int)
+        tagged = sorted((v for v in vids if bp in egress[v] and bp not in untagged[v]), key=int)
+        u, reason = (un[0] if len(un) == 1 else None), None
+        if len(un) > 1:
+            reason = f"ungetaggt in mehreren VLANs ({', '.join(un)}): Hybrid-/General-Port, per SNMP nicht verwaltbar"
+        elif u is not None and bp in pvids and pvids[bp] != u:
+            reason, u = f"PVID {pvids[bp]} weicht vom ungetaggten VLAN {u} ab – erst am Switch bereinigen", None
+        ports[name] = {"u": u, "t": tagged, "name": aliases.get(ifi, ""), "en": admins[ifi] == "1", "unmanaged": reason}
+        if bp:
+            port2bp[name] = bp
+            if bp in pvids:
+                pvid_of[name] = pvids[bp]
+    truth = {
+        "ports": ports,
+        "raw": {
+            "port2bp": port2bp, "pvid": pvid_of, "bp2port": {bp: kept[i] for i, bp in bp_of.items() if i in kept},
+            "ifindex": {kept[i]: int(i) for i in kept}, "admin": {kept[i]: int(admins[i]) for i in kept},
+            "alias": {kept[i]: aliases[i] for i in kept if i in aliases},
+            "egress": {v: bytes.fromhex(_portlist(egress[v], size).replace(" ", "")) for v in vids},
+            "untagged": {v: bytes.fromhex(_portlist(untagged[v], size).replace(" ", "")) for v in vids},
+            "unmanaged": {n: st["unmanaged"] for n, st in ports.items() if st["unmanaged"]}, "poe": {}, "vmvlan": {},
+        },
+        "trunks": {names[t]: [names[m] for m in sorted(mem, key=int)] for t, mem in trunks.items() if mem},
+        "vlans": {v: vnames[v] for v in sorted(vids, key=int)},
+    }
+    return W, truth
 
 
-def test_build_cfg_agrees_with_the_poller_on_random_switches():
+def test_build_cfg_on_random_switches():
+    """build_cfg on 400 random switches against two oracles: the generator's own truth (it shares nothing with build_cfg: no
+    bitmap_ports, no copy of the port loop) and the display poller (which sees the switch through the same rows)."""
     rng = random.Random(20261104)
     for case in range(400):
-        W, eff, owner = _random_switch(rng)
+        W, truth = _random_switch(rng)
         cfg, raw = snmpwrite.build_cfg(W)
+        assert list(cfg["ports"]) == list(truth["ports"]), case
+        for n, want in truth["ports"].items():
+            assert {k: cfg["ports"][n][k] for k in ("u", "t", "name", "en")} == {k: want[k] for k in ("u", "t", "name", "en")}, (case, n)
+        assert raw == truth["raw"], case
+        assert cfg["trunks"] == truth["trunks"], case
+        assert list(cfg["vlans"].items()) == list(truth["vlans"].items()), case
         _assert_same_switch_as_the_poller(W, cfg, raw)
-        assert raw["port2bp"] == eff, case
-        assert raw["bp2port"] == owner, case
-        for walk, base in (("egress", VLAN_EGRESS), ("untagged", VLAN_UNTAGGED)):    # every PortList byte for byte, length kept
-            assert raw[walk] == {oid[len(base) + 1:]: bytes.fromhex(v.replace(" ", "")) for oid, v in W["vlan" + walk.capitalize()]}, case
 
 
 # ── build_cfg fails closed ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -448,6 +497,41 @@ def test_trunk_members_of_a_hybrid_trunk_are_unmanaged_too():
     assert raw["unmanaged"] == {"4": reason, "5": reason, "Trk1": reason}
 
 
+def test_a_port_whose_pvid_differs_from_its_untagged_vlan_is_unmanaged():
+    """A general port: port 1 egresses untagged in VLAN 20, but its PVID (bridge port 3) says 1, so untagged ingress lands in VLAN 1.
+    cfg cannot say that with one u; the port is unmanaged until it is cleaned up on the switch. The tagged-only port 3 (no
+    untagged VLAN, PVID 1 as ProCurve reports it) is not affected, nor is any other port."""
+    W = _variant(pvid={"3": "1"})
+    cfg, raw = snmpwrite.build_cfg(W)
+    assert raw["unmanaged"] == {"1": "PVID 1 weicht vom ungetaggten VLAN 20 ab – erst am Switch bereinigen"}
+    assert cfg["ports"]["1"] == {**EXPECTED_PORTS["1"], "u": None}
+    assert {n: st for n, st in cfg["ports"].items() if n != "1"} == {n: st for n, st in EXPECTED_PORTS.items() if n != "1"}
+    assert raw["pvid"]["1"] == "1" and raw["pvid"]["3"] == "1"
+    _assert_same_switch_as_the_poller(W, cfg, raw)
+
+
+def test_a_trunk_with_a_differing_pvid_takes_its_members_along():
+    W = _variant(pvid={"7": "99"})    # Trk1: untagged 1, PVID 99
+    _, raw = snmpwrite.build_cfg(W)
+    reason = "PVID 99 weicht vom ungetaggten VLAN 1 ab – erst am Switch bereinigen"
+    assert raw["unmanaged"] == {"4": reason, "5": reason, "Trk1": reason}
+
+
+def test_a_port_without_a_pvid_row_is_not_judged_by_it():
+    _, raw = snmpwrite.build_cfg(_variant(pvid={"3": None}))    # port 1 untagged in 20, no PVID row: nothing to compare
+    assert raw["unmanaged"] == {} and "1" not in raw["pvid"]
+
+
+@pytest.mark.parametrize("edits", [
+    {"bp2if": {"3": None, "3.0": "1"}},                                                      # a bridge-port index "3.0"
+    {"vlanName": {"x": "Gast"}, "vlanEgress": {"x": "00"}, "vlanUntagged": {"x": "00"}},     # a VLAN index "x"
+], ids=["bridge-port", "vlan"])
+def test_a_malformed_index_fails_closed_as_snmp_error(edits):
+    """A malformed index surfaces as SnmpError with context (what callers of read_cfg handle), never as a bare ValueError."""
+    with pytest.raises(snmp.SnmpError, match=r"^Unerwartete SNMP-Daten \(Index oder Wert nicht lesbar\): .*'(3\.0|x)'"):
+        snmpwrite.build_cfg(_variant(**edits))
+
+
 @pytest.mark.parametrize("walk", ["vlanName", "vlanEgress", "vlanUntagged"])
 def test_an_incomplete_vlan_table_fails_closed(walk):
     """Name, egress and untagged list are columns of one dot1qVlanStaticEntry: a VLAN in one walk but not the others means a walk
@@ -474,13 +558,13 @@ def test_admin_status_is_only_required_for_ports():
     assert cfg["ports"] == EXPECTED_PORTS
 
 
-# ── cisco_vmps: the access VLAN comes from vmVlan ────────────────────────────────────────────────────────────────────────────────
+# ── cisco_vmps: a port with a vmVlan row is an access port ──────────────────────────────────────────────────────────────────────
 # A Catalyst-like switch (small ifIndexes as on IOS-XE), bridge port = ifIndex + 8. Q-BRIDGE and vmVlan disagree on purpose:
-#   port (ifIndex)   bridge port   Q-BRIDGE                      vmVlan   cfg u
-#   Gi1/0/1 (1)      9             untagged 1                    10       10    vmVlan wins
-#   Gi1/0/2 (2)      10            untagged 10                   10       10
-#   Gi1/0/3 (3)      11            untagged 1, tagged 10 + 20    -        1     a trunk port has no vmVlan row: Q-BRIDGE stays
-#   Gi1/0/4 (4)      12            untagged 1                    0        None  vmVlan 0 = assigned to no VLAN
+#   port (ifIndex)   bridge port   Q-BRIDGE                      vmVlan   cfg u / t
+#   Gi1/0/1 (1)      9             untagged 1, egress 10         10       10 / []        vmVlan wins; an access port has no tagged VLAN
+#   Gi1/0/2 (2)      10            untagged 10                   10       10 / []
+#   Gi1/0/3 (3)      11            untagged 1, tagged 10 + 20    -        1 / [10, 20]   a trunk port has no vmVlan row: Q-BRIDGE stays
+#   Gi1/0/4 (4)      12            untagged 1                    0        None / []      vmVlan 0 = assigned to no VLAN
 # bits in byte 1: bp 9 = 0x80, 10 = 0x40, 11 = 0x20, 12 = 0x10
 W_CISCO = {
     "ifName": _rows(IF_NAME, {"1": "Gi1/0/1", "2": "Gi1/0/2", "3": "Gi1/0/3", "4": "Gi1/0/4"}),
@@ -488,12 +572,13 @@ W_CISCO = {
     "ifAdmin": _rows(IF_ADMIN, {"1": "1", "2": "1", "3": "1", "4": "2"}),
     "bp2if": _rows(BP2IF, {"9": "1", "10": "2", "11": "3", "12": "4"}),
     "vlanName": _rows(VLAN_NAME, {"1": "default", "10": "Daten", "20": "Voice"}),
-    "vlanEgress": _rows(VLAN_EGRESS, {"1": "00 B0", "10": "00 60", "20": "00 20"}),
+    "vlanEgress": _rows(VLAN_EGRESS, {"1": "00 B0", "10": "00 E0", "20": "00 20"}),
     "vlanUntagged": _rows(VLAN_UNTAGGED, {"1": "00 B0", "10": "00 40", "20": "00 00"}),
     "pvid": _rows(PVID, {"9": "1", "10": "10", "11": "1", "12": "1"}),
     "ifStack": _rows(IF_STACK, {"0.1": "1", "0.2": "1", "0.3": "1", "0.4": "1", "1.0": "1", "2.0": "1", "3.0": "1", "4.0": "1"}),
     "vmVlan": _rows(VMVLAN, {"1": "10", "2": "10", "4": "0"}),
 }
+CISCO = {"vmvlan_base": VMVLAN}    # build_cfg filters the vmVlan rows by the base they were walked from, like every other walk
 
 
 def test_vmvlan_base_is_the_cisco_drivers_oid():
@@ -501,7 +586,7 @@ def test_vmvlan_base_is_the_cisco_drivers_oid():
 
 
 def test_vmvlan_decides_the_access_vlan():
-    cfg, raw = snmpwrite.build_cfg(W_CISCO)
+    cfg, raw = snmpwrite.build_cfg(W_CISCO, **CISCO)
     assert cfg["ports"] == {
         "Gi1/0/1": {"u": "10", "t": [], "name": "Drucker", "en": True, **NAC, "poe": None},
         "Gi1/0/2": {"u": "10", "t": [], "name": "", "en": True, **NAC, "poe": None},
@@ -509,19 +594,25 @@ def test_vmvlan_decides_the_access_vlan():
         "Gi1/0/4": {"u": None, "t": [], "name": "", "en": False, **NAC, "poe": None},
     }
     assert raw["vmvlan"] == {"Gi1/0/1": "10", "Gi1/0/2": "10", "Gi1/0/4": "0"}    # as read, per port; the trunk port has none
-    assert raw["unmanaged"] == {}
+    # Gi1/0/1 has PVID 1 next to vmVlan 10: a single disagreement goes to vmVlan, the PVID is not judged on a vmVlan port
+    assert raw["pvid"]["Gi1/0/1"] == "1" and raw["unmanaged"] == {}
 
 
-def test_vmvlan_changes_nothing_but_u():
-    """Without the vmVlan rows build_cfg is the plain Q-BRIDGE read (and agrees with the poller); with them only u of the ports
-    that have a vmVlan row differs, plus raw["vmvlan"]. Everything else (t, PVID, PortLists, ...) stays the Q-BRIDGE view."""
+def test_vmvlan_rows_only_change_u_and_t_of_their_ports():
+    """Without the vmVlan rows build_cfg is the plain Q-BRIDGE read (and agrees with the poller). With them only the ports that have
+    a row differ: u from vmVlan and no tagged VLANs; plus raw["vmvlan"]. Everything else stays the Q-BRIDGE view."""
     qbridge = {k: rows for k, rows in W_CISCO.items() if k != "vmVlan"}
     cfg_q, raw_q = snmpwrite.build_cfg(qbridge)
     _assert_same_switch_as_the_poller(qbridge, cfg_q, raw_q)
-    assert {n: st["u"] for n, st in cfg_q["ports"].items()} == {"Gi1/0/1": "1", "Gi1/0/2": "10", "Gi1/0/3": "1", "Gi1/0/4": "1"}
-    cfg, raw = snmpwrite.build_cfg(W_CISCO)
+    assert {n: (st["u"], st["t"]) for n, st in cfg_q["ports"].items()} == {
+        "Gi1/0/1": ("1", ["10"]), "Gi1/0/2": ("10", []), "Gi1/0/3": ("1", ["10", "20"]), "Gi1/0/4": ("1", [])}
+    cfg, raw = snmpwrite.build_cfg(W_CISCO, **CISCO)
     assert {k: v for k, v in cfg.items() if k != "ports"} == {k: v for k, v in cfg_q.items() if k != "ports"}
-    assert {n: {**st, "u": "-"} for n, st in cfg["ports"].items()} == {n: {**st, "u": "-"} for n, st in cfg_q["ports"].items()}
+    for n, st in cfg["ports"].items():
+        if n in raw["vmvlan"]:
+            assert st["t"] == [] and {**st, "u": "-", "t": "-"} == {**cfg_q["ports"][n], "u": "-", "t": "-"}, n
+        else:
+            assert st == cfg_q["ports"][n], n
     assert {k: v for k, v in raw.items() if k != "vmvlan"} == {k: v for k, v in raw_q.items() if k != "vmvlan"}
     assert raw_q["vmvlan"] == {}
 
@@ -529,23 +620,50 @@ def test_vmvlan_changes_nothing_but_u():
 def test_a_hybrid_port_stays_unmanaged_even_with_a_vmvlan_row():
     """Q-BRIDGE has Gi1/0/2 untagged in VLAN 10 and 20, vmVlan says 10: the two views disagree about what the port is, so it stays
     unmanaged without u (vmVlan does not overrule that); raw still shows what vmVlan said."""
-    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, vlanUntagged={"20": "00 40"}, vlanEgress={"20": "00 60"}))
+    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, vlanUntagged={"20": "00 40"}, vlanEgress={"20": "00 60"}), **CISCO)
     assert raw["unmanaged"] == {"Gi1/0/2": "ungetaggt in mehreren VLANs (10, 20): Hybrid-/General-Port, per SNMP nicht verwaltbar"}
-    assert cfg["ports"]["Gi1/0/2"]["u"] is None and raw["vmvlan"]["Gi1/0/2"] == "10"
+    assert cfg["ports"]["Gi1/0/2"]["u"] is None and cfg["ports"]["Gi1/0/2"]["t"] == [] and raw["vmvlan"]["Gi1/0/2"] == "10"
+
+
+def test_a_pvid_mismatch_on_a_port_without_vmvlan_row_still_counts():
+    """The trunk port Gi1/0/3 (no vmVlan row) is a Q-BRIDGE port: native VLAN 1 with PVID 20 makes it unmanaged."""
+    _, raw = snmpwrite.build_cfg(_edit(W_CISCO, pvid={"11": "20"}), **CISCO)
+    assert raw["unmanaged"] == {"Gi1/0/3": "PVID 20 weicht vom ungetaggten VLAN 1 ab – erst am Switch bereinigen"}
 
 
 @pytest.mark.parametrize("value", ["", "zehn", "-1"])
 def test_an_unreadable_vmvlan_fails_closed(value):
     """The access VLAN of a cisco_vmps port is not readable: like a missing ifAdminStatus, no cfg for this switch."""
     with pytest.raises(snmp.SnmpError, match=r"^Port Gi1/0/1: vmVlan unlesbar"):
-        snmpwrite.build_cfg(_edit(W_CISCO, vmVlan={"1": value}))
+        snmpwrite.build_cfg(_edit(W_CISCO, vmVlan={"1": value}), **CISCO)
 
 
 def test_vmvlan_rows_of_other_interfaces_are_ignored():
     """vmVlan rows of interfaces that are no port here change nothing, not even an unreadable value: ifIndex 1005 is in ifName but
     dropped by the port filter, 10101 is not in ifName at all."""
-    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, ifName={"1005": "Vlan5"}, vmVlan={"1005": "abc", "10101": "20"}))
-    assert (cfg, raw) == snmpwrite.build_cfg(W_CISCO)
+    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, ifName={"1005": "Vlan5"}, vmVlan={"1005": "abc", "10101": "20"}), **CISCO)
+    assert (cfg, raw) == snmpwrite.build_cfg(W_CISCO, **CISCO)
+
+
+def test_vmvlan_rows_count_only_under_their_base():
+    """Like every other walk, vmVlan rows are taken only under the OID they were walked from: a row of another column of the same
+    table (vmPortStatus of ifIndex 1) is not read as an access VLAN."""
+    W = {**W_CISCO, "vmVlan": W_CISCO["vmVlan"] + [(f"{VMVLAN.rsplit('.', 1)[0]}.3.1", "2")]}
+    assert snmpwrite.build_cfg(W, **CISCO) == snmpwrite.build_cfg(W_CISCO, **CISCO)
+
+
+def test_a_vmvlan_base_on_the_table_entry_fails_closed():
+    """A driver whose vmvlan OID pointed at the table entry instead of the vmVlan column would walk every column of the table; under
+    that base the index is column.ifIndex, never a plain ifIndex, so the read refuses instead of mixing the columns up."""
+    entry = VMVLAN.rsplit(".", 1)[0]
+    W = {**W_CISCO, "vmVlan": _rows(entry, {"1.1": "1", "2.1": "10", "3.1": "2"})}    # vmVlanType, vmVlan, vmPortStatus of ifIndex 1
+    with pytest.raises(snmp.SnmpError, match=r"^vmVlan: Index 1\.1 ist kein ifIndex"):
+        snmpwrite.build_cfg(W, vmvlan_base=entry)
+
+
+def test_vmvlan_rows_need_their_base():
+    with pytest.raises(TypeError, match="vmvlan_base"):
+        snmpwrite.build_cfg(W_CISCO)
 
 
 # ── read_cfg: the live read ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -599,22 +717,23 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
 @pytest.mark.parametrize("name", list(DRIVERS))
 async def test_read_cfg_walks_vmvlan_only_for_cisco_vmps(agent, name):
     """Every driver reads the nine Q-BRIDGE / IF-MIB walks; a cisco_vmps driver also walks its vmVlan OID (strict, not hex) and
-    then gets build_cfg with the vmVlan rows: port 1 in VLAN 99 and port 6 in none, as vmVlan says."""
+    then gets build_cfg with the vmVlan rows under that base: ports 1 and 6 are access ports in VLAN 99 and in none, untagged."""
     driver = DRIVERS[name]
     cfg, raw = await snmpwrite.read_cfg(ROW, driver)
 
     walked = {base: key in HEX_WALKS for key, base in BASES.items()}
-    W = W_SAMPLE
+    W, base = W_SAMPLE, None
     if driver.vlan_strategy == "cisco_vmps":
         walked[VMVLAN] = False
-        W = {**W_SAMPLE, "vmVlan": VMVLAN_SAMPLE}
+        W, base = {**W_SAMPLE, "vmVlan": VMVLAN_SAMPLE}, VMVLAN
     assert len(agent) == len(walked)
     assert {c["oid"]: c["hex"] for c in agent} == walked
     assert all(c["strict"] is True for c in agent)
-    want_cfg, want_raw = snmpwrite.build_cfg(W)
+    want_cfg, want_raw = snmpwrite.build_cfg(W, vmvlan_base=base)
     assert (cfg, raw) == ({**want_cfg, "hostname": "SW-EK-01"}, want_raw)
     if driver.vlan_strategy == "cisco_vmps":
-        assert cfg["ports"]["1"]["u"] == "99" and cfg["ports"]["6"]["u"] is None and raw["vmvlan"] == {"1": "99", "6": "0"}
+        assert (cfg["ports"]["1"]["u"], cfg["ports"]["1"]["t"], cfg["ports"]["6"]["u"]) == ("99", [], None)
+        assert raw["vmvlan"] == {"1": "99", "6": "0"}
 
 
 @pytest.mark.parametrize("sys_name, hostname", [("SW-EK-01", "SW-EK-01"), (None, ""), ("", "")])
@@ -678,3 +797,60 @@ async def test_read_cfg_passes_other_walk_errors_through(monkeypatch):
     with pytest.raises(FileNotFoundError) as caught:
         await snmpwrite.read_cfg(ROW, DRIVER)
     assert caught.value is err
+
+
+# ── read_cfg end to end: the real snmp.walk / _run / _parse, only the snmpbulkwalk processes faked ──────────────────────────────
+class _Proc:
+    """A finished snmpbulkwalk: what it printed and how it exited."""
+
+    def __init__(self, out: bytes, err: bytes, returncode: int):
+        self.returncode, self._out, self._err = returncode, out, err
+
+    async def communicate(self):
+        return self._out, self._err
+
+    def kill(self):
+        pass
+
+
+def _as_printed(key: str, rows) -> str:
+    """Walk rows as snmpbulkwalk prints them with -On -Oq (and -Ox for the PortLists): strings in quotes, numbers and hex bare."""
+    quoted = key in ("ifName", "ifAlias", "vlanName")
+    return "".join(f'.{oid} "{val}"\n' if quoted else f".{oid} {val}\n" for oid, val in rows)
+
+
+@pytest.fixture
+def net_snmp(monkeypatch):
+    """snmpbulkwalk answers with W_SAMPLE as text, picked by the OID at the end of its argv. `net_snmp[oid] = (stdout, exit code)`
+    changes one walk; a non-zero exit comes with a timeout message on stderr."""
+    answers = {BASES[k]: (_as_printed(k, rows), 0) for k, rows in W_SAMPLE.items()}
+
+    async def fake_exec(*argv, **kwargs):
+        out, rc = answers[argv[-1]]
+        return _Proc(out.encode(), f"Timeout: No Response from {HOST}\n".encode() if rc else b"", rc)
+
+    monkeypatch.setattr(snmp.asyncio, "create_subprocess_exec", fake_exec)
+    return answers
+
+
+async def test_read_cfg_end_to_end_through_the_real_walk(net_snmp):
+    cfg, raw = await snmpwrite.read_cfg(ROW, DRIVER)
+    want_cfg, want_raw = snmpwrite.build_cfg(W_SAMPLE)
+    assert (cfg, raw) == ({**want_cfg, "hostname": "SW-EK-01"}, want_raw)
+
+
+async def test_read_cfg_end_to_end_refuses_a_walk_cut_short(net_snmp):
+    """ifStack stops after its first five rows (before Trk1's members) and snmpbulkwalk exits 2. Read leniently, ports 4 and 5 would
+    turn into ports of their own without a bridge port; read strictly, the whole read fails."""
+    text, _ = net_snmp[IF_STACK]
+    net_snmp[IF_STACK] = ("".join(text.splitlines(keepends=True)[:5]), 2)
+    with pytest.raises(snmp.SnmpError, match=f"^Timeout: No Response from {HOST}$"):
+        await snmpwrite.read_cfg(ROW, DRIVER)
+
+
+async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_portlist(net_snmp):
+    """A line that is not hex behind the last egress PortList would turn into phantom bridge ports; the strict hex walk refuses it."""
+    text, _ = net_snmp[VLAN_EGRESS]
+    net_snmp[VLAN_EGRESS] = (text + "End of MIB\n", 0)
+    with pytest.raises(snmp.SnmpError, match="Hex-Wert"):
+        await snmpwrite.read_cfg(ROW, DRIVER)
