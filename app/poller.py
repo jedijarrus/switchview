@@ -20,6 +20,7 @@ O = {
     "ifHighSpeed": "1.3.6.1.2.1.31.1.1.1.15",
     "ifOper": "1.3.6.1.2.1.2.2.1.8",
     "ifAdmin": "1.3.6.1.2.1.2.2.1.7",
+    "ifType": "1.3.6.1.2.1.2.2.1.3",
     "bp2if": "1.3.6.1.2.1.17.1.4.1.2",
     "baseMac": "1.3.6.1.2.1.17.1.1",
     "vlanName": "1.3.6.1.2.1.17.7.1.4.3.1.1",
@@ -34,6 +35,10 @@ O = {
     "lldpPortId": "1.0.8802.1.1.2.1.4.1.1.7",
 }
 HEX = {"baseMac", "vlanEgress", "vlanUntagged"}
+
+# Portauswahl nach ifType (IANAifType; der Walk liefert die Zahl), siehe select_ports
+PHYS_IFTYPES = frozenset({"6", "117"})  # ethernetCsmacd, gigabitEthernet: physische Ports
+LAG_IFTYPE = "161"  # ieee8023adLag: Trunk / LAG (Port-channel, ae, Bridge-Aggregation, lag, ...)
 
 _locks: dict[int, asyncio.Lock] = {}
 
@@ -62,6 +67,59 @@ def _tbl(rows: list[tuple[str, str]], base: str) -> dict[str, str]:
     return {oid[len(p):]: val for oid, val in rows if oid.startswith(p)}
 
 
+def by_iftype(driver_name: str) -> bool:
+    """Waehlt select_ports die Ports dieses Treibers nach ifType? Ja fuer jeden ausser procurve, auch fuer einen unbekannten Namen
+    (drivers.driver_for nimmt dafuer generic). Nur dann braucht es den ifType-Walk."""
+    return driver_name != "procurve"
+
+
+def select_ports(ifname: dict[str, str], iftype: dict[str, str], ifstack: dict[str, str], driver_name: str
+                 ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+    """Welche Interfaces Ports sind und welche Trunks sie bilden. Die eine Stelle, an der Anzeige (_build) und Schreibweg
+    (snmpwrite.build_cfg) das entscheiden, damit beide denselben Switch sehen.
+
+    Eingaben sind _tbl-Tabellen: ifname {ifIndex: ifName}, iftype {ifIndex: ifType}, ifstack {"hoeher.tiefer": Status}. Ergebnis, alles
+    als ifIndex: (Ports in ifIndex-Reihenfolge, member_of {Mitglied: Trunk}, members {Trunk: [Mitglieder in ifStack-Reihenfolge]}).
+    Ein Port braucht in jedem Fall einen ifName und einen ganzzahligen ifIndex.
+
+    procurve, genau wie seit jeher (iftype bleibt ungenutzt): Port ist ein Interface mit ifIndex < 1000, dessen Name weder VLAN
+    enthaelt noch mit LO beginnt noch LOOPBACK enthaelt (Gross-/Kleinschreibung egal). Mitglied ist, was im ifStack unter einem
+    Interface namens Trk... steht; members fuehrt nur Trunks mit Mitgliedern (ein leerer TrkN ist ueber seinen Namen Trunk).
+
+    Jeder andere Treiber, nach ifType, ohne ifIndex-Grenze und ohne Namensregeln: Port ist ein Interface vom Typ 6 / 117 (physisch)
+    oder 161 (LAG). Alles andere ist kein Port, auch ein Interface ohne ifType-Zeile: VLAN-Interfaces, Loopback, Null, Tunnel,
+    Subinterfaces, Stack-Ports, ... Trunk ist jeder LAG-Port: members fuehrt ihn, auch ohne Mitglieder (dann mit []). Mitglied ist,
+    was im ifStack direkt unter ihm steht; was unter einem anderen Interface steht (unter einem Subinterface oder einer logischen
+    Unit), ist kein Mitglied.
+    """
+    member_of: dict[str, str] = {}
+    members: dict[str, list[str]] = {}
+    order = sorted(ifname, key=lambda x: int(x) if x.isdigit() else 10**9)
+    if not by_iftype(driver_name):
+        for k in ifstack:
+            hi, _, lo = k.partition(".")
+            if hi != "0" and lo != "0" and ifname.get(hi, "").startswith("Trk"):
+                member_of[lo] = hi
+                members.setdefault(hi, []).append(lo)
+        ports = []
+        for ifi in order:
+            if not ifi.isdigit() or int(ifi) >= 1000:
+                continue
+            up = ifname[ifi].upper()
+            if "VLAN" in up or up.startswith("LO") or "LOOPBACK" in up:
+                continue
+            ports.append(ifi)
+        return ports, member_of, members
+    ports = [ifi for ifi in order if ifi.isdigit() and (iftype.get(ifi) in PHYS_IFTYPES or iftype.get(ifi) == LAG_IFTYPE)]
+    members = {ifi: [] for ifi in ports if iftype[ifi] == LAG_IFTYPE}
+    for k in ifstack:
+        hi, _, lo = k.partition(".")
+        if hi != "0" and lo != "0" and hi in members:
+            member_of[lo] = hi
+            members[hi].append(lo)
+    return ports, member_of, members
+
+
 async def poll_switch(switch_id: int) -> dict:
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
@@ -71,6 +129,10 @@ async def poll_switch(switch_id: int) -> dict:
         if not row:
             raise ValueError("Switch nicht gefunden")
         host, cred = row["host"], creds_of(row)
+        driver_name = row["driver"] or "procurve"
+        # Walks, ohne die es kein Ergebnis gibt: sysName und ifName, dazu ifType, wo select_ports nach ihm waehlt (ohne ifType
+        # stuende der Switch sonst bis zum naechsten Poll ohne Ports da)
+        needed = ("sysName", "ifName", "ifType") if by_iftype(driver_name) else ("sysName", "ifName")
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             keys = list(O)
@@ -78,12 +140,12 @@ async def poll_switch(switch_id: int) -> dict:
             W = {}
             for k, r in zip(keys, results):
                 if isinstance(r, Exception):
-                    if k in ("sysName", "ifName"):
+                    if k in needed:
                         raise r
                     log.warning("%s: Walk %s fehlgeschlagen: %s", host, k, r)
                     r = []
                 W[k] = r
-            data = _build(W)
+            data = _build(W, driver_name)
         except Exception as e:  # noqa: BLE001
             async with db() as conn:
                 await conn.execute("UPDATE switches SET last_poll = ?, last_poll_ok = 0, last_error = ? WHERE id = ?", (now, str(e)[:300], switch_id))
@@ -113,7 +175,9 @@ async def poll_switch(switch_id: int) -> dict:
         return {"ok": True, "ports": len(data["ports"]), "macs": len(data["macs"])}
 
 
-def _build(W: dict) -> dict:
+def _build(W: dict, driver_name: str = "procurve") -> dict:
+    """Die Anzeige-Daten aus den Walks W (Schluessel wie O). Welche Interfaces Ports und Trunks sind, entscheidet select_ports nach
+    dem Treiber; ifType wird nur gelesen, wenn er danach waehlt."""
     sysName = (W["sysName"][0][1] if W["sysName"] else "")
     sysDescr = (W["sysDescr"][0][1] if W["sysDescr"] else "")
     model, fw = parse_descr(sysDescr)
@@ -127,14 +191,6 @@ def _build(W: dict) -> dict:
     egress = {k: snmp.bitmap_ports(v) for k, v in _tbl(W["vlanEgress"], O["vlanEgress"]).items()}
     untag = {k: snmp.bitmap_ports(v) for k, v in _tbl(W["vlanUntagged"], O["vlanUntagged"]).items()}
     pvid = _tbl(W["pvid"], O["pvid"])
-
-    member_of: dict[str, str] = {}
-    members: dict[str, list[str]] = {}
-    for k, _v in _tbl(W["ifStack"], O["ifStack"]).items():
-        hi, _, lo = k.partition(".")
-        if hi != "0" and lo != "0" and ifname.get(hi, "").startswith("Trk"):
-            member_of[lo] = hi
-            members.setdefault(hi, []).append(lo)
 
     lldp: dict[str, list[list[str]]] = {}
     l_desc = _tbl(W["lldpPortDesc"], O["lldpPortDesc"]); l_id = _tbl(W["lldpPortId"], O["lldpPortId"])
@@ -157,15 +213,13 @@ def _build(W: dict) -> dict:
         mac = ":".join(f"{int(x):02x}" for x in parts[1:7])
         fdb_by_bp.setdefault(bp, []).append((mac, fid2vlan.get(parts[0], parts[0])))
 
+    iftype = _tbl(W["ifType"], O["ifType"]) if by_iftype(driver_name) else {}
+    port_ifis, member_of, members = select_ports(ifname, iftype, _tbl(W["ifStack"], O["ifStack"]), driver_name)
     ports, macs = [], []
-    for ifi in sorted(ifname, key=lambda x: int(x) if x.isdigit() else 10**9):
-        if not ifi.isdigit() or int(ifi) >= 1000:
-            continue
+    for ifi in port_ifis:
         name = ifname[ifi]
-        up = name.upper()
-        if "VLAN" in up or up.startswith("LO") or "LOOPBACK" in up:
-            continue
-        is_trk = name.startswith("Trk")
+        # Trunk: bei ProCurve jedes Trk-Interface (auch ohne Mitglieder), sonst jeder LAG-Port (select_ports fuehrt ihn in members)
+        is_trk = ifi in members if by_iftype(driver_name) else name.startswith("Trk")
         trk = member_of.get(ifi)
         eff = if2bp.get(trk) if trk else if2bp.get(ifi)
         b = int(eff) if eff else None

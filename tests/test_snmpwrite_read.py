@@ -12,7 +12,7 @@ wrong state of a live switch, so the tests pin three things:
   * agreement with the display poller: the same walk rows fed to poller._build give the same untagged / tagged / admin / alias /
     pvid for every port (on the fixture, on odd agent rows and on a few hundred random switches), so the UI, the inventory and
     the write path see one and the same switch;
-  * fail closed: a failed walk (read_cfg walks strictly, so a walk cut short or a stray line in a PortList counts as failed), or
+  * fail closed: a failed walk (read_cfg walks strictly, so a walk cut short or a stray line behind any value counts as failed), or
     rows that cannot describe the switch safely (a port name twice, a VLAN table or ifAdminStatus read incompletely, a malformed
     index), raise SnmpError instead of returning a partial cfg. A port the cfg cannot describe on its own only takes that port
     out: untagged in more than one VLAN (hybrid / general port), or a PVID that differs from its untagged VLAN. It is listed in
@@ -62,9 +62,11 @@ BASES = {
     "vlanEgress": VLAN_EGRESS, "vlanUntagged": VLAN_UNTAGGED, "pvid": PVID, "ifStack": IF_STACK,
 }
 HEX_WALKS = {"vlanEgress", "vlanUntagged"}    # the two PortLists are walked with -Ox (hex), like the poller does
-# Only for drivers with vlan_strategy cisco_vmps, a tenth walk:
+# Only for drivers that select their ports by ifType (every driver but procurve, see poller.select_ports), one more walk:
+IF_TYPE = "1.3.6.1.2.1.2.2.1.3"               # ifType (IANAifType)  .<ifIndex>   6 / 117 physical port, 161 LAG, anything else no port
+# Only for drivers with vlan_strategy cisco_vmps, one more:
 VMVLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"       # vmVlan (CISCO-VLAN-MEMBERSHIP-MIB)  .<ifIndex>   access VLAN, 0 = none; trunk ports have no row
-WALK_BASES = {**BASES, "vmVlan": VMVLAN}
+WALK_BASES = {**BASES, "ifType": IF_TYPE, "vmVlan": VMVLAN}
 
 
 def _rows(base: str, values: dict) -> list[tuple[str, str]]:
@@ -109,9 +111,13 @@ W_SAMPLE = {
     "ifStack": _rows(IF_STACK, {"0.1": "1", "0.2": "1", "0.3": "1", "0.6": "1", "0.289": "1", "1.0": "1", "2.0": "1", "3.0": "1",
                                 "4.0": "1", "5.0": "1", "6.0": "1", "289.4": "1", "289.5": "1"}),
 }
+# The sample switch's ifType rows, for the drivers that select by them: ports 1-6 Ethernet, Trk1 a LAG, the VLAN interfaces virtual,
+# lo0 a loopback. So the ifType rule selects the very ports the ProCurve rule does.
+IFTYPE_SAMPLE = _rows(IF_TYPE, {"1": "6", "2": "6", "3": "6", "4": "6", "5": "6", "6": "6", "289": "161", "1001": "53", "1020": "53",
+                                "1030": "53", "1099": "53", "4097": "24"})
 # The sample switch as a cisco_vmps driver would read it: vmVlan puts port 1 into VLAN 99 (Q-BRIDGE: 20) and port 6 into none.
 VMVLAN_SAMPLE = _rows(VMVLAN, {"1": "99", "6": "0"})
-RECORDING = {BASES[k]: rows for k, rows in W_SAMPLE.items()} | {VMVLAN: VMVLAN_SAMPLE}    # what the fake agent answers, by OID
+RECORDING = {BASES[k]: rows for k, rows in W_SAMPLE.items()} | {IF_TYPE: IFTYPE_SAMPLE, VMVLAN: VMVLAN_SAMPLE}    # the fake agent, by OID
 
 NAC = {"x": False, "m": False, "cl": None, "al": None, "xuv": None, "muv": None}    # 802.1X / MAC auth: not readable here, defaulted
 EXPECTED_PORTS = {
@@ -427,7 +433,8 @@ def _random_switch(rng: random.Random) -> tuple[dict, dict]:
         if len(un) > 1:
             reason = f"ungetaggt in mehreren VLANs ({', '.join(un)}): Hybrid-/General-Port, per SNMP nicht verwaltbar"
         elif u is not None and bp in pvids and pvids[bp] != u:
-            reason, u = f"PVID {pvids[bp]} weicht vom ungetaggten VLAN {u} ab – erst am Switch bereinigen", None
+            reason, u = (f"PVID {pvids[bp]} weicht vom ungetaggten VLAN {u} ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS "
+                         f"zugewiesen) – per SNMP nicht verwaltbar"), None
         ports[name] = {"u": u, "t": tagged, "name": aliases.get(ifi, ""), "en": admins[ifi] == "1", "unmanaged": reason}
         if bp:
             port2bp[name] = bp
@@ -503,7 +510,8 @@ def test_a_port_whose_pvid_differs_from_its_untagged_vlan_is_unmanaged():
     untagged VLAN, PVID 1 as ProCurve reports it) is not affected, nor is any other port."""
     W = _variant(pvid={"3": "1"})
     cfg, raw = snmpwrite.build_cfg(W)
-    assert raw["unmanaged"] == {"1": "PVID 1 weicht vom ungetaggten VLAN 20 ab – erst am Switch bereinigen"}
+    assert raw["unmanaged"] == {"1": "PVID 1 weicht vom ungetaggten VLAN 20 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS "
+                                     "zugewiesen) – per SNMP nicht verwaltbar"}
     assert cfg["ports"]["1"] == {**EXPECTED_PORTS["1"], "u": None}
     assert {n: st for n, st in cfg["ports"].items() if n != "1"} == {n: st for n, st in EXPECTED_PORTS.items() if n != "1"}
     assert raw["pvid"]["1"] == "1" and raw["pvid"]["3"] == "1"
@@ -513,7 +521,8 @@ def test_a_port_whose_pvid_differs_from_its_untagged_vlan_is_unmanaged():
 def test_a_trunk_with_a_differing_pvid_takes_its_members_along():
     W = _variant(pvid={"7": "99"})    # Trk1: untagged 1, PVID 99
     _, raw = snmpwrite.build_cfg(W)
-    reason = "PVID 99 weicht vom ungetaggten VLAN 1 ab – erst am Switch bereinigen"
+    reason = ("PVID 99 weicht vom ungetaggten VLAN 1 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS zugewiesen) – per SNMP "
+              "nicht verwaltbar")
     assert raw["unmanaged"] == {"4": reason, "5": reason, "Trk1": reason}
 
 
@@ -530,6 +539,17 @@ def test_a_malformed_index_fails_closed_as_snmp_error(edits):
     """A malformed index surfaces as SnmpError with context (what callers of read_cfg handle), never as a bare ValueError."""
     with pytest.raises(snmp.SnmpError, match=r"^Unerwartete SNMP-Daten \(Index oder Wert nicht lesbar\): .*'(3\.0|x)'"):
         snmpwrite.build_cfg(_variant(**edits))
+
+
+def test_a_programming_error_is_not_reported_as_bad_switch_data(monkeypatch):
+    """Only a ValueError (an index or value that int() cannot read) means bad switch data. Every lookup of switch data in build_cfg
+    is guarded, so a KeyError can only be a bug in the code: it surfaces as itself, not disguised as an unreadable switch."""
+    def broken():
+        raise KeyError("u")
+
+    monkeypatch.setattr(cfgparse, "_empty_port", broken)
+    with pytest.raises(KeyError, match="'u'"):
+        snmpwrite.build_cfg(W_SAMPLE)
 
 
 @pytest.mark.parametrize("walk", ["vlanName", "vlanEgress", "vlanUntagged"])
@@ -628,7 +648,8 @@ def test_a_hybrid_port_stays_unmanaged_even_with_a_vmvlan_row():
 def test_a_pvid_mismatch_on_a_port_without_vmvlan_row_still_counts():
     """The trunk port Gi1/0/3 (no vmVlan row) is a Q-BRIDGE port: native VLAN 1 with PVID 20 makes it unmanaged."""
     _, raw = snmpwrite.build_cfg(_edit(W_CISCO, pvid={"11": "20"}), **CISCO)
-    assert raw["unmanaged"] == {"Gi1/0/3": "PVID 20 weicht vom ungetaggten VLAN 1 ab – erst am Switch bereinigen"}
+    assert raw["unmanaged"] == {"Gi1/0/3": "PVID 20 weicht vom ungetaggten VLAN 1 ab (Fehlkonfiguration oder dynamisch per "
+                                           "802.1X/RADIUS zugewiesen) – per SNMP nicht verwaltbar"}
 
 
 @pytest.mark.parametrize("value", ["", "zehn", "-1"])
@@ -716,21 +737,27 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
 
 @pytest.mark.parametrize("name", list(DRIVERS))
 async def test_read_cfg_walks_vmvlan_only_for_cisco_vmps(agent, name):
-    """Every driver reads the nine Q-BRIDGE / IF-MIB walks; a cisco_vmps driver also walks its vmVlan OID (strict, not hex) and
-    then gets build_cfg with the vmVlan rows under that base: ports 1 and 6 are access ports in VLAN 99 and in none, untagged."""
+    """Every driver reads the nine Q-BRIDGE / IF-MIB walks. Every driver but procurve also walks ifType (it selects its ports by it,
+    see tests/test_port_discovery.py), and a cisco_vmps driver its vmVlan OID; both strict, not hex. The result is build_cfg for
+    that driver on what the agent answered, with the vmVlan rows under their base: ports 1 and 6 are access ports in VLAN 99 and in
+    none, untagged. On this ProCurve-shaped switch the ifType rule selects the same ports as the ProCurve rule."""
     driver = DRIVERS[name]
     cfg, raw = await snmpwrite.read_cfg(ROW, driver)
 
     walked = {base: key in HEX_WALKS for key, base in BASES.items()}
-    W, base = W_SAMPLE, None
+    W, base = dict(W_SAMPLE), None
+    if name != "procurve":
+        walked[IF_TYPE] = False
+        W["ifType"] = IFTYPE_SAMPLE
     if driver.vlan_strategy == "cisco_vmps":
         walked[VMVLAN] = False
-        W, base = {**W_SAMPLE, "vmVlan": VMVLAN_SAMPLE}, VMVLAN
+        W["vmVlan"], base = VMVLAN_SAMPLE, VMVLAN
     assert len(agent) == len(walked)
     assert {c["oid"]: c["hex"] for c in agent} == walked
     assert all(c["strict"] is True for c in agent)
-    want_cfg, want_raw = snmpwrite.build_cfg(W, vmvlan_base=base)
+    want_cfg, want_raw = snmpwrite.build_cfg(W, name, vmvlan_base=base)
     assert (cfg, raw) == ({**want_cfg, "hostname": "SW-EK-01"}, want_raw)
+    assert (want_cfg, want_raw) == snmpwrite.build_cfg(W, "procurve", vmvlan_base=base)
     if driver.vlan_strategy == "cisco_vmps":
         assert (cfg["ports"]["1"]["u"], cfg["ports"]["1"]["t"], cfg["ports"]["6"]["u"]) == ("99", [], None)
         assert raw["vmvlan"] == {"1": "99", "6": "0"}
@@ -762,10 +789,11 @@ async def test_read_cfg_does_not_touch_the_database_or_take_a_lock(monkeypatch, 
     assert list(poller._locks) == [ROW["id"]]
 
 
-@pytest.mark.parametrize("driver, failing", [("procurve", key) for key in BASES] + [("cisco", "vmVlan")])
+@pytest.mark.parametrize("driver, failing", [("procurve", key) for key in BASES] + [("cisco", "ifType"), ("cisco", "vmVlan")])
 async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, failing):
     """Stricter than the display poller (which skips a failed walk): any failed walk raises that very error, and only once every
-    other walk has finished, so nothing is still talking to the switch when read_cfg returns. For cisco_vmps the vmVlan walk too."""
+    other walk has finished, so nothing is still talking to the switch when read_cfg returns. For cisco the ifType and vmVlan walks
+    too."""
     err = snmp.SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
     finished = []
 
@@ -780,7 +808,7 @@ async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, fa
     with pytest.raises(snmp.SnmpError) as caught:
         await snmpwrite.read_cfg(ROW, DRIVERS[driver])
     assert caught.value is err
-    walked = [*BASES.values()] + ([VMVLAN] if driver == "cisco" else [])
+    walked = [*BASES.values()] + ([IF_TYPE, VMVLAN] if driver == "cisco" else [])
     assert sorted(finished) == sorted(base for base in walked if base != WALK_BASES[failing])
 
 
@@ -853,4 +881,15 @@ async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_portlist(net_snmp):
     text, _ = net_snmp[VLAN_EGRESS]
     net_snmp[VLAN_EGRESS] = (text + "End of MIB\n", 0)
     with pytest.raises(snmp.SnmpError, match="Hex-Wert"):
+        await snmpwrite.read_cfg(ROW, DRIVER)
+
+
+@pytest.mark.parametrize("key", ["ifName", "ifAlias", "vlanName", "ifAdmin", "bp2if", "pvid", "ifStack"])
+async def test_read_cfg_end_to_end_refuses_a_stray_line_in_a_text_walk(net_snmp, key):
+    """The same behind the last row of a text walk, a quoted string or a bare number: read leniently, the line would be glued to
+    that value (an ifAlias a revert would write back, a bridge port or PVID that is no number any more); the strict text walk
+    refuses it."""
+    text, _ = net_snmp[BASES[key]]
+    net_snmp[BASES[key]] = (text + "End of MIB\n", 0)
+    with pytest.raises(snmp.SnmpError, match=r"^Unerwartete Zeile hinter dem Wert von "):
         await snmpwrite.read_cfg(ROW, DRIVER)

@@ -54,20 +54,57 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
 _HEX_VALUE = re.compile(r"[0-9A-Fa-f\s]*")
 
 
-def _parse(text: str, hex_strict: bool = False) -> list[tuple[str, str]]:
+def _string_open(oid: str, val: str) -> bool:
+    """Ist val ein String in Anfuehrungszeichen, dessen schliessendes Anfuehrungszeichen noch fehlt? net-snmp schreibt \\" und \\\\ im
+    String mit Backslash, die schliessen ihn nicht. SnmpError, wenn hinter dem schliessenden Anfuehrungszeichen noch etwas steht: das
+    gibt net-snmp nie aus. Ein Wert ohne fuehrendes Anfuehrungszeichen (Zahl, Hex, OID) ist nie offen."""
+    if not val.startswith('"'):
+        return False
+    i = 1
+    while i < len(val):
+        if val[i] == "\\":
+            i += 2
+        elif val[i] == '"':
+            if i != len(val) - 1:
+                raise SnmpError(f"Text hinter dem Ende des Strings in {oid}: {val[:80]!r}")
+            return False
+        else:
+            i += 1
+    return True
+
+
+def _parse(text: str, hex_strict: bool = False, text_strict: bool = False) -> list[tuple[str, str]]:
     """Zeilen "OID Wert" -> [(oid, wert)]; eine Zeile ohne OID gehoert als Fortsetzung zum Wert davor (lange Werte bricht net-snmp
-    um). hex_strict (ein strikter Hex-Walk): jeder Wert, mit seinen Fortsetzungszeilen, muss reines Hex sein, sonst SnmpError. Eine
-    fremde Zeile hinter einer PortList (etwa "End of MIB") wuerde sonst angehaengt, und hex_to_bytes machte aus ihren Buchstaben a-f
-    Bits fuer Bridge-Ports, die es nicht gibt."""
+    um). Leerzeilen und Zeilen vor der ersten OID gehoeren zu keinem Wert. Die beiden strikten Modi aendern an den Zeilen nichts, sie
+    lehnen nur ab (SnmpError), was nicht zu einem Wert gehoeren kann:
+
+    hex_strict (ein strikter Hex-Walk, mit -Ox): jeder Wert, mit seinen Fortsetzungszeilen, muss reines Hex sein. Eine fremde Zeile
+    hinter einer PortList (etwa "End of MIB") wuerde sonst angehaengt, und hex_to_bytes machte aus ihren Buchstaben a-f Bits fuer
+    Bridge-Ports, die es nicht gibt.
+
+    text_strict (ein strikter Walk ohne -Ox): umbrechen kann nur ein String in Anfuehrungszeichen, Zahlen und andere nackte Werte
+    nie. Eine Fortsetzungszeile gilt also nur, solange ein String offen ist; jede andere (hinter einer Zahl, hinter einem
+    geschlossenen String) ist eine fremde Zeile, die sonst im letzten Wert landete, etwa in einem ifAlias, den ein Revert auf den
+    Switch zurueckschriebe. Ein String muss vor der naechsten Zeile mit OID und vor dem Ende der Ausgabe geschlossen sein, und
+    hinter seinem schliessenden Anfuehrungszeichen darf nichts mehr stehen (siehe _string_open)."""
     rows: list[tuple[str, str]] = []
+    open_string = False  # nur text_strict: der Wert der letzten Zeile ist ein String, dessen Ende noch fehlt
     for line in text.splitlines():
         if line.startswith("."):
+            if open_string:
+                raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {rows[-1][1][:80]!r}")
             oid, _, val = line.partition(" ")
             rows.append((oid.lstrip("."), val.strip()))
+            open_string = text_strict and _string_open(*rows[-1])
         elif rows and line.strip():
+            if text_strict and not open_string:
+                raise SnmpError(f"Unerwartete Zeile hinter dem Wert von {rows[-1][0]}: {line[:80]!r}")
             # Fortsetzung eines mehrzeiligen Strings
             oid, val = rows[-1]
             rows[-1] = (oid, val + "\n" + line)
+            open_string = text_strict and _string_open(*rows[-1])
+    if open_string:
+        raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {rows[-1][1][:80]!r}")
     out = []
     for oid, val in rows:
         if "No Such Object" in val or "No Such Instance" in val or "No more variables" in val:
@@ -84,13 +121,14 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
     """snmpbulkwalk unter oid. snmpbulkwalk gibt jede Zeile sofort aus; bricht der Walk mittendrin ab (Timeout, Fehlerpaket), endet
     es mit Exit-Code != 0, die Zeilen bis dahin stehen aber schon in stdout. strict=False (Standard, der Poller): das gilt als
     Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle;
-    mit hex_values muss dann auch jeder Wert reines Hex sein (siehe _parse).
+    dazu muss jede Zeile zu einem Wert gehoeren: mit hex_values ist jeder Wert reines Hex, ohne kann nur ein String umbrechen (siehe
+    _parse).
     """
     cmd = ["snmpbulkwalk", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25"]
     if hex_values:
         cmd.append("-Ox")
     cmd += [host, oid]
-    return _parse(await _run(cmd, timeout, strict=strict), hex_strict=strict and hex_values)
+    return _parse(await _run(cmd, timeout, strict=strict), hex_strict=strict and hex_values, text_strict=strict and not hex_values)
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
