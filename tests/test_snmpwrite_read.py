@@ -12,8 +12,12 @@ wrong state of a live switch, so the tests pin three things:
   * agreement with the display poller: the same walk rows fed to poller._build give the same untagged / tagged / admin / alias /
     pvid for every port (on the fixture, on odd agent rows and on a few hundred random switches), so the UI, the inventory and
     the write path see one and the same switch;
-  * fail closed: a failed walk, or rows that cannot describe the switch safely (a port name twice, a port untagged in two VLANs,
-    a VLAN table or ifAdminStatus read incompletely), raise instead of returning a partial cfg.
+  * fail closed: a failed walk (read_cfg walks strictly, so a walk cut short counts as failed), or rows that cannot describe the
+    switch safely (a port name twice, a VLAN table or ifAdminStatus read incompletely), raise instead of returning a partial cfg.
+    A port untagged in more than one VLAN (hybrid / general port) only takes that port out: it is listed in raw["unmanaged"]
+    and has no u;
+  * cisco_vmps: the access VLAN of a port comes from vmVlan, the very object the write path sets for it, so verify reads back
+    what was written.
 
 Nothing here touches net-snmp, the network, a switch or the app database: snmp.walk is replaced by a fake agent that answers from
 the fixture by OID. Modules are imported flat (app/ is on sys.path via pytest.ini), exactly as the app imports them.
@@ -57,6 +61,9 @@ BASES = {
     "vlanEgress": VLAN_EGRESS, "vlanUntagged": VLAN_UNTAGGED, "pvid": PVID, "ifStack": IF_STACK,
 }
 HEX_WALKS = {"vlanEgress", "vlanUntagged"}    # the two PortLists are walked with -Ox (hex), like the poller does
+# Only for drivers with vlan_strategy cisco_vmps, a tenth walk:
+VMVLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"       # vmVlan (CISCO-VLAN-MEMBERSHIP-MIB)  .<ifIndex>   access VLAN, 0 = none; trunk ports have no row
+WALK_BASES = {**BASES, "vmVlan": VMVLAN}
 
 
 def _rows(base: str, values: dict) -> list[tuple[str, str]]:
@@ -101,7 +108,9 @@ W_SAMPLE = {
     "ifStack": _rows(IF_STACK, {"0.1": "1", "0.2": "1", "0.3": "1", "0.6": "1", "0.289": "1", "1.0": "1", "2.0": "1", "3.0": "1",
                                 "4.0": "1", "5.0": "1", "6.0": "1", "289.4": "1", "289.5": "1"}),
 }
-RECORDING = {BASES[k]: rows for k, rows in W_SAMPLE.items()}    # what the fake agent answers, by walked base OID
+# The sample switch as a cisco_vmps driver would read it: vmVlan puts port 1 into VLAN 99 (Q-BRIDGE: 20) and port 6 into none.
+VMVLAN_SAMPLE = _rows(VMVLAN, {"1": "99", "6": "0"})
+RECORDING = {BASES[k]: rows for k, rows in W_SAMPLE.items()} | {VMVLAN: VMVLAN_SAMPLE}    # what the fake agent answers, by OID
 
 NAC = {"x": False, "m": False, "cl": None, "al": None, "xuv": None, "muv": None}    # 802.1X / MAC auth: not readable here, defaulted
 EXPECTED_PORTS = {
@@ -116,7 +125,7 @@ EXPECTED_PORTS = {
 CFG_KEYS = ["hostname", "primary_vlan", "mgmt_vlan", "auth_active", "eap_radius", "login_radius", "addr_format", "trunks", "vlans",
             "voice_vlans", "radius", "ports"]
 PORT_KEYS = {"u", "t", "name", "en", "x", "m", "cl", "al", "xuv", "muv", "poe"}
-RAW_KEYS = {"egress", "untagged", "pvid", "admin", "alias", "poe", "port2bp", "bp2port", "ifindex"}
+RAW_KEYS = {"egress", "untagged", "pvid", "admin", "alias", "poe", "port2bp", "bp2port", "ifindex", "unmanaged", "vmvlan"}
 
 # A switches row as far as read_cfg looks at it; no secrets set, so poller.creds_of needs no SECRET_KEY.
 ROW = {"id": 7, "name": "SW-EK-01", "host": HOST, "sys_name": "SW-EK-01", "driver": "procurve", "snmp_version": "2c",
@@ -128,13 +137,13 @@ def _oid_key(row: tuple[str, str]) -> list[int]:
     return [int(part) for part in row[0].split(".")]
 
 
-def _variant(**edits) -> dict:
-    """W_SAMPLE with single rows changed: walk key -> {index: new value, or None to drop the row}. Rows stay in walk order."""
-    W = copy.deepcopy(W_SAMPLE)
+def _edit(W: dict, **edits) -> dict:
+    """A copy of W with single rows changed: walk key -> {index: new value, or None to drop the row}. Rows stay in walk order."""
+    W = copy.deepcopy(W)
     for key, changed in edits.items():
         rows = dict(W[key])
         for index, value in changed.items():
-            oid = f"{BASES[key]}.{index}"
+            oid = f"{WALK_BASES[key]}.{index}"
             if value is None:
                 del rows[oid]
             else:
@@ -143,16 +152,23 @@ def _variant(**edits) -> dict:
     return W
 
 
+def _variant(**edits) -> dict:
+    return _edit(W_SAMPLE, **edits)
+
+
 def _assert_same_switch_as_the_poller(W: dict, cfg: dict, raw: dict):
-    """The oracle: poller._build on the very same rows (the walks read_cfg does not do are empty) must describe every port alike."""
+    """The oracle: poller._build on the very same rows (the walks read_cfg does not do are empty) must describe every port alike.
+    Only for Q-BRIDGE reads: the poller knows nothing of vmVlan. A port the poller sees untagged in several VLANs is the one
+    build_cfg lists as unmanaged, without u; everything else must match."""
+    assert "vmVlan" not in W
     built = poller._build({k: W.get(k, []) for k in poller.O})
     assert list(cfg["ports"]) == [p["name"] for p in built["ports"]]    # the same ports, under the same names, in the same order
     assert list(cfg["vlans"].items()) == list(built["vlans"].items())
+    assert set(raw["unmanaged"]) == {p["name"] for p in built["ports"] if len(p["untagged"]) > 1}
     for p in built["ports"]:
         n = p["name"]
         st = cfg["ports"][n]
-        assert len(p["untagged"]) <= 1, n
-        assert st["u"] == (p["untagged"][0] if p["untagged"] else None), n
+        assert st["u"] == (p["untagged"][0] if len(p["untagged"]) == 1 else None), n
         assert st["t"] == p["tagged"], n
         assert st["en"] is (p["admin"] == 1), n
         assert (raw["admin"][n] == 1) is (p["admin"] == 1), n
@@ -222,6 +238,7 @@ def test_build_cfg_raw():
     assert raw["port2bp"] == {"1": 3, "2": 1, "3": 2, "4": 7, "5": 7, "6": 5, "Trk1": 7}
     assert raw["bp2port"] == {1: "2", 2: "3", 3: "1", 5: "6", 7: "Trk1"}
     assert raw["ifindex"] == {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "Trk1": 289}
+    assert raw["unmanaged"] == {} and raw["vmvlan"] == {}    # always there, empty here: no hybrid port, no vmVlan walk
 
 
 def test_build_cfg_is_pure():
@@ -321,8 +338,8 @@ def _portlist(bridge_ports, size: int) -> str:
 
 def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
     """A random but well-formed switch: W in walk order, plus the ground truth of the generator (effective bridge port per port,
-    owner per bridge port). Well-formed means: unique port names, at most one untagged VLAN per bridge port a port uses, and the
-    VLAN table and ifAdminStatus read completely (build_cfg refuses anything else, see the fail-closed tests below)."""
+    owner per bridge port). Well-formed means: unique port names, and the VLAN table and ifAdminStatus read completely (build_cfg
+    refuses anything else, see the fail-closed tests below). Now and then a port is untagged in two VLANs (a hybrid port)."""
     phys = [str(i) for i in rng.sample(range(1, 300), rng.randint(1, 10))]
     names = {ifi: rng.choice(("", "A", "B")) + str(k + 1) for k, ifi in enumerate(phys)}
     free, trunks = list(phys), {}                            # trunk ifIndex -> member ifIndexes
@@ -352,6 +369,10 @@ def _random_switch(rng: random.Random) -> tuple[dict, dict, dict]:
         if u:
             egress[u].add(bp)
             untagged[u].add(bp)
+            if len(vids) > 1 and rng.random() < 0.1:         # a hybrid / general port: untagged in a second VLAN as well
+                second = rng.choice([v for v in vids if v != u])
+                egress[second].add(bp)
+                untagged[second].add(bp)
     for bp in rng.sample(range(48, 65), rng.randint(0, 2)):    # bits for bridge ports nobody owns
         egress[rng.choice(vids)].add(bp)
         untagged[rng.choice(vids)].add(bp)
@@ -402,10 +423,29 @@ def test_a_port_name_twice_fails_closed():
         snmpwrite.build_cfg(_variant(ifName={"3": "1"}))
 
 
-def test_a_port_untagged_in_two_vlans_fails_closed():
-    """cfg has room for one untagged VLAN per port; picking one would plan and verify against a state the switch is not in."""
-    with pytest.raises(snmp.SnmpError, match=r"Port 1 ist in mehreren VLANs ungetaggt \(20, 30\)"):
-        snmpwrite.build_cfg(_variant(vlanUntagged={"30": "20 00 00 00 00 00 00 00"}))
+HYBRID = "ungetaggt in mehreren VLANs (1, 20): Hybrid-/General-Port, per SNMP nicht verwaltbar"
+
+
+def test_a_hybrid_port_is_unmanaged_not_fatal():
+    """Port 3 (bridge port 2 = 0x40) untagged in VLAN 1 and 20, tagged in 30: cfg has room for one u only, so the port is listed as
+    unmanaged with the reason (the write path refuses it) and has no u; it keeps its tagged VLANs and raw keeps its facts. The
+    switch as a whole stays readable: every other port reads exactly as before."""
+    W = _variant(vlanEgress={"1": "4A 00 00 00 00 00 00 00"},
+                 vlanUntagged={"1": "4A 00 00 00 00 00 00 00", "20": "60 00 00 00 00 00 00 00"})
+    cfg, raw = snmpwrite.build_cfg(W)
+    assert raw["unmanaged"] == {"3": HYBRID}
+    assert cfg["ports"]["3"] == {"u": None, "t": ["30"], "name": "", "en": True, **NAC, "poe": None}
+    assert {n: st for n, st in cfg["ports"].items() if n != "3"} == {n: st for n, st in EXPECTED_PORTS.items() if n != "3"}
+    assert raw["pvid"]["3"] == "1" and raw["port2bp"]["3"] == 2
+    _assert_same_switch_as_the_poller(W, cfg, raw)
+
+
+def test_trunk_members_of_a_hybrid_trunk_are_unmanaged_too():
+    """A member's membership is its trunk's (bridge port 7 = 0x02), so a hybrid trunk takes its members along."""
+    W = _variant(vlanUntagged={"99": "82 00 00 00 00 00 00 00"})    # Trk1 now untagged in VLAN 1 and 99
+    _, raw = snmpwrite.build_cfg(W)
+    reason = "ungetaggt in mehreren VLANs (1, 99): Hybrid-/General-Port, per SNMP nicht verwaltbar"
+    assert raw["unmanaged"] == {"4": reason, "5": reason, "Trk1": reason}
 
 
 @pytest.mark.parametrize("walk", ["vlanName", "vlanEgress", "vlanUntagged"])
@@ -434,14 +474,88 @@ def test_admin_status_is_only_required_for_ports():
     assert cfg["ports"] == EXPECTED_PORTS
 
 
+# ── cisco_vmps: the access VLAN comes from vmVlan ────────────────────────────────────────────────────────────────────────────────
+# A Catalyst-like switch (small ifIndexes as on IOS-XE), bridge port = ifIndex + 8. Q-BRIDGE and vmVlan disagree on purpose:
+#   port (ifIndex)   bridge port   Q-BRIDGE                      vmVlan   cfg u
+#   Gi1/0/1 (1)      9             untagged 1                    10       10    vmVlan wins
+#   Gi1/0/2 (2)      10            untagged 10                   10       10
+#   Gi1/0/3 (3)      11            untagged 1, tagged 10 + 20    -        1     a trunk port has no vmVlan row: Q-BRIDGE stays
+#   Gi1/0/4 (4)      12            untagged 1                    0        None  vmVlan 0 = assigned to no VLAN
+# bits in byte 1: bp 9 = 0x80, 10 = 0x40, 11 = 0x20, 12 = 0x10
+W_CISCO = {
+    "ifName": _rows(IF_NAME, {"1": "Gi1/0/1", "2": "Gi1/0/2", "3": "Gi1/0/3", "4": "Gi1/0/4"}),
+    "ifAlias": _rows(IF_ALIAS, {"1": "Drucker", "2": "", "3": "uplink", "4": ""}),
+    "ifAdmin": _rows(IF_ADMIN, {"1": "1", "2": "1", "3": "1", "4": "2"}),
+    "bp2if": _rows(BP2IF, {"9": "1", "10": "2", "11": "3", "12": "4"}),
+    "vlanName": _rows(VLAN_NAME, {"1": "default", "10": "Daten", "20": "Voice"}),
+    "vlanEgress": _rows(VLAN_EGRESS, {"1": "00 B0", "10": "00 60", "20": "00 20"}),
+    "vlanUntagged": _rows(VLAN_UNTAGGED, {"1": "00 B0", "10": "00 40", "20": "00 00"}),
+    "pvid": _rows(PVID, {"9": "1", "10": "10", "11": "1", "12": "1"}),
+    "ifStack": _rows(IF_STACK, {"0.1": "1", "0.2": "1", "0.3": "1", "0.4": "1", "1.0": "1", "2.0": "1", "3.0": "1", "4.0": "1"}),
+    "vmVlan": _rows(VMVLAN, {"1": "10", "2": "10", "4": "0"}),
+}
+
+
+def test_vmvlan_base_is_the_cisco_drivers_oid():
+    assert DRIVERS["cisco"].vlan_strategy == "cisco_vmps" and DRIVERS["cisco"].oids["vmvlan"] == VMVLAN
+
+
+def test_vmvlan_decides_the_access_vlan():
+    cfg, raw = snmpwrite.build_cfg(W_CISCO)
+    assert cfg["ports"] == {
+        "Gi1/0/1": {"u": "10", "t": [], "name": "Drucker", "en": True, **NAC, "poe": None},
+        "Gi1/0/2": {"u": "10", "t": [], "name": "", "en": True, **NAC, "poe": None},
+        "Gi1/0/3": {"u": "1", "t": ["10", "20"], "name": "uplink", "en": True, **NAC, "poe": None},
+        "Gi1/0/4": {"u": None, "t": [], "name": "", "en": False, **NAC, "poe": None},
+    }
+    assert raw["vmvlan"] == {"Gi1/0/1": "10", "Gi1/0/2": "10", "Gi1/0/4": "0"}    # as read, per port; the trunk port has none
+    assert raw["unmanaged"] == {}
+
+
+def test_vmvlan_changes_nothing_but_u():
+    """Without the vmVlan rows build_cfg is the plain Q-BRIDGE read (and agrees with the poller); with them only u of the ports
+    that have a vmVlan row differs, plus raw["vmvlan"]. Everything else (t, PVID, PortLists, ...) stays the Q-BRIDGE view."""
+    qbridge = {k: rows for k, rows in W_CISCO.items() if k != "vmVlan"}
+    cfg_q, raw_q = snmpwrite.build_cfg(qbridge)
+    _assert_same_switch_as_the_poller(qbridge, cfg_q, raw_q)
+    assert {n: st["u"] for n, st in cfg_q["ports"].items()} == {"Gi1/0/1": "1", "Gi1/0/2": "10", "Gi1/0/3": "1", "Gi1/0/4": "1"}
+    cfg, raw = snmpwrite.build_cfg(W_CISCO)
+    assert {k: v for k, v in cfg.items() if k != "ports"} == {k: v for k, v in cfg_q.items() if k != "ports"}
+    assert {n: {**st, "u": "-"} for n, st in cfg["ports"].items()} == {n: {**st, "u": "-"} for n, st in cfg_q["ports"].items()}
+    assert {k: v for k, v in raw.items() if k != "vmvlan"} == {k: v for k, v in raw_q.items() if k != "vmvlan"}
+    assert raw_q["vmvlan"] == {}
+
+
+def test_a_hybrid_port_stays_unmanaged_even_with_a_vmvlan_row():
+    """Q-BRIDGE has Gi1/0/2 untagged in VLAN 10 and 20, vmVlan says 10: the two views disagree about what the port is, so it stays
+    unmanaged without u (vmVlan does not overrule that); raw still shows what vmVlan said."""
+    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, vlanUntagged={"20": "00 40"}, vlanEgress={"20": "00 60"}))
+    assert raw["unmanaged"] == {"Gi1/0/2": "ungetaggt in mehreren VLANs (10, 20): Hybrid-/General-Port, per SNMP nicht verwaltbar"}
+    assert cfg["ports"]["Gi1/0/2"]["u"] is None and raw["vmvlan"]["Gi1/0/2"] == "10"
+
+
+@pytest.mark.parametrize("value", ["", "zehn", "-1"])
+def test_an_unreadable_vmvlan_fails_closed(value):
+    """The access VLAN of a cisco_vmps port is not readable: like a missing ifAdminStatus, no cfg for this switch."""
+    with pytest.raises(snmp.SnmpError, match=r"^Port Gi1/0/1: vmVlan unlesbar"):
+        snmpwrite.build_cfg(_edit(W_CISCO, vmVlan={"1": value}))
+
+
+def test_vmvlan_rows_of_other_interfaces_are_ignored():
+    """vmVlan rows of interfaces that are no port here change nothing, not even an unreadable value: ifIndex 1005 is in ifName but
+    dropped by the port filter, 10101 is not in ifName at all."""
+    cfg, raw = snmpwrite.build_cfg(_edit(W_CISCO, ifName={"1005": "Vlan5"}, vmVlan={"1005": "abc", "10101": "20"}))
+    assert (cfg, raw) == snmpwrite.build_cfg(W_CISCO)
+
+
 # ── read_cfg: the live read ──────────────────────────────────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def agent(monkeypatch):
-    """Replace snmp.walk by a fake agent that answers from W_SAMPLE by base OID and records every call."""
+    """Replace snmp.walk by a fake agent that answers from RECORDING by base OID and records every call."""
     calls = []
 
-    async def fake_walk(host, cred, oid, hex_values=False, timeout=60):
-        calls.append({"host": host, "cred": cred, "oid": oid, "hex": hex_values})
+    async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
+        calls.append({"host": host, "cred": cred, "oid": oid, "hex": hex_values, "strict": strict})
         assert oid in RECORDING, f"read_cfg walked an OID the agent does not serve: {oid}"
         return list(RECORDING[oid])
 
@@ -461,8 +575,8 @@ async def _switch_row(**cols):
 
 
 async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
-    """Nine walks (the PortLists in hex) at the switch's host, all with the READ identity, never the RW one; the result is
-    build_cfg of what the agent answered, with the polled sys_name as hostname."""
+    """Nine walks (the PortLists in hex), all strict, at the switch's host, all with the READ identity, never the RW one; the
+    result is build_cfg of what the agent answered, with the polled sys_name as hostname."""
     monkeypatch.setattr(crypto, "_fernet", Fernet(Fernet.generate_key()))
     row = await _switch_row(name="SW-EK-01", host=HOST, sys_name="SW-EK-01", driver="procurve", snmp_version="2c",
                             snmp_community=crypto.encrypt("ro-s3cret"), snmp_write=1, snmp_rw_community=crypto.encrypt("rw-s3cret"))
@@ -475,10 +589,32 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
     assert len(agent) == len(BASES)
     assert {c["oid"]: c["hex"] for c in agent} == {base: key in HEX_WALKS for key, base in BASES.items()}
     for c in agent:
+        assert c["strict"] is True    # a walk cut short must be an error, not a shorter table
         assert c["host"] == HOST
         assert c["cred"] == poller.creds_of(row)
         assert c["cred"]["snmp_version"] == "2c" and c["cred"]["snmp_community"] == "ro-s3cret"
     assert "rw-s3cret" not in repr(agent)
+
+
+@pytest.mark.parametrize("name", list(DRIVERS))
+async def test_read_cfg_walks_vmvlan_only_for_cisco_vmps(agent, name):
+    """Every driver reads the nine Q-BRIDGE / IF-MIB walks; a cisco_vmps driver also walks its vmVlan OID (strict, not hex) and
+    then gets build_cfg with the vmVlan rows: port 1 in VLAN 99 and port 6 in none, as vmVlan says."""
+    driver = DRIVERS[name]
+    cfg, raw = await snmpwrite.read_cfg(ROW, driver)
+
+    walked = {base: key in HEX_WALKS for key, base in BASES.items()}
+    W = W_SAMPLE
+    if driver.vlan_strategy == "cisco_vmps":
+        walked[VMVLAN] = False
+        W = {**W_SAMPLE, "vmVlan": VMVLAN_SAMPLE}
+    assert len(agent) == len(walked)
+    assert {c["oid"]: c["hex"] for c in agent} == walked
+    assert all(c["strict"] is True for c in agent)
+    want_cfg, want_raw = snmpwrite.build_cfg(W)
+    assert (cfg, raw) == ({**want_cfg, "hostname": "SW-EK-01"}, want_raw)
+    if driver.vlan_strategy == "cisco_vmps":
+        assert cfg["ports"]["1"]["u"] == "99" and cfg["ports"]["6"]["u"] is None and raw["vmvlan"] == {"1": "99", "6": "0"}
 
 
 @pytest.mark.parametrize("sys_name, hostname", [("SW-EK-01", "SW-EK-01"), (None, ""), ("", "")])
@@ -507,15 +643,15 @@ async def test_read_cfg_does_not_touch_the_database_or_take_a_lock(monkeypatch, 
     assert list(poller._locks) == [ROW["id"]]
 
 
-@pytest.mark.parametrize("failing", list(BASES))
-async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, failing):
+@pytest.mark.parametrize("driver, failing", [("procurve", key) for key in BASES] + [("cisco", "vmVlan")])
+async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, failing):
     """Stricter than the display poller (which skips a failed walk): any failed walk raises that very error, and only once every
-    other walk has finished, so nothing is still talking to the switch when read_cfg returns."""
+    other walk has finished, so nothing is still talking to the switch when read_cfg returns. For cisco_vmps the vmVlan walk too."""
     err = snmp.SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
     finished = []
 
-    async def fake_walk(host, cred, oid, hex_values=False, timeout=60):
-        if oid == BASES[failing]:
+    async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
+        if oid == WALK_BASES[failing]:
             raise err
         await asyncio.sleep(0.01)    # the healthy walks take longer than the failing one
         finished.append(oid)
@@ -523,16 +659,17 @@ async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, failing):
 
     monkeypatch.setattr(snmp, "walk", fake_walk)
     with pytest.raises(snmp.SnmpError) as caught:
-        await snmpwrite.read_cfg(ROW, DRIVER)
+        await snmpwrite.read_cfg(ROW, DRIVERS[driver])
     assert caught.value is err
-    assert sorted(finished) == sorted(base for key, base in BASES.items() if key != failing)
+    walked = [*BASES.values()] + ([VMVLAN] if driver == "cisco" else [])
+    assert sorted(finished) == sorted(base for base in walked if base != WALK_BASES[failing])
 
 
 async def test_read_cfg_passes_other_walk_errors_through(monkeypatch):
     """Not only SnmpError: e.g. snmpbulkwalk missing on the host comes out unchanged as well."""
     err = FileNotFoundError(2, "No such file or directory", "snmpbulkwalk")
 
-    async def fake_walk(host, cred, oid, hex_values=False, timeout=60):
+    async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
         if oid == VLAN_UNTAGGED:
             raise err
         return list(RECORDING[oid])

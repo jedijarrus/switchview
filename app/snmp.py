@@ -31,7 +31,9 @@ def _auth_args(cred: dict) -> list[str]:
     return ["-v2c", "-c", cred.get("snmp_community") or "public"]
 
 
-async def _run(cmd: list[str], timeout: float) -> str:
+async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
+    """Startet cmd ohne Shell und liefert stdout. SnmpError bei Zeitueberschreitung und bei einem Exit-Code != 0 ohne Ausgabe;
+    mit strict bei JEDEM Exit-Code != 0, auch wenn stdout schon Zeilen hat (siehe walk)."""
     env = dict(os.environ, MIBS="")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
@@ -42,7 +44,7 @@ async def _run(cmd: list[str], timeout: float) -> str:
         proc.kill()
         raise SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
     text = out.decode("utf-8", "replace")
-    if proc.returncode != 0 and not text.strip():
+    if proc.returncode != 0 and (strict or not text.strip()):
         msg = err.decode("utf-8", "replace").strip().splitlines()
         msg = [m for m in msg if "Cannot find module" not in m and "MIB search path" not in m]
         raise SnmpError(msg[-1] if msg else f"snmp Exit-Code {proc.returncode}")
@@ -69,12 +71,16 @@ def _parse(text: str) -> list[tuple[str, str]]:
     return out
 
 
-async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeout: float = 60) -> list[tuple[str, str]]:
+async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeout: float = 60, strict: bool = False) -> list[tuple[str, str]]:
+    """snmpbulkwalk unter oid. snmpbulkwalk gibt jede Zeile sofort aus; bricht der Walk mittendrin ab (Timeout, Fehlerpaket), endet
+    es mit Exit-Code != 0, die Zeilen bis dahin stehen aber schon in stdout. strict=False (Standard, der Poller): das gilt als
+    Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle.
+    """
     cmd = ["snmpbulkwalk", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25"]
     if hex_values:
         cmd.append("-Ox")
     cmd += [host, oid]
-    return _parse(await _run(cmd, timeout))
+    return _parse(await _run(cmd, timeout, strict=strict))
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
