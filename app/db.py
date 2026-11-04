@@ -159,7 +159,9 @@ ADDED_COLUMNS = (
     ("switches", "driver", "TEXT NOT NULL DEFAULT 'procurve'"),
     ("switches", "snmp_write", "INTEGER NOT NULL DEFAULT 0"),
     # Eigene Write-Identitaet fuer SNMP-SET, getrennt von den Read-Spalten snmp_*. Bestandszeilen haben NULL. Community und Passwoerter
-    # wie die Read-Spalten verschluesselt ablegen und in main.SECRET_FIELDS aufnehmen, sonst liefert GET /api/switches sie mit aus.
+    # liegen wie die Read-Spalten verschluesselt und stehen in main.SECRET_FIELDS (verschluesseln, nur *_set ausliefern, im Audit beim
+    # Namen nennen). Ausgeliefert wird ohnehin nur, was in der Allowlist main.PUBLIC_FIELDS steht; welche Identitaet schreibt,
+    # entscheidet allein poller.write_identity.
     ("switches", "snmp_rw_community", "TEXT"),
     ("switches", "snmp_rw_user", "TEXT"),
     ("switches", "snmp_rw_auth_proto", "TEXT"),

@@ -14,6 +14,7 @@ Rows are plain dicts with the switches columns creds_of reads; secrets are store
 test SECRET_KEY of conftest.py).
 """
 import itertools
+import re
 
 import pytest
 from cryptography.fernet import Fernet
@@ -25,6 +26,11 @@ import snmp
 SECRETS = ("snmp_community", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_community", "snmp_rw_auth_pass", "snmp_rw_priv_pass")
 OFF = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
 NO_CREDS = "Keine SNMP-Schreib-Zugangsdaten hinterlegt"
+PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
+
+
+def is_public(arg: str) -> bool:
+    return arg.strip().lower() == "public"
 
 RO, RW = "ro-c0mmunity", "rw-c0mmunity"
 READ_V3 = {"snmp_version": "3", "snmp_user": "monitor", "snmp_auth_proto": "SHA", "snmp_auth_pass": "ro-auth-pass",
@@ -82,6 +88,12 @@ WRITABLE = [
     ("read v3 user", dict(READ_V3), READ_V3_CRED, READ_V3_ARGS),
     ("read v2c, an unused v3 user beside it", {"snmp_community": RO, "snmp_user": "monitor", "snmp_auth_proto": "SHA",
      "snmp_auth_pass": "ro-auth-pass"}, v2c(RO), ["-v2c", "-c", RO]),
+    # R25 refuses the community "public" only where it would write: "private" is a community like any other (shown insecure)
+    ("rw v2c 'private'", {"snmp_rw_community": "private"}, v2c("private"), ["-v2c", "-c", "private"]),
+    ("read v2c 'private'", {"snmp_community": "private"}, v2c("private"), ["-v2c", "-c", "private"]),
+    # ... and a "public" that does not write is no reason to refuse: the rw v3 user wins over the community, which stays unread
+    ("rw v3 wins over a rw 'public'", {"snmp_rw_community": "public", **RW_V3}, RW_V3_CRED, RW_V3_ARGS),
+    ("read v3, an unused read 'public' beside it", {**READ_V3, "snmp_community": "public"}, READ_V3_CRED, READ_V3_ARGS),
 ]
 
 
@@ -93,7 +105,27 @@ def test_write_identity(columns, cred, args):
 
     assert got == cred
     assert snmp._auth_args(got) == args
-    assert "public" not in snmp._auth_args(got)
+    assert not any(is_public(a) for a in snmp._auth_args(got))
+
+
+# (case, columns besides snmp_write=1): R25, the community "public" (any case, surrounding blanks) never writes
+PUBLIC_REFUSED = [
+    ("rw 'public'", {"snmp_rw_community": "public"}),
+    ("rw 'PUBLIC'", {"snmp_rw_community": "PUBLIC"}),
+    ("rw ' public '", {"snmp_rw_community": " public "}),
+    ("rw 'Public' between tab and newline", {"snmp_rw_community": "\tPublic\n"}),
+    ("rw 'public' beside a real read community", {"snmp_community": RO, "snmp_rw_community": "public"}),   # no fall back to it
+    ("rw 'public' beside a read v3 user", {**READ_V3, "snmp_rw_community": "public"}),
+    ("read fallback 'public'", {"snmp_community": "public"}),
+    ("read fallback ' PUBLIC'", {"snmp_community": " PUBLIC"}),
+]
+
+
+@pytest.mark.parametrize("columns", [c[1] for c in PUBLIC_REFUSED], ids=[c[0] for c in PUBLIC_REFUSED])
+def test_community_public_never_writes(columns):
+    with pytest.raises(snmp.SnmpError) as e:
+        poller.creds_of(row(snmp_write=1, **columns), write=True)
+    assert str(e.value) == PUBLIC
 
 
 # (case, columns besides snmp_write=1): no identity to write with
@@ -205,20 +237,21 @@ def _oracle(write, version, ro, user, read_auth, rw, rw_user, rw_auth, rw_priv):
         if rw_priv and not rw_auth:
             return None, "unvollständig"
         return v3("svwrite", *(rw_auth or (None, None)), *(rw_priv or (None, None))), None
-    if rw:                                         # ... then the v2c community
-        return v2c(RW), None
+    if rw:                                         # ... then the v2c community, never "public" (R25)
+        return (None, PUBLIC) if is_public(rw) else (v2c(rw), None)
     if version == "3" and user:                    # 2. the read identity, if it is a real one
         return v3("monitor", *(read_auth or (None, None))), None
     if version == "2c" and ro:
-        return v2c(RO), None
+        return (None, PUBLIC) if is_public(ro) else (v2c(ro), None)
     return None, NO_CREDS
 
 
 def test_write_identity_exhaustively():
     """Every combination of the identity columns, against the decision table: never a "public", never a default user, never the
     read identity while a RW identity is configured, and write=False untouched by any RW column."""
-    combos = itertools.product((0, 1), ("2c", "3"), (None, RO), (None, "monitor"), (None, ("SHA", "ro-auth-pass")), (None, RW),
-                               (None, "", "svwrite"), (None, ("SHA-256", "rw-auth-pass")), (None, ("AES", "rw-priv-pass")))
+    combos = itertools.product((0, 1), ("2c", "3"), (None, RO, "public"), (None, "monitor"), (None, ("SHA", "ro-auth-pass")),
+                               (None, RW, " PUBLIC "), (None, "", "svwrite"), (None, ("SHA-256", "rw-auth-pass")),
+                               (None, ("AES", "rw-priv-pass")))
     seen = {"cred": 0, "refused": 0}
     for write, version, ro, user, read_auth, rw, rw_user, rw_auth, rw_priv in combos:
         r = row(snmp_write=write, snmp_version=version, snmp_community=ro, snmp_user=user, snmp_rw_community=rw, snmp_rw_user=rw_user)
@@ -228,18 +261,19 @@ def test_write_identity_exhaustively():
         want, reason = _oracle(write, version, ro, user, read_auth, rw, rw_user, rw_auth, rw_priv)
         case = (write, version, ro, user, read_auth, rw, rw_user, rw_auth, rw_priv)
         if reason:
-            with pytest.raises(snmp.SnmpError, match=reason):
+            with pytest.raises(snmp.SnmpError, match=re.escape(reason)):
                 poller.creds_of(r, write=True)
+            seen[reason] = seen.get(reason, 0) + 1
             seen["refused"] += 1
         else:
             got = poller.creds_of(r, write=True)
             assert got == want, case
             args = snmp._auth_args(got)
-            assert "public" not in args, case
+            assert not any(is_public(a) for a in args), case
             assert (got["snmp_community"] in (RO, RW)) if got["snmp_version"] == "2c" else (got["snmp_user"] in ("monitor", "svwrite"))
             if rw_user or rw:
                 assert RW in args or "svwrite" in args, case
             seen["cred"] += 1
         read = poller.creds_of(r)
         assert read["snmp_version"] == version and read["snmp_community"] == ro and read["snmp_user"] == user, case
-    assert seen["cred"] > 100 and seen["refused"] > 100, seen
+    assert seen["cred"] > 100 and seen["refused"] > 100 and seen[PUBLIC] > 50, seen

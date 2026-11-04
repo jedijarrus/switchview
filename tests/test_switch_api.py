@@ -42,6 +42,7 @@ OLD_KEYS = {"id", "name", "host", "zone", "sort", "enabled", "snmp_version", "sn
 # ... and what this work adds to them, nothing else.
 NEW_KEYS = {"driver", "caps", "snmp_write", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto", "snmp_rw_community_set",
             "snmp_rw_auth_pass_set", "snmp_rw_priv_pass_set", "snmp_rw_insecure", "snmp_write_via", "snmp_write_error"}
+PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
 CISCO_CAPS = ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
 PROCURVE_CAPS = ["backup", "cli", "nac", "snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
 # Independent of crypto.py: the Fernet key the app must derive from SECRET_KEY (set by conftest.py).
@@ -333,6 +334,9 @@ WRITE_INFO = [
                           "snmp_auth_pass": "ro-auth-s3cret", "snmp_priv_proto": "AES", "snmp_priv_pass": "ro-priv-s3cret"},
      (False, "read", None)),
     ("nothing to write with", {"snmp_write": True}, (False, None, "Keine SNMP-Schreib-Zugangsdaten hinterlegt")),
+    ("rw v2c 'private'", {"snmp_write": True, "snmp_rw_community": "private"}, (True, "rw", None)),
+    ("rw v2c 'public' (R25)", {"snmp_write": True, "snmp_community": "ro-s3cret", "snmp_rw_community": "public"}, (False, None, PUBLIC)),
+    ("read v2c ' Public ' (R25)", {"snmp_write": True, "snmp_community": " Public "}, (False, None, PUBLIC)),
 ]
 
 
@@ -374,6 +378,26 @@ def test_a_legacy_row_is_served_as_before_plus_additions_only(client, tmp_path):
     assert not any(s[k + "_set"] for k in ("snmp_rw_community", "snmp_rw_auth_pass", "snmp_rw_priv_pass"))
 
 
+def test_a_column_added_later_is_not_served_until_allowed(api, tmp_path):
+    """Default deny: the serializers are allowlists, so a column some later migration adds (here a would-be secret) is served
+    neither by GET /api/switches nor in the /api/netmap switch entries until it is listed explicitly. A denylist (every column but
+    SECRET_FIELDS) serves today's schema identically and would only fail here."""
+    sid = create(api, driver="cisco", snmp_write=True, snmp_rw_community="rw-s3cret")
+    conn = sqlite3.connect(tmp_path / "switchview.db")
+    try:
+        conn.execute("ALTER TABLE switches ADD COLUMN snmp_future_secret TEXT")
+        conn.execute("UPDATE switches SET snmp_future_secret = 'f-s3cret' WHERE id = ?", (sid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    for url in ("/api/switches", "/api/netmap"):
+        r = api.get(url)
+        assert r.status_code == 200, r.text
+        assert "snmp_future_secret" not in r.text and "f-s3cret" not in r.text, url
+    assert "snmp_future_secret" not in listed(api, sid)
+
+
 def test_netmap_switch_entries_serve_driver_caps_and_snmp_write_but_no_secret(api, tmp_path):
     sid = create(api, driver="cisco", snmp_write=True, ssh_user="manager", **ALL_SECRETS)
     row = stored(tmp_path, sid)
@@ -400,3 +424,94 @@ def test_update_audit_names_the_changed_secrets_without_values(api, tmp_path):
     assert rows[2][2] == "snmp_rw_priv_pass"
     assert rows[3][2] == ""
     assert "s3cret" not in json.dumps(rows)
+
+
+def test_audit_records_driver_and_snmp_write(api, tmp_path):
+    """Switching SNMP writes on is a privilege change: create names the driver and snmp_write, an update every change of either
+    (old → new), after the changed secret names; nothing when they are not sent or unchanged. Never a secret value."""
+    sid = create(api)
+    steps = [
+        body(driver="cisco", snmp_write=True, snmp_rw_community="rw-s3cret"),
+        body(driver="cisco", snmp_write=True),                 # sent, unchanged
+        old_ui_body(),                                         # not sent
+        body(snmp_write=False),
+        body(driver="juniper", snmp_write=True, ssh_pass="ssh-s3cret"),
+    ]
+    for step in steps:
+        assert api.put(f"/api/switches/{sid}", json=step).status_code == 200
+    create(api, host="203.0.113.43", driver="arista", snmp_write=True)
+
+    rows = audits(tmp_path)
+    assert [d for _, _, d in rows] == [
+        "SW-VK-02, driver: procurve, snmp_write: aus",
+        "snmp_rw_community, driver: procurve → cisco, snmp_write: aus → an",
+        "",
+        "",
+        "snmp_write: an → aus",
+        "ssh_pass, driver: cisco → juniper, snmp_write: aus → an",
+        "SW-VK-02, driver: arista, snmp_write: an",
+    ]
+    assert rows[-1][:2] == ("switch_create", "203.0.113.43")
+    assert "s3cret" not in json.dumps(rows)
+
+
+# ── 422 never echoes a secret ─────────────────────────────────────────────────
+MARK = "Zq7-secret-mark"
+
+
+def too_long(limit: int) -> str:
+    """A value one character over `limit`, starting with MARK."""
+    return (MARK * 20)[:limit + 1]
+
+
+# (secret field, a value pydantic rejects): too long, or not a string at all
+SECRET_REJECTS = [(f, too_long(64)) for f in ("snmp_community", "snmp_rw_community")] + \
+    [(f, too_long(128)) for f in ("snmp_auth_pass", "snmp_priv_pass", "ssh_pass", "snmp_rw_auth_pass", "snmp_rw_priv_pass")] + \
+    [("snmp_rw_community", 7177324911), ("ssh_pass", {"nested": MARK}), ("snmp_rw_priv_pass", [MARK])]
+
+
+@pytest.mark.parametrize("field, value", SECRET_REJECTS, ids=[f"{f}-{type(v).__name__}" for f, v in SECRET_REJECTS])
+def test_422_does_not_echo_a_secret(api, field, value):
+    sid = create(api, host="203.0.113.43")
+    for r in (api.post("/api/switches", json=body(**{field: value})), api.put(f"/api/switches/{sid}", json=body(**{field: value}))):
+        assert r.status_code == 422
+        assert MARK not in r.text and json.dumps(value) not in r.text and str(value) not in r.text
+        err = next(e for e in r.json()["detail"] if e["loc"] == ["body", field])
+        assert set(err) == {"type", "loc", "msg"} and err["type"] and err["msg"]     # FastAPI's shape minus input / ctx
+
+
+def test_422_for_other_fields_is_unchanged(api):
+    """FastAPI's default body, exactly: a non-secret field keeps its input and ctx."""
+    r = api.post("/api/switches", json=body(zone="Z" * 41))
+    assert r.status_code == 422
+    assert r.json() == {"detail": [{"type": "string_too_long", "loc": ["body", "zone"], "msg": "String should have at most 40 characters",
+                                     "input": "Z" * 41, "ctx": {"max_length": 40}}]}
+    r = api.post("/api/switches", json={"host": "203.0.113.42", "zone": "VK", "snmp_rw_user": "svwrite"})
+    assert r.json() == {"detail": [{"type": "missing", "loc": ["body", "name"], "msg": "Field required",
+                                     "input": {"host": "203.0.113.42", "zone": "VK", "snmp_rw_user": "svwrite"}}]}
+
+
+def test_422_echoing_the_whole_body_drops_its_secrets(api):
+    """A "missing" error carries the whole body as its input: the secret keys go, everything else stays. A body that is no object
+    at all comes back without input (it can hold anything)."""
+    sent = {"host": "203.0.113.42", "snmp_rw_user": "svwrite", "ssh_pass": MARK, "snmp_rw_community": MARK + "2", "snmp_community": None}
+    r = api.post("/api/switches", json=sent)
+    assert r.json() == {"detail": [{"type": "missing", "loc": ["body", "name"], "msg": "Field required",
+                                     "input": {"host": "203.0.113.42", "snmp_rw_user": "svwrite"}}]}
+    for raw in ("snmp_rw_community=" + MARK, [{"ssh_pass": MARK}]):
+        r = api.post("/api/switches", json=raw)
+        assert r.status_code == 422 and MARK not in r.text
+        assert r.json()["detail"][0]["loc"] == ["body"]
+
+
+@pytest.mark.parametrize("method, url, sent, field", [
+    ("POST", "/api/auth/local", {"username": "admin", "password": too_long(200)}, "password"),
+    ("PUT", "/api/settings", {"radius_key": too_long(64)}, "radius_key"),
+    ("PUT", "/api/settings", {"pf_pass": too_long(200)}, "pf_pass"),
+    ("PUT", "/api/settings", {"opnsense_secret": too_long(200)}, "opnsense_secret"),
+])
+def test_422_does_not_echo_the_secrets_of_other_forms(api, method, url, sent, field):
+    """The handler serves the whole app: the login password and the settings secrets are not echoed either."""
+    r = api.request(method, url, json=sent)
+    assert r.status_code == 422 and MARK not in r.text
+    assert [set(e) for e in r.json()["detail"] if e["loc"] == ["body", field]] == [{"type", "loc", "msg"}]

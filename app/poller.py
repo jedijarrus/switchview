@@ -56,6 +56,7 @@ _locks: dict[int, asyncio.Lock] = {}
 
 WRITE_DISABLED = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
 NO_WRITE_CREDS = "Keine SNMP-Schreib-Zugangsdaten hinterlegt"
+PUBLIC_COMMUNITY = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
 
 
 def creds_of(row, write: bool = False) -> dict:
@@ -88,6 +89,9 @@ def write_identity(row) -> tuple[str, dict]:
     3. sonst die Lese-Identitaet ("read", muss am Geraet schreiben duerfen), nach snmp_version und nur eine echte: v3 mit Benutzer,
        v2c mit nicht leerer Community. Aus einer leeren Community machte snmp._auth_args "public".
     4. sonst Fehler: keine Schreib-Zugangsdaten.
+    Die Community "public" (gleich welche Schreibweise, Leerraum aussen egal) schreibt nie (R25), weder als snmp_rw_community noch
+    ueber die Lese-Identitaet: Fehler statt eines Rueckgriffs auf die naechste Identitaet. Sticht der v3-Benutzer eine RW-Community
+    "public" aus, schreibt sie nicht und ist kein Grund zur Ablehnung.
     Ein Geheimnis der gewaehlten Identitaet, das sich nicht entschluesseln laesst, und ein v3-Kennwort, das _auth_args nicht verwenden
     wuerde, sind ebenfalls Fehler: sonst ginge der SET still mit einer anderen Identitaet oder einer schwaecheren Stufe hinaus. Ein
     Protokoll ohne Kennwort ist dagegen kein Fehler (das Switch-Formular schickt die Protokoll-Auswahl immer mit), es heisst: unbenutzt.
@@ -118,9 +122,13 @@ def _write_secret(row, key: str) -> str | None:
 
 
 def _write_v2c(row, key: str) -> dict:
-    """v2c mit der Community row[key]; nur fuer einen gesetzten key, also nie leer und nie "public" per Vorgabe."""
-    return {"snmp_version": "2c", "snmp_community": _write_secret(row, key), "snmp_user": None, "snmp_auth_proto": None,
-            "snmp_auth_pass": None, "snmp_priv_proto": None, "snmp_priv_pass": None}
+    """v2c mit der Community row[key]; nur fuer einen gesetzten key, also nie leer und nie "public" per Vorgabe. Eine gespeicherte
+    Community "public" ist ein Fehler (R25)."""
+    community = _write_secret(row, key)
+    if community.strip().lower() == "public":
+        raise snmp.SnmpError(PUBLIC_COMMUNITY)
+    return {"snmp_version": "2c", "snmp_community": community, "snmp_user": None, "snmp_auth_proto": None, "snmp_auth_pass": None,
+            "snmp_priv_proto": None, "snmp_priv_pass": None}
 
 
 def _write_v3(row, prefix: str) -> dict:

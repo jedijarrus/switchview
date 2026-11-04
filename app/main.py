@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 import auth
@@ -219,6 +221,40 @@ PUBLIC_FIELDS = ("id", "name", "host", "zone", "sort", "enabled", "snmp_version"
                  "created_at", "driver", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto")
 # Hostname: das erste Zeichen kein "-" (und kein "."). net-snmp bekommt den Host als eigenes Argument und laese "-..." als Option.
 HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,63}")
+# Felder einer Anfrage, deren Wert eine 422-Antwort nie zuruecksendet (pydantic legt ihn in "input" ab): die Geheimnisse der Switches
+# und die der anderen Formulare (Anmeldung, Einstellungen).
+SECRET_INPUTS = frozenset(SECRET_FIELDS) | {"password", "id_token", "opnsense_key", "opnsense_secret", "radius_key", "pf_pass"}
+
+
+def _without_secrets(value):
+    """value ohne die Schluessel aus SECRET_INPUTS, auch in verschachtelten dicts und Listen."""
+    if isinstance(value, dict):
+        return {k: _without_secrets(v) for k, v in value.items() if k not in SECRET_INPUTS}
+    if isinstance(value, list):
+        return [_without_secrets(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    """FastAPIs Standard-422 ({"detail": [Fehler]}), nur ohne zurueckgesendete Geheimnisse (fuer die ganze App): ein Fehler AN einem
+    Feld aus SECRET_INPUTS verliert "input" und "ctx" (type, loc, msg bleiben). Jedes andere "input" verliert die Schluessel aus
+    SECRET_INPUTS, denn ein "missing"-Fehler traegt den ganzen Body. Ist der ganze Body kein Objekt (loc nur "body"), faellt sein
+    "input" weg, er kann alles enthalten. Alle anderen Fehler bleiben, wie FastAPI sie liefert."""
+    errors = []
+    for err in exc.errors():
+        err = dict(err)
+        loc = err.get("loc") or ()
+        if any(isinstance(part, str) and part in SECRET_INPUTS for part in loc):
+            err.pop("input", None)
+            err.pop("ctx", None)
+        elif "input" in err:
+            if isinstance(err["input"], (dict, list)):
+                err["input"] = _without_secrets(err["input"])
+            elif len(loc) <= 1:
+                del err["input"]
+        errors.append(err)
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 def _validate(body: SwitchIn):
@@ -249,6 +285,21 @@ def _columns(body: SwitchIn, update: bool) -> dict:
             if k not in body.model_fields_set:
                 del cols[k]
     return cols
+
+
+def _on_off(value) -> str:
+    return "an" if value else "aus"
+
+
+def _update_detail(fields: dict, old) -> str:
+    """Audit-Detail eines PUT: die geaenderten Geheimnisse beim Namen (nie mit Wert), dann Treiber und SNMP-Schreiben als "alt → neu",
+    wenn sie mitkamen und sich aendern. SNMP-Schreiben einzuschalten ist eine Rechte-Aenderung."""
+    parts = [k for k in fields if k in SECRET_FIELDS]
+    if "driver" in fields and fields["driver"] != old["driver"]:
+        parts.append(f"driver: {old['driver']} → {fields['driver']}")
+    if "snmp_write" in fields and bool(fields["snmp_write"]) != bool(old["snmp_write"]):
+        parts.append(f"snmp_write: {_on_off(old['snmp_write'])} → {_on_off(fields['snmp_write'])}")
+    return ", ".join(parts)
 
 
 def _write_info(row) -> dict:
@@ -295,7 +346,7 @@ async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
             raise
         await conn.commit()
         sid = cur.lastrowid
-    await audit(user["username"], "switch_create", body.host, body.name)
+    await audit(user["username"], "switch_create", body.host, f"{body.name}, driver: {body.driver}, snmp_write: {_on_off(body.snmp_write)}")
     return {"id": sid}
 
 
@@ -310,11 +361,15 @@ async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user
             fields[k] = encrypt(v) if v != "" else None
     sets = ", ".join(f"{k} = ?" for k in fields)
     async with db() as conn:
+        async with conn.execute("SELECT driver, snmp_write FROM switches WHERE id = ?", (sid,)) as cur:
+            old = await cur.fetchone()    # fuer das Audit: Treiber und SNMP-Schreiben vorher
+        if not old:
+            raise HTTPException(404, "Switch nicht gefunden")
         cur = await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
         await conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(404, "Switch nicht gefunden")
-    await audit(user["username"], "switch_update", body.host, ", ".join(k for k in fields if k in SECRET_FIELDS) or "")
+    await audit(user["username"], "switch_update", body.host, _update_detail(fields, old))
     return {"ok": True}
 
 
