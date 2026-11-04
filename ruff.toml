@@ -1,0 +1,13 @@
+line-length = 160
+target-version = "py312"  # Dockerfile and CI run Python 3.12
+
+[lint]
+select = ["E", "F", "W"]
+
+# The code base predates the linter. These are its existing violations, waived per file so that new modules and
+# the tests are held to the full rule set. Remove an entry once its file is cleaned up; do not add new ones.
+[lint.per-file-ignores]
+"app/changes.py" = ["E501", "E741"]
+"app/main.py" = ["E501", "E702", "E741"]
+"app/poller.py" = ["E501", "E702", "E741"]
+"app/sshcli.py" = ["E741"]
