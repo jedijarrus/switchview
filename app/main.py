@@ -549,8 +549,11 @@ PORT_RE = re.compile(r"^[A-Za-z0-9/]{1,12}$")
 # Portnamen auf dem SNMP-Weg: die jedes Herstellers (Gi1/0/1, ge-0/0/1, 1/1/1, Port-channel1, ...), ohne fuehrendes "-". SNMP setzt sie
 # nie in einen Befehl ein (es schreibt auf ifIndex / Bridge-Port); der Port muss ausserdem im Live-Read stehen.
 SNMP_PORT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/._:-]{0,63}$")
-_CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portnamen", "snmp_poe": "PoE"}
+# Die Felder eines Ports, die der SSH-Weg plant (cfgparse.port_state). Ein before mit anderen (etwa pvid, R21, aus einer SNMP-Aenderung)
+# nimmt er nicht zurueck.
+SSH_FIELDS = frozenset(cfgparse.port_state({}, ""))
 STALE = "Die Vorschau ist veraltet, bitte neu laden"
+SSH_NEEDED = "Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearbeiten)"
 NO_SSH = "für diesen Switch ist kein SSH-Zugang hinterlegt (Zugang bearbeiten)"
 _tasks: set = set()
 
@@ -572,8 +575,8 @@ class PlanIn(BaseModel):
     expert: bool = False
     of: int | None = None
     token: str | None = Field(default=None, max_length=32)
-    # Der Schreibweg der Vorschau (die Antwort von /plan nennt ihn), beim Ausfuehren mitgeschickt: dann plant _make_plan genau so oder
-    # lehnt ab, nie still ueber den anderen Weg. Ohne ihn waehlt _make_plan selbst.
+    # Der Schreibweg der Vorschau (die Antwort von /plan nennt ihn), von /apply mitgeschickt: dann plant _make_plan genau so oder lehnt
+    # ab, nie still ueber den anderen Weg. Ohne ihn waehlt _make_plan selbst; /plan beachtet ihn nie, die Vorschau waehlt immer (R28).
     mechanism: str | None = Field(default=None, pattern=r"^(ssh|snmp)$")
 
 
@@ -583,7 +586,7 @@ def _port_list(ports: list[str]) -> str:
     try:
         return cfgparse.compress_ports(ports)
     except ValueError:
-        return ", ".join(sorted(set(ports), key=snmpwrite._port_order))
+        return ", ".join(sorted(set(ports), key=snmpwrite.port_order))
 
 
 def _listing(items: list[str]) -> str:
@@ -652,7 +655,8 @@ def _snmp_unwritable(row, driver: drivers.Driver, ops: set[str]) -> str | None:
     poller.creds_of(row, write=True)."""
     missing = sorted(op for op in ops if not drivers.can(driver, op))
     if missing:
-        return f"Treiber {driver.name} kann {_listing([_CAP_LABEL.get(op, op) for op in missing])} nicht per SNMP schreiben"
+        labels = [snmpwrite._CAP_LABEL.get(op, op) for op in missing]    # dieselben Namen wie in snmpwrite.snmp_block_reason
+        return f"Treiber {driver.name} kann {_listing(labels)} nicht per SNMP schreiben"
     try:
         poller.creds_of(row, write=True)
     except snmp.SnmpError as e:
@@ -679,21 +683,22 @@ def _ssh_refusal(row, driver: drivers.Driver) -> str | None:
     return None
 
 
-async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[str, dict | None, list[str]]:
-    """Der Schreibweg einer neuen Aenderung (mode ports oder prepare): ("ssh", cfg aus der running-config, Hinweise) oder ("snmp", None,
-    Hinweise); sonst HTTPException.
-      1. Schickt der Client einen mechanism mit (das Ausfuehren nach seiner Vorschau), gilt genau der, wenn er noch geht, sonst 409
-         STALE: nie still der andere Weg. Was nur die CLI kann, lehnt auch ein mitgeschicktes "snmp" mit seinem eigenen Grund ab.
+async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[str, dict | None, str | None]:
+    """Der Schreibweg einer neuen Aenderung (mode ports oder prepare): ("ssh", cfg aus der running-config, None) oder ("snmp", None,
+    ssh_error), ssh_error der Fehler des SSH-Reads, fuer den SNMP einspringt (sonst None); sonst HTTPException.
+      1. Ein mitgeschickter mechanism (nur von /apply, nach seiner Vorschau; /plan reicht keinen weiter, R28) gilt genau so, wenn er
+         noch geht, sonst 409 STALE: nie still der andere Weg. Was nur die CLI kann, lehnt auch ein mitgeschicktes "snmp" mit seinem
+         eigenen Grund ab.
       2. Treiber mit CLI und SSH-Zugang: SSH, das Lesen der Konfiguration (changes.fresh_cfg) ist der Pre-Flight. Scheitert es, geht die
          Aenderung per SNMP, wenn sie dort geht (mit Hinweis), sonst 502 wie bisher, mit dem Grund, warum SNMP nicht geht.
       3. Sonst SNMP, wenn die Anfrage dort geht, sonst 409 / 422 mit dem Grund (_snmp_refusal), bei einem Treiber mit CLI (dann fehlt
-         der SSH-Zugang) nach dem Hinweis auf den SSH-Zugang."""
+         der SSH-Zugang) hinter der Meldung von bisher (SSH_NEEDED)."""
     ssh_refusal = _ssh_refusal(row, driver)
     if body.mechanism == "ssh":
         if ssh_refusal:
             raise HTTPException(409, f"{STALE} ({ssh_refusal})")
         try:
-            return "ssh", await changes.fresh_cfg(row["id"]), []
+            return "ssh", await changes.fresh_cfg(row["id"]), None
         except Exception as e:  # noqa: BLE001
             raise HTTPException(409, f"{STALE} (Konfiguration per SSH nicht lesbar: {e})")
     if body.mechanism == "snmp":
@@ -703,31 +708,34 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
         reason = _snmp_unwritable(row, driver, needed_ops(body))
         if reason:
             raise HTTPException(409, f"{STALE} ({reason})")
-        return "snmp", None, []
+        return "snmp", None, None
     if not ssh_refusal:
         try:
-            return "ssh", await changes.fresh_cfg(row["id"]), []
+            return "ssh", await changes.fresh_cfg(row["id"]), None
         except Exception as e:  # noqa: BLE001
             refusal = _snmp_refusal(row, driver, body)
             if refusal:
                 raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e} (per SNMP geht es auch nicht: {refusal[1]})")
-            return "snmp", None, [f"SSH nicht verfügbar ({e}), die Änderung geht per SNMP"]
+            return "snmp", None, str(e)
     refusal = _snmp_refusal(row, driver, body)
     if refusal:
         status, reason = refusal
         if drivers.can(driver, "cli"):
-            reason = f"Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearbeiten). Per SNMP geht es auch nicht: {reason}"
+            reason = f"{SSH_NEEDED}. Per SNMP geht es auch nicht: {reason}"
         raise HTTPException(status, reason)
-    return "snmp", None, []
+    return "snmp", None, None
 
 
-async def _read_snmp(row, driver: drivers.Driver) -> tuple[dict, dict]:
+async def _read_snmp(row, driver: drivers.Driver, ssh_error: str | None = None) -> tuple[dict, dict]:
     """Der Live-Read per SNMP (snmpwrite.read_cfg) im Change-Lock des Switches, wie der SSH-Weg seine Konfiguration im selben Lock liest:
-    nie mitten in eine laufende Aenderung hinein. read_cfg faellt geschlossen aus, das wird 502 mit dem Grund."""
+    nie mitten in eine laufende Aenderung hinein. read_cfg faellt geschlossen aus, das wird 502 mit dem Grund; springt SNMP fuer einen
+    gescheiterten SSH-Read ein (ssh_error), nennt die Meldung beide Fehler."""
     try:
         async with sshcli.lock(row["id"]):
             return await snmpwrite.read_cfg(row, driver)
     except (snmp.SnmpError, OSError) as e:
+        if ssh_error:
+            raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {ssh_error} (per SNMP auch nicht: {e})")
         raise HTTPException(502, f"Konfiguration des Switches per SNMP nicht lesbar: {e}")
 
 
@@ -745,9 +753,9 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     driver = drivers.driver_for(row)
     if body.mode in ("revert", "save"):
         return await _plan_of_change(row, driver, body)
-    mech, cfg, notes = await _choose_mechanism(row, driver, body)
+    mech, cfg, ssh_error = await _choose_mechanism(row, driver, body)
     if mech == "snmp":
-        return await _plan_snmp(row, driver, body, notes)
+        return await _plan_snmp(row, driver, body, ssh_error)
     if body.mode == "prepare":
         plan = changes.plan_prepare(cfg, await changes.radius_settings())
         return plan | {"mechanism": "ssh"}, {}, "prepare", "RADIUS vorbereiten"
@@ -760,11 +768,11 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     return plan, req, "ports", _summary(body)
 
 
-async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, notes: list[str]) -> tuple[dict, dict, str, str]:
+async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str | None) -> tuple[dict, dict, str, str]:
     """Eine neue Port-Aenderung per SNMP (_choose_mechanism hat schon abgelehnt, was dort nicht geht): gegen einen Live-Read geplant,
-    jeder Port muss in ihm stehen. notes kommen vor die Warnungen des Plans."""
+    jeder Port muss in ihm stehen. ssh_error: SNMP springt fuer diesen gescheiterten SSH-Read ein, das sagt eine Warnung vorne."""
     _check_request(body, SNMP_PORT_RE)
-    cfg, raw = await _read_snmp(row, driver)
+    cfg, raw = await _read_snmp(row, driver, ssh_error)
     missing = [p for p in body.ports if p not in cfg["ports"]]
     if missing:
         raise HTTPException(422, f"Port gibt es auf diesem Switch nicht: {', '.join(missing)}")
@@ -774,15 +782,15 @@ async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, notes: list[str]
                                   raw=raw)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    plan["warnings"] = notes + plan["warnings"]
+    if ssh_error:
+        plan["warnings"] = [f"SSH nicht verfügbar ({ssh_error}), die Änderung geht per SNMP", *plan["warnings"]]
     return plan, req, "ports", _summary(body)
 
 
 async def _plan_of_change(row, driver: drivers.Driver, body: PlanIn) -> tuple[dict, dict, str, str]:
     """Rueckgaengig (revert) und Speichern (save) einer Aenderung, auf dem Weg der Aenderung selbst (changes.mechanism; NULL heisst ssh,
     eine Zeile von vor der Spalte) und nie auf einem anderen: before einer SNMP-Aenderung haelt etwa die PVID (R21), die der SSH-Weg
-    nicht kennt. Geht dieser Weg gerade nicht, 409 mit dem Grund. Gespeichert wird nur per SSH (write memory): SNMP-Sets speichert der
-    Switch selbst."""
+    nicht kennt. Ein unbekannter Weg, und ein mitgeschickter mechanism (/apply), der nicht dieser ist: 409."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ? AND switch_id = ?", (body.of, row["id"])) as cur:
             ch = await cur.fetchone()
@@ -794,31 +802,65 @@ async def _plan_of_change(row, driver: drivers.Driver, body: PlanIn) -> tuple[di
     if body.mechanism and body.mechanism != mech:
         raise HTTPException(409, STALE)
     if body.mode == "save":
-        if mech == "snmp":
-            raise HTTPException(409, "SNMP-Änderungen werden sofort gespeichert, Speichern ist nicht nötig")
-        if ch["status"] not in ("unclear", "failed") or ch["saved"]:
-            raise HTTPException(409, "Diese Änderung muss nicht gespeichert werden")
-    elif ch["kind"] != "ports" or ch["reverted_by"] or ch["status"] in ("queued", "running", "aborted"):
-        raise HTTPException(409, "Diese Änderung lässt sich nicht zurücknehmen")
-    reason = _snmp_unwritable(row, driver, set()) if mech == "snmp" else _ssh_refusal(row, driver)
+        return await _plan_save(row, driver, ch, mech)
+    return await _plan_revert(row, driver, ch, mech)
+
+
+def _refuse_ssh_way(row, driver: drivers.Driver, ch, verb: str):
+    """409, wenn sich die per SSH gemachte Aenderung ch jetzt nicht per SSH `verb` laesst: ohne SSH-Zugang mit der Meldung von bisher
+    vorne (SSH_NEEDED), sonst mit dem Grund (der Treiber hat keine CLI)."""
+    reason = _ssh_refusal(row, driver)
+    done = f"Änderung #{ch['id']} lief per SSH und lässt sich nur per SSH {verb}"
+    if reason == NO_SSH:
+        raise HTTPException(409, f"{SSH_NEEDED}. {done}")
     if reason:
-        label = mech.upper()
-        raise HTTPException(409, f"Änderung #{ch['id']} lief per {label} und lässt sich nur per {label} "
-                                 f"{'speichern' if body.mode == 'save' else 'zurücknehmen'}: {reason}")
+        raise HTTPException(409, f"{done}: {reason}")
+
+
+async def _plan_save(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict, dict, str, str]:
+    """Speichern (write memory) nach einer Aenderung, die unklar oder fehlgeschlagen endete; nur per SSH, und es plant nie etwas. Eine
+    SNMP-Aenderung speichert ein Treiber mit snmp_autosave selbst; bei jedem anderen geht Speichern per SNMP nicht, das bleibt dem
+    Switch (R26). Beides vor der Pruefung des Status: eine SNMP-Aenderung, die ok endete, ist dort nicht unbedingt gespeichert."""
     if mech == "snmp":
+        if drivers.can(driver, "snmp_autosave"):
+            raise HTTPException(409, "SNMP-Änderungen werden automatisch gespeichert")
+        raise HTTPException(409, "Per SNMP nicht speicherbar – bitte am Switch speichern (z. B. write memory / copy running-config startup-config)")
+    if ch["status"] not in ("unclear", "failed") or ch["saved"]:
+        raise HTTPException(409, "Diese Änderung muss nicht gespeichert werden")
+    _refuse_ssh_way(row, driver, ch, "speichern")
+    try:
+        await changes.fresh_cfg(row["id"])  # der Pre-Flight wie bisher
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e}")
+    plan = {"commands": [], "shown": [], "blocked": [], "mechanism": "ssh",
+            "warnings": ["Speichert den aktuellen Stand des Switches dauerhaft (write memory)."]}
+    return plan, {"of": ch["id"]}, "save", f"Speichern nach #{ch['id']}"
+
+
+async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict, dict, str, str]:
+    """Rueckgaengig: plan_ports mit desired = before der Aenderung gegen einen frischen Read auf ihrem Weg mech. Geht der gerade nicht,
+    409 mit dem Grund; per SSH auch, wenn before Felder hat, die der SSH-Weg nicht kennt (SSH_FIELDS; der Planer liefe sonst in einen
+    KeyError). Was ein Treiber per SNMP nicht schreiben kann, sperrt plan_ports je Port (snmpwrite.snmp_block_reason)."""
+    if ch["kind"] != "ports" or ch["reverted_by"] or ch["status"] in ("queued", "running", "aborted"):
+        raise HTTPException(409, "Diese Änderung lässt sich nicht zurücknehmen")
+    req = {"desired": json.loads(ch["before"] or "{}"), "expert": bool(ch["expert"])}
+    if mech == "snmp":
+        reason = _snmp_unwritable(row, driver, set())
+        if reason:
+            raise HTTPException(409, f"Änderung #{ch['id']} lief per SNMP und lässt sich nur per SNMP zurücknehmen: {reason}")
         cfg, raw = await _read_snmp(row, driver)
         way = {"mechanism": "snmp", "driver": driver, "raw": raw}    # die Schluesselwoerter von plan_ports fuer diesen Weg
     else:
+        _refuse_ssh_way(row, driver, ch, "zurücknehmen")
+        odd = sorted({str(k) for d in req["desired"].values() for k in d} - SSH_FIELDS)
+        if odd:
+            raise HTTPException(409, f"Änderung #{ch['id']} lässt sich per SSH nicht zurücknehmen: ihr Vorher-Stand enthält Felder, die der "
+                                     f"SSH-Weg nicht kennt ({', '.join(odd)})")
         try:
             cfg = await changes.fresh_cfg(row["id"])
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e}")
-        if body.mode == "save":
-            plan = {"commands": [], "shown": [], "blocked": [], "mechanism": "ssh",
-                    "warnings": ["Speichert den aktuellen Stand des Switches dauerhaft (write memory)."]}
-            return plan, {"of": ch["id"]}, "save", f"Speichern nach #{ch['id']}"
         way = {}
-    req = {"desired": json.loads(ch["before"] or "{}"), "expert": bool(ch["expert"])}
     try:
         plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, **way)
     except ValueError as e:
@@ -829,7 +871,8 @@ async def _plan_of_change(row, driver: drivers.Driver, body: PlanIn) -> tuple[di
 @app.post("/api/switches/{sid}/plan")
 async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
     row = await _row(sid)
-    plan, _, kind, summary = await _make_plan(row, body)
+    # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
+    plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
     return {"kind": kind, "summary": summary, "mechanism": plan["mechanism"], "commands": plan["shown"], "warnings": plan.get("warnings", []),
             "blocked": plan["blocked"], "before": plan.get("before", {}), "desired": plan.get("desired", {}),
             "token": changes.cmd_token(plan["shown"])}

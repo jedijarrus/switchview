@@ -24,7 +24,10 @@ NAMES = ["procurve", "aruba_cx", "cisco", "cisco_sb", "comware", "juniper", "ari
 
 SNMP_CAPS = {"snmp_vlan", "snmp_admin", "snmp_name", "snmp_poe"}
 CLI_CAPS = {"cli", "nac", "backup"}    # only reachable through the SSH CLI, so only the ProCurve driver may have them
-ALL_CAPS = SNMP_CAPS | CLI_CAPS
+# R26: whether an SNMP set persists depends on the device. ProCurve / AOS-S saves it by itself (implicit write memory); for no other
+# driver is that confirmed, so only ProCurve has it.
+AUTOSAVE_CAPS = {"snmp_autosave"}
+ALL_CAPS = SNMP_CAPS | CLI_CAPS | AUTOSAVE_CAPS
 STRATEGIES = {"qbridge", "cisco_vmps"}
 
 # Base OIDs: no instance index (callers append ".<index>"), no leading dot (snmp._parse and poller.O work without one).
@@ -91,7 +94,8 @@ def test_cisco_is_snmp_only():
 
 @pytest.mark.parametrize("name", NAMES)
 def test_capability_table(name):
-    # all seven operations asked through can(), not only read from .caps: ProCurve has all, everyone else the four snmp_* ones
+    # all eight capabilities asked through can(), not only read from .caps: ProCurve has all, everyone else the four snmp_* write ones
+    # (no snmp_autosave: R26)
     driver = DRIVERS[name]
     expected = ALL_CAPS if name == "procurve" else SNMP_CAPS
     assert {op for op in ALL_CAPS if can(driver, op)} == expected

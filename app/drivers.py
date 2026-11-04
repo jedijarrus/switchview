@@ -9,6 +9,8 @@ caps (Faehigkeiten):
   snmp_admin  Port auf / ab (ifAdminStatus)
   snmp_name   Portname (ifAlias)
   snmp_poe    PoE ein / aus und Status; ob ein Port PoE hat, zeigt erst der Poll
+  snmp_autosave  der Switch speichert jeden SNMP-Set selbst dauerhaft (implizites write memory); nur ProCurve. Ohne sie steht eine
+              SNMP-Aenderung nur in der laufenden Konfiguration, bis jemand am Switch speichert (R26)
   nac         802.1X / MAC-Auth / RADIUS; nur ueber die CLI, also nur ProCurve
   backup      Config-Backup und Diff; nur ueber die CLI, also nur ProCurve
 vlan_strategy (wie ein Access-Port sein VLAN bekommt):
@@ -53,6 +55,9 @@ _VMVLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"
 
 _SNMP_CAPS = frozenset({"snmp_vlan", "snmp_admin", "snmp_name", "snmp_poe"})
 _CLI_CAPS = frozenset({"cli", "nac", "backup"})
+# Wie dauerhaft ein SNMP-Set ist, haengt am Geraet (R26): ProCurve / AOS-S speichert ihn selbst, fuer alle anderen ist das nicht
+# bestaetigt, sie bekommen die Faehigkeit nicht.
+_AUTOSAVE = frozenset({"snmp_autosave"})
 
 _UNGEPRUEFT = (
     "Standard-Profil (Q-BRIDGE, IF-MIB, POWER-ETHERNET-MIB); SET-Unterstuetzung und herstellerspezifische Abweichungen "
@@ -62,7 +67,7 @@ _UNGEPRUEFT = (
 # Jede Zeile bekommt ihr eigenes oids-dict (dict(...)), damit sich Treiber nie ein veraenderbares Profil teilen.
 DRIVERS: dict[str, Driver] = {d.name: d for d in (
     Driver(
-        "procurve", _SNMP_CAPS | _CLI_CAPS, "qbridge", dict(_STANDARD_OIDS),
+        "procurve", _SNMP_CAPS | _CLI_CAPS | _AUTOSAVE, "qbridge", dict(_STANDARD_OIDS),
         "HPE ProCurve / AOS-S. Standardweg ist die SSH-CLI (gestuft, Backup, NAC), SNMP nur als Fallback. Die PVID darf nicht in der "
         "Tagged-Liste stehen; ein SNMP-Set loest implizit write-mem aus (kein Staging).",
     ),

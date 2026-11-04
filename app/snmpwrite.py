@@ -247,11 +247,12 @@ _RUNS = re.compile(r"[0-9]+|[^0-9]+")
 _VLAN_ID = re.compile(r"[1-9][0-9]{0,3}")  # eine VLAN-ID, wie ein Walk sie zeigt: Dezimal ohne fuehrende Null (1..4094 prueft int)
 
 
-def _port_order(name: str) -> tuple:
-    """Natuerliche Reihenfolge von Portnamen jedes Herstellers: Ziffernfolgen zaehlen als Zahl, also 2 vor 10 (ProCurve 1, 2, 10, A1,
-    A10, Trk1, Trk2; sonst etwa Gi1/0/2 vor Gi1/0/10, Po1, ge-0/0/1, ae0). Wirft nie: eine Ziffernfolge vergleicht ohne int() (das
-    scheitert an mehr als 4300 Ziffern) ueber Laenge und Text ohne fuehrende Nullen, jedes Stueck ist (0, Laenge, Ziffern) oder
-    (1, 0, Text), Zahl und Text treffen also nie aufeinander; bei gleichem Schluessel (01 und 1) entscheidet der Name selbst."""
+def port_order(name: str) -> tuple:
+    """Sortierschluessel (sorted(..., key=port_order)) fuer die natuerliche Reihenfolge von Portnamen jedes Herstellers: Ziffernfolgen
+    zaehlen als Zahl, also 2 vor 10 (ProCurve 1, 2, 10, A1, A10, Trk1, Trk2; sonst etwa Gi1/0/2 vor Gi1/0/10, Po1, ge-0/0/1, ae0).
+    Wirft nie: eine Ziffernfolge vergleicht ohne int() (das scheitert an mehr als 4300 Ziffern) ueber Laenge und Text ohne fuehrende
+    Nullen, jedes Stueck ist (0, Laenge, Ziffern) oder (1, 0, Text), Zahl und Text treffen also nie aufeinander; bei gleichem
+    Schluessel (01 und 1) entscheidet der Name selbst. Auch main nutzt ihn (Zusammenfassung einer Aenderung)."""
     key = []
     for s in _RUNS.findall(name):
         digits = s.lstrip("0") if s[0] in "0123456789" else None
@@ -475,7 +476,7 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
     values: dict[str, dict[int, tuple[str, str]]] = {"pvid": {}, "vmvlan": {}, "ifadmin": {}, "ifalias": {}}  # Index -> (Typ, Wert)
     owner: dict[int, str] = {}  # ifIndex -> Port; zwei Ports auf einem ifIndex ueberschrieben einander (Bridge-Ports: bp2port)
     shown: list[str] = []
-    for p in sorted(desired, key=_port_order):
+    for p in sorted(desired, key=port_order):
         d = desired[p]
         if not isinstance(d, dict):
             raise ValueError(f"Port {p}: keine Felder ({d!r})")

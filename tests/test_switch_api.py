@@ -44,7 +44,7 @@ NEW_KEYS = {"driver", "caps", "snmp_write", "snmp_rw_user", "snmp_rw_auth_proto"
             "snmp_rw_auth_pass_set", "snmp_rw_priv_pass_set", "snmp_rw_insecure", "snmp_write_via", "snmp_write_error"}
 PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
 CISCO_CAPS = ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
-PROCURVE_CAPS = ["backup", "cli", "nac", "snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
+PROCURVE_CAPS = ["backup", "cli", "nac", "snmp_admin", "snmp_autosave", "snmp_name", "snmp_poe", "snmp_vlan"]
 # Independent of crypto.py: the Fernet key the app must derive from SECRET_KEY (set by conftest.py).
 TEST_FERNET = Fernet(base64.urlsafe_b64encode(hashlib.sha256(os.environ["SECRET_KEY"].encode()).digest()))
 
