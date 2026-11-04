@@ -35,6 +35,8 @@ WALKS = ("ifName", "ifAlias", "ifAdmin", "bp2if", "vlanName", "vlanEgress", "vla
 # (snmp._parse), und ein einziger Portname mit Umlaut sperrte den ganzen Switch. Mit -Ox ist jeder Wert Hex (strikt nach den Hex-Regeln),
 # build_cfg(text_hex=True) macht wieder Text daraus. Der Anzeige-Poller liest beide weiter als Text.
 TEXT_AS_HEX = ("ifAlias", "vlanName")
+# ifTypes, die poller.select_ports zum Port machen kann (physisch, LAG, und 53 / 54 mit LAG-Namen)
+_PORT_IFTYPES = poller.PHYS_IFTYPES | {poller.LAG_IFTYPE} | poller.NAMED_LAG_IFTYPES
 
 
 def _hex_text(column: str, index: str, value: str) -> str:
@@ -84,9 +86,10 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
     Bridge-Port aber eine andere PVID (ungetaggt Ankommendes landete in einem anderen VLAN, als cfg sagt). Fuer den ganzen Switch
     geschlossen aus (snmp.SnmpError statt eines cfg, das ihn falsch beschreibt), wenn
       - Name, Egress- und Untagged-Liste nicht fuer dieselben VLANs vorliegen (Spalten derselben Tabellenzeile),
-      - driver_name die Ports nach ifType waehlt und ein Interface mit numerischem ifIndex in ifName keine ifType-Zeile hat (ifXEntry
-        ergaenzt ifEntry, ein Agent liefert also zu jedem ifName ein ifType; fehlt es doch, fiele das Interface still heraus, und
-        waere es ein LAG, stuenden seine Mitglieder ungeschuetzt als gewoehnliche Ports da),
+      - driver_name die Ports nach ifType waehlt und ein Interface mit numerischem ifIndex in ifName keine ifType-Zeile hat, oder
+        eines mit einem ifType, der ein Port sein kann (6, 117, 161, 53, 54), keine ifName-Zeile (ifXEntry ergaenzt ifEntry, ein
+        Agent liefert also beide; fehlt eine doch, etwa weil ein Walk vorzeitig endete, fiele das Interface still heraus, und waere
+        es ein LAG, stuenden seine Mitglieder ungeschuetzt als gewoehnliche Ports da),
       - ein Port kein lesbares ifAdminStatus hat (er gaelte sonst als aus, und ein Revert wuerde ihn abschalten),
       - ein Portname doppelt vorkommt (ein Schreibzugriff auf diesen Port waere nicht eindeutig),
       - die vmVlan-Zeile eines Ports keine Zahl ist oder ein vmVlan-Index kein ifIndex (falsche Basis-OID),
@@ -120,6 +123,12 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool)
         if missing:
             listed = ", ".join(f"{ifname[i]} (ifIndex {i})" for i in missing[:5]) + (", ..." if len(missing) > 5 else "")
             raise snmp.SnmpError(f"Interface-Tabelle unvollständig gelesen: ifType fehlt für {listed}")
+        iftype = tbl["ifType"]
+        nameless = sorted((i for i, t in iftype.items() if i.isdigit() and t in _PORT_IFTYPES and i not in ifname),
+                          key=lambda v: (len(v), v))
+        if nameless:
+            listed = ", ".join(f"ifIndex {i} (ifType {iftype[i]})" for i in nameless[:5]) + (", ..." if len(nameless) > 5 else "")
+            raise snmp.SnmpError(f"Interface-Tabelle unvollständig gelesen: ifName fehlt für {listed}")
     bad = [k for k in vmvlan if not k.isdigit()]
     if bad:
         raise snmp.SnmpError(f"vmVlan: Index {bad[0]} ist kein ifIndex (zeigt die OID des Treibers nicht auf die Spalte vmVlan?)")

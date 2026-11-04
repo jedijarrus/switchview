@@ -385,8 +385,9 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
     There are interfaces that are no ports, under any name and at any ifIndex (VLAN interfaces, loopback, null, tunnel,
     subinterface, stack port), some of them stacked over a port or a LAG, and logical units of type 53 named after a port or LAG
     ("Po1.0", "ge-0/0/1.0") stacked on it. Now and then there is a non-numeric index (even with a physical type) and an ifType row
-    of an interface without ifName. Every numeric ifName row has its ifType row: an agent's ifXTable augments its ifTable, and the
-    write path refuses a switch where one is missing (an interface without ifType row is not part of a well-formed switch). Bridge
+    of an interface without ifName (of a type that can be no port). Every numeric ifName row has its ifType row and every ifType row
+    of a type that could be a port its ifName row: an agent's ifXTable augments its ifTable, and the write path refuses a switch
+    where one is missing (R19), so such a switch would not be well-formed. Bridge
     ports and VLAN bits as in the ProCurve generator of Task 7: members and dropped interfaces may own a bridge port with arbitrary
     bits, which must not count.
 
@@ -468,7 +469,8 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
         ifname_rows.append((f"{IF_NAME}.{phys[0]}.0", "ghost"))    # a non-numeric index, with a port type even
         type_rows.append((f"{IF_TYPE}.{phys[0]}.0", rng.choice((ETHERNET, LAG))))
     if rng.random() < 0.3:
-        type_rows.append((f"{IF_TYPE}.{fresh(30001, 40000)}", ETHERNET))    # an ifType row without an ifName row
+        # an ifType row without an ifName row: only of a type that can be no port (one that could, the write path refuses, R19)
+        type_rows.append((f"{IF_TYPE}.{fresh(30001, 40000)}", rng.choice((LOOPBACK, OTHER, TUNNEL))))
     W = {
         "ifName": ifname_rows,
         "ifType": type_rows,

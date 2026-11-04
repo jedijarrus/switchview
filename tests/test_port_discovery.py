@@ -237,9 +237,45 @@ def test_build_cfg_refuses_an_interface_without_its_iftype_row(ifi, name, driver
 
 
 def test_a_non_numeric_ifname_index_needs_no_iftype_row():
-    """Only numeric ifIndexes can be ports, so only they need an ifType row; a malformed ifName index alone stays ignored."""
-    W = edit_walks(W_CATALYST, ifName={"8.0": "ghost"})
+    """Only numeric ifIndexes can be ports, so only they need their partner row: a malformed ifName index without ifType row, or a
+    malformed ifType index (even of a port type) without ifName row, stays ignored."""
+    for W in (edit_walks(W_CATALYST, ifName={"8.0": "ghost"}), edit_walks(W_CATALYST, ifType={"8.0": LAG})):
+        assert snmpwrite.build_cfg(W, "cisco") == snmpwrite.build_cfg(W_CATALYST, "cisco")
+
+
+@pytest.mark.parametrize("driver", NON_PROCURVE)
+@pytest.mark.parametrize("ifi, kind", [("5001", LAG), ("10104", ETHERNET), ("10", PROP_VIRTUAL)])
+def test_build_cfg_refuses_a_port_type_without_its_ifname_row(ifi, kind, driver):
+    """The mirror image of the check above (R19): an ifName walk cut off at its tail loses exactly the high ifIndexes, the LAGs. An
+    ifType row of a type that could be a port (6, 117, 161, 53, 54) without its ifName row makes the write path refuse the read: the
+    interface would drop out, and if it was a LAG, its members would turn into ordinary writable ports. That holds for a 53 / 54 too
+    (Vl10 here): it is a LAG only by its name, so without one it could be a LAG nobody recognises any more. The display shows what it
+    can, and the ProCurve rule never reads ifType."""
+    W = edit_walks(W_CATALYST, ifName={ifi: None})
+    if ifi == "5001":
+        assert poller.select_ports(*_tables(W), driver)[1] == {}    # what would happen: Po1 gone, its members unprotected
+    with pytest.raises(snmp.SnmpError, match=rf"^Interface-Tabelle unvollständig gelesen: ifName fehlt für ifIndex {ifi} \(ifType {kind}\)$"):
+        snmpwrite.build_cfg(W, driver)
+    poller._build(_full(W), driver)
+    snmpwrite.build_cfg(W, "procurve")
+
+
+@pytest.mark.parametrize("kind", [PROP_VIRTUAL, PROP_MULTIPLEXOR])
+def test_a_nameless_lag_of_type_53_or_54_is_refused(kind):
+    """Po1 reported as 53 / 54, as classic IOS does, and its ifName row lost: refused, as it can no longer be told to be a LAG."""
+    W = edit_walks(W_CATALYST, ifType={"5001": kind}, ifName={"5001": None})
+    with pytest.raises(snmp.SnmpError, match=rf"ifName fehlt für ifIndex 5001 \(ifType {kind}\)$"):
+        snmpwrite.build_cfg(W, "cisco")
+
+
+@pytest.mark.parametrize("ifi", ["14501", "20567"])
+def test_a_nameless_interface_that_can_be_no_port_is_ignored(ifi):
+    """Nu0 (type 1) and Lo0 (type 24) without their ifName rows: they can be no port either way, so the read goes through as without
+    them. The same for ifType rows of such types with no ifName row at all."""
+    W = edit_walks(W_CATALYST, ifName={ifi: None})
     assert snmpwrite.build_cfg(W, "cisco") == snmpwrite.build_cfg(W_CATALYST, "cisco")
+    for kind in (OTHER, LOOPBACK, TUNNEL, L2VLAN, L3IPVLAN):
+        assert snmpwrite.build_cfg(edit_walks(W_CATALYST, ifType={"30": kind}), "cisco") == snmpwrite.build_cfg(W_CATALYST, "cisco")
 
 
 @pytest.mark.parametrize("name, iftype", [
@@ -347,12 +383,17 @@ def _catalyst_with(name: str, iftype: str, stack: dict, **edits) -> dict:
 ])
 def test_a_propvirtual_lag_name_without_a_physical_member_is_no_trunk(name, stack, extra, kind):
     """A LAG name is not enough: an interface of type 53 or 54 without a selected physical port directly below it is no trunk and no
-    port, for every non-ProCurve driver, and the switch reads exactly as without it."""
+    port, for every non-ProCurve driver, and the switch reads exactly as without it. (ifIndex 77, an ethernet ifType row without
+    ifName, is no port either; but the write path refuses that read as a whole, R19.)"""
     W = _catalyst_with(name, kind, stack, **extra)
     for driver in NON_PROCURVE:
         assert poller.select_ports(*_tables(W), driver) == poller.select_ports(*_tables(W_CATALYST), driver), driver
-        assert snmpwrite.build_cfg(W, driver) == snmpwrite.build_cfg(W_CATALYST, driver), driver
         assert _display(W, driver) == CATALYST_DISPLAY, driver
+        if "ifType" in extra:
+            with pytest.raises(snmp.SnmpError, match=r"ifName fehlt für ifIndex 77 \(ifType 6\)$"):
+                snmpwrite.build_cfg(W, driver)
+        else:
+            assert snmpwrite.build_cfg(W, driver) == snmpwrite.build_cfg(W_CATALYST, driver), driver
 
 
 @pytest.mark.parametrize("name, iftype", [
@@ -483,6 +524,10 @@ def test_build_cfg_agrees_with_poller_non_procurve_on_random_switches():
         lost = rng.choice([i for i in poller._tbl(W["ifName"], IF_NAME) if i.isdigit()])    # one ifType row goes missing
         with pytest.raises(snmp.SnmpError, match=rf"ifType fehlt für .* \(ifIndex {lost}\)"):
             snmpwrite.build_cfg(edit_walks(W, ifType={lost: None}), driver)
+        types = poller._tbl(W["ifType"], IF_TYPE)
+        lost = rng.choice([i for i, t in types.items() if i.isdigit() and t in (ETHERNET, GIGABIT, LAG, PROP_VIRTUAL, PROP_MULTIPLEXOR)])
+        with pytest.raises(snmp.SnmpError, match=rf"ifName fehlt für ifIndex {lost} \(ifType {types[lost]}\)"):    # or its ifName row
+            snmpwrite.build_cfg(edit_walks(W, ifName={lost: None}), driver)
 
 
 # ── read_cfg: ifType only where it selects ────────────────────────────────────────────────────────────────────────────────────────
