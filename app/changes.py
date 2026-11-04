@@ -6,6 +6,8 @@ Regeln aus docs/procurve-cli-referenz.md (3.3-3.13):
 - Ablauf: running-config lesen, erneut planen (muss der Vorschau entsprechen), senden,
   zuruecklesen und pruefen, erst dann 'write memory'
 - switchweite Befehle nur beim ausdruecklichen 'Vorbereiten' und nur hinzufuegend
+Per SNMP (changes.mechanism "snmp", Spec §6) derselbe Ablauf: live lesen (snmpwrite.read_cfg), erneut planen, ein SET
+(snmpwrite.apply_ops), zuruecklesen und pruefen (verify_snmp); dauerhaft speichert dort nur ein Treiber mit snmp_autosave (R26).
 """
 import asyncio
 import hashlib
@@ -19,7 +21,9 @@ from datetime import datetime, timezone
 from netmiko.exceptions import ConfigInvalidException
 
 import cfgparse
+import drivers
 import poller
+import snmp
 import snmpwrite
 import sshcli
 from crypto import decrypt
@@ -40,6 +44,8 @@ ERROR_PATTERN = r"(Invalid input|Incomplete input|Ambiguous input|Module not pre
 ORDER = ["dot1x_off", "mac_off", "vlan_untagged", "vlan_tagged", "no_vlan_tagged", "name", "no_name", "enable", "disable",
          "dot1x_on", "dot1x_cl", "dot1x_uv", "dot1x_no_uv", "mac_on", "mac_al", "mac_uv", "mac_no_uv"]
 TERMINAL = {"ok", "unclear", "failed", "aborted"}
+# R26: ohne snmp_autosave steht ein SNMP-Set nur in der laufenden Konfiguration des Switches
+SNMP_UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Switch speichern (z. B. write memory / copy running-config startup-config)"
 
 
 def _now() -> str:
@@ -347,6 +353,35 @@ def verify_ports(cfg_after: dict, desired: dict) -> list[str]:
     return bad
 
 
+def verify_snmp(driver, cfg_after: dict, raw_after: dict, desired: dict) -> list[str]:
+    """Das Pruefen nach einem SNMP-SET, das Gegenstueck zu verify_ports: was im Read-back (cfg_after, raw_after aus snmpwrite.read_cfg)
+    nicht so ist, wie desired es will, je eine Zeile, Ports in natuerlicher Reihenfolge; leer heisst ok.
+      - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]) oder als nicht verwaltbar fuehrt
+        (raw_after["unmanaged"]), weicht ab: cfg haelt fuer ihn nur Platzhalter (port_state fuellte Vorgaben ein, u ist None), an denen
+        ein Ziel wie "kein ungetaggtes VLAN" oder "Name leer" sonst unbemerkt vorbeikaeme.
+      - u, t, en, name wie verify_ports.
+      - Die PVID (R21) bei Q-BRIDGE (vlan_strategy "qbridge") fuer einen Port ohne vmVlan-Zeile, gelesen aus raw_after["pvid"]:
+        erwartet ist eine ausdrueckliche pvid aus desired, sonst das neue ungetaggte VLAN, wenn u zu einem VLAN wechselt (genau das
+        schreibt render_ops). Sonst (u -> None, nur t / en / name) schreibt render_ops keine PVID, und keine wird erwartet. Bei
+        cisco_vmps nie: vmVlan ist dort das VLAN des Access-Ports (u), dot1qPvid schreibt dieser Weg nicht."""
+    bad = []
+    for p in sorted(desired, key=snmpwrite.port_order):
+        d = desired[p]
+        if p not in raw_after["ifindex"]:
+            bad.append(f"Port {p}: beim Zurücklesen nicht gefunden")
+            continue
+        if p in raw_after["unmanaged"]:
+            bad.append(f"Port {p}: nach der Änderung {raw_after['unmanaged'][p]}")
+            continue
+        bad += verify_ports(cfg_after, {p: {k: v for k, v in d.items() if k != "pvid"}})
+        want = d["pvid"] if "pvid" in d else d.get("u")
+        if want is not None and driver.vlan_strategy == "qbridge" and p not in raw_after["vmvlan"]:
+            have = raw_after["pvid"].get(p)
+            if have != want:
+                bad.append(f"Port {p}: pvid ist {have!r}, erwartet {want!r}")
+    return bad
+
+
 # ── RADIUS-Grundeinrichtung des Switches ──────────────────────────────────────
 PARK_VLAN = "3999"  # Park-VLAN: ohne IP, ohne Routing, auf keinem Uplink
 
@@ -411,12 +446,27 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
 
 
 # ── Konfiguration lesen (Cache) ───────────────────────────────────────────────
+# R27: Switches, deren zwischengespeicherter SSH-Read (switch_cfg) nicht mehr zaehlt: per SSH war die Konfiguration zuletzt nicht zu
+# lesen (run_change kam nicht bis zur running-config, fresh_cfg las vergeblich), oder ein SNMP-SET hat den Switch seither geaendert.
+# fresh_cfg liest fuer sie wirklich, statt bis zu max_age_s lang aus dem Cache: so merkt die Vorschau, dass SSH weg ist, und kann auf
+# SNMP ausweichen, statt eine SSH-Aenderung zu planen, die beim Ausfuehren scheitert. Die Zeile in switch_cfg bleibt (die Karte zeigt
+# daraus NAC-Zustand und RADIUS-Bereitschaft); ein erfolgreicher Read (store_cfg) hebt die Marke auf. Im Prozess gehalten wie die Locks
+# (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch.
+_cfg_stale: set[int] = set()
+
+
+def invalidate_cfg(sid: int):
+    """Den zwischengespeicherten SSH-Read von Switch sid verwerfen (R27): der naechste fresh_cfg liest wirklich."""
+    _cfg_stale.add(sid)
+
+
 async def store_cfg(sid: int, content: str) -> dict:
     parsed = cfgparse.parse_config(content)
     async with db() as conn:
         await conn.execute("INSERT INTO switch_cfg(switch_id, taken_at, parsed) VALUES (?,?,?) ON CONFLICT(switch_id) DO UPDATE "
                            "SET taken_at = excluded.taken_at, parsed = excluded.parsed", (sid, _now(), json.dumps(parsed)))
         await conn.commit()
+    _cfg_stale.discard(sid)
     return parsed
 
 
@@ -428,11 +478,14 @@ async def cached_cfg(sid: int) -> tuple[dict | None, str | None]:
 
 
 async def fresh_cfg(sid: int, max_age_s: int = 600) -> dict:
-    cfg, at = await cached_cfg(sid)
+    """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und nicht verworfen (R27, invalidate_cfg), sonst
+    per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen."""
+    cfg, at = (None, None) if sid in _cfg_stale else await cached_cfg(sid)
     if cfg and at and (datetime.now(timezone.utc) - datetime.strptime(at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds() < max_age_s:
         return cfg
     res = await sshcli.backup_config(sid, "lesen")
     if not res.get("ok"):
+        invalidate_cfg(sid)
         raise RuntimeError(res.get("error") or "Konfiguration konnte nicht gelesen werden")
     cfg, _ = await cached_cfg(sid)
     return cfg
@@ -456,24 +509,34 @@ async def _step(cid: int, steps: list, text: str, level: str = "info"):
 
 
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None) -> int:
+    """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
+    ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte."""
     async with db() as conn:
         cur = await conn.execute(
-            "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
+            "mechanism) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
-             int(bool(plan.get("expert"))), revert_of))
+             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism")))
         await conn.commit()
         return cur.lastrowid
 
 
 async def run_change(cid: int):
-    """Hintergrund-Task. Status: queued -> running -> ok | unclear | failed | aborted."""
+    """Hintergrund-Task. Status: queued -> running -> ok | unclear | failed | aborted.
+
+    Auf dem Schreibweg der Vorschau (changes.mechanism; NULL heisst ssh, eine Zeile von vor der Spalte): "snmp" faehrt _run_snmp, ein
+    unbekannter bricht ab, ohne den Switch anzufassen (nie still per SSH). Der Rest hier ist der SSH-Weg."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
             ch = await cur.fetchone()
         async with conn.execute("SELECT * FROM switches WHERE id = ?", (ch["switch_id"],)) as cur:
             row = await cur.fetchone()
+    mech = ch["mechanism"] or "ssh"
+    if mech == "snmp":
+        return await _run_snmp(cid, ch, row)
+    if mech != "ssh":
+        return await _refuse(cid, ch, f"Unbekannter Schreibweg {mech!r}: nichts ausgeführt")
     sid, kind = ch["switch_id"], ch["kind"]
     req, previewed = json.loads(ch["request"] or "{}"), json.loads(ch["commands"] or "[]")
     steps: list = []
@@ -542,6 +605,8 @@ async def run_change(cid: int):
                 await asyncio.to_thread(sshcli.disconnect, conn)
     except Exception as e:  # noqa: BLE001
         log.exception("Änderung %s", cid)
+        if pre is None:  # R27: per SSH nicht bis zur running-config gekommen (Verbinden oder erstes Lesen scheiterte)
+            invalidate_cfg(sid)
         status, error = ("unclear" if post or output else "failed"), f"{type(e).__name__}: {str(e)[:300]}"
         await _step(cid, steps, error, "error")
     finally:
@@ -559,6 +624,114 @@ async def run_change(cid: int):
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}")
         if status in ("ok", "unclear", "failed") and kind != "save":
             asyncio.create_task(_repoll(sid))
+
+
+async def _run_snmp(cid: int, ch, row):
+    """run_change per SNMP (Spec §6, Q2): der Ablauf des SSH-Wegs, im selben Lock des Switches (sshcli.lock), damit Aenderungen an
+    einem Switch nacheinander laufen, gleich ueber welchen Weg.
+      1. Ohne Schreib-Identitaet (poller.creds_of(row, write=True)): failed, nichts gelesen, nichts gesendet.
+      2. Live lesen: snmpwrite.read_cfg selbst, nie main._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
+         reentrant). Scheitert es: failed.
+      3. Gegen diesen Read neu planen (die Anfrage der Aenderung): gesperrt oder shown anders als in der Vorschau -> aborted, nichts
+         geschrieben. before kommt aus diesem Read (mit der PVID, R21).
+      4. EIN SET (snmpwrite.apply_ops). Scheitert es (Timeout, Fehlerpaket), ist offen, ob der Switch es uebernommen hat: kein failed,
+         das Zuruecklesen entscheidet.
+      5. Zuruecklesen und pruefen (verify_snmp): scheitert der Read oder weicht etwas ab, unclear. Sonst ok, saved=1 nur bei einem
+         Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
+    Was ab dem SET schiefgeht, ist unclear, davor failed. Nie SSH, keine Sicherung, kein switch_cfg: es gibt keine running-config. Den
+    zwischengespeicherten SSH-Read verwirft der SET (invalidate_cfg), er beschreibt den Switch danach nicht mehr."""
+    sid = ch["switch_id"]
+    if ch["kind"] != "ports":  # Speichern und RADIUS-Vorbereitung gibt es nur per SSH (main lehnt sie vorher ab)
+        return await _refuse(cid, ch, "Per SNMP gibt es nur Port-Änderungen: nichts ausgeführt")
+    req, previewed = json.loads(ch["request"] or "{}"), json.loads(ch["commands"] or "[]")
+    steps: list = []
+    status, error, saved, output = None, None, 0, ""
+    sent = False  # ab hier kann der Switch etwas uebernommen haben
+    try:
+        driver = drivers.driver_for(row)
+        autosave = drivers.can(driver, "snmp_autosave")
+        kept = "Was der Switch davon übernommen hat, hat er selbst gespeichert." if autosave else "Nicht dauerhaft gespeichert."
+        try:
+            poller.creds_of(row, write=True)
+        except snmp.SnmpError as e:
+            status, error = "failed", str(e)
+            await _step(cid, steps, error, "error")
+            return
+        inv = await inventory(sid)
+        lock = sshcli.lock(sid)
+        if lock.locked():
+            await _step(cid, steps, "Warte auf laufende Aktion an diesem Switch")
+        async with lock:
+            await _upd(cid, status="running")
+            await _step(cid, steps, f"Lese {row['host']} per SNMP")
+            try:
+                cfg, raw = await snmpwrite.read_cfg(row, driver)
+            except (snmp.SnmpError, OSError) as e:
+                status, error = "failed", f"Zustand per SNMP nicht lesbar: {e}"
+                await _step(cid, steps, error, "error")
+                return
+            await _step(cid, steps, "Zustand vorher gelesen")
+            plan = plan_ports(row["firmware"] or "", inv, cfg, req, mechanism="snmp", driver=driver, raw=raw)
+            if plan["blocked"]:
+                status, error = "aborted", "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"])
+                await _step(cid, steps, "Abgebrochen: " + error, "error")
+                return
+            if plan["shown"] != previewed:
+                status, error = "aborted", "Der Switch hat sich seit der Vorschau geändert. Bitte Vorschau neu laden."
+                await _step(cid, steps, error, "error")
+                return
+            await _upd(cid, before=json.dumps(plan["before"]))
+            if plan["ops"]:
+                n = len(plan["ops"])
+                await _step(cid, steps, f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
+                sent = True
+                invalidate_cfg(sid)
+                try:
+                    output = await snmpwrite.apply_ops(row, driver, plan["ops"])
+                except (snmp.SnmpError, OSError) as e:
+                    output = str(e)
+                    await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
+                try:
+                    cfg_after, raw_after = await snmpwrite.read_cfg(row, driver)
+                except (snmp.SnmpError, OSError) as e:
+                    status, error = "unclear", f"Zurücklesen per SNMP fehlgeschlagen: {e}"
+                    await _step(cid, steps, f"{error}. {kept}", "error")
+                    return
+                await _step(cid, steps, "Zustand nachher gelesen")
+                bad = verify_snmp(driver, cfg_after, raw_after, plan["desired"])
+                if bad:
+                    status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
+                    await _step(cid, steps, f"{error}. {kept}", "error")
+                    return
+                await _step(cid, steps, "Prüfung ok")
+            status = "ok"
+            if autosave:
+                saved = 1
+                await _step(cid, steps, "Gespeichert (der Switch speichert SNMP-Änderungen selbst)", "ok")
+            else:
+                await _step(cid, steps, SNMP_UNSAVED, "warn")
+    except Exception as e:  # noqa: BLE001
+        log.exception("Änderung %s", cid)
+        status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {str(e)[:300]}"
+        await _step(cid, steps, error, "error")
+    finally:
+        await _close(cid, ch, status or ("unclear" if sent else "failed"), error, saved, output)
+
+
+async def _refuse(cid: int, ch, error: str):
+    """Eine Aenderung abbrechen, ohne den Switch anzufassen (aborted, mit Grund)."""
+    await _step(cid, [], error, "error")
+    await _close(cid, ch, "aborted", error, 0, "")
+
+
+async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str):
+    """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis in die Zeile, Audit wie auf dem SSH-Weg, dazu der Schreibweg, und
+    die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config."""
+    sid = ch["switch_id"]
+    await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output)
+    await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
+    if status in ("ok", "unclear", "failed") and ch["kind"] != "save":
+        asyncio.create_task(_repoll(sid))
 
 
 async def _repoll(sid: int):

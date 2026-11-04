@@ -51,6 +51,14 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
     return text
 
 
+def _host(host: str) -> str:
+    """host, wenn er als Ziel an net-snmp gehen darf. Er steht als eigenes Argument hinter den Optionen, und getopt laese ein "-..."
+    dort als Option: SnmpError statt eines Aufrufs. main prueft den Host beim Speichern (HOST_RE), Zeilen von vorher aber nicht."""
+    if host.startswith("-"):
+        raise SnmpError(f"Host {host!r} darf nicht mit '-' beginnen (net-snmp läse ihn als Option)")
+    return host
+
+
 _HEX_VALUE = re.compile(r"[0-9A-Fa-f\s]*")
 
 
@@ -122,17 +130,17 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
     es mit Exit-Code != 0, die Zeilen bis dahin stehen aber schon in stdout. strict=False (Standard, der Poller): das gilt als
     Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle;
     dazu muss jede Zeile zu einem Wert gehoeren: mit hex_values ist jeder Wert reines Hex, ohne kann nur ein String umbrechen (siehe
-    _parse).
+    _parse). Ein host mit "-" vorne: SnmpError, ohne Aufruf (_host).
     """
     cmd = ["snmpbulkwalk", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25"]
     if hex_values:
         cmd.append("-Ox")
-    cmd += [host, oid]
+    cmd += [_host(host), oid]
     return _parse(await _run(cmd, timeout, strict=strict), hex_strict=strict and hex_values, text_strict=strict and not hex_values)
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
-    cmd = ["snmpget", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", host, *oids]
+    cmd = ["snmpget", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", _host(host), *oids]
     return dict(_parse(await _run(cmd, timeout)))
 
 
@@ -145,8 +153,9 @@ async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], 
     Wie bei walk/get steht der Host positional hinter den Optionen, und es gibt keine Shell: jedes Argument ist ein eigenes Argv-Element,
     Werte mit Leerzeichen oder leere Werte brauchen kein Quoting. Fehler kommen als SnmpError aus _run; ein SnmpError heisst nicht
     "nicht gesetzt": nach einem Timeout ist offen, ob der Switch den Wert schon uebernommen hat (darum Read-back-Verify beim Aufrufer).
+    Ein host mit "-" vorne: SnmpError, ohne Aufruf (_host).
     """
-    cmd = ["snmpset", *_auth_args(cred), "-On", host]
+    cmd = ["snmpset", *_auth_args(cred), "-On", _host(host)]
     for oid, typ, val in varbinds:
         cmd += [oid, typ, val]
     return await _run(cmd, timeout)

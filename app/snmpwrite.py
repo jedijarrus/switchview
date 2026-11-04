@@ -1,5 +1,5 @@
-"""SNMP-Schreibweg. Hier: den Switch live lesen (read_cfg) und die Aenderung in snmpset-Varbinds uebersetzen (render_ops); anwenden
-folgt.
+"""SNMP-Schreibweg: den Switch live lesen (read_cfg), die Aenderung in snmpset-Varbinds uebersetzen (render_ops) und sie schreiben
+(apply_ops). Den Ablauf darum herum (Lock, Abgleich mit der Vorschau, Zuruecklesen und Pruefen) fuehrt changes.run_change.
 
 read_cfg ist das SNMP-Gegenstueck zu `show running-config` + cfgparse.parse_config auf dem SSH-Weg. Es liest den Switch gezielt und
 live, im Change-Lock des Aufrufers und nie aus dem Poll-Cache, und baut daraus dasselbe cfg-dict, mit dem changes.plan_ports und
@@ -503,3 +503,18 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
     ops += [(f"{driver.oids[kind]}.{index}", typ, value)
             for kind in ("pvid", "vmvlan", "ifadmin", "ifalias") for index, (typ, value) in sorted(values[kind].items())]
     return ops, shown
+
+
+# ── Anwenden ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+async def apply_ops(row, driver: drivers.Driver, ops: list[tuple[str, str, str]]) -> str:
+    """Die Varbinds `ops` (aus render_ops, fuer diesen Switch gerechnet) mit EINEM snmpset an den Switch `row` (switches-Zeile)
+    schreiben, mit der SCHREIB-Identitaet poller.creds_of(row, write=True); liefert die Ausgabe von snmpset. Ohne ops geht nichts
+    hinaus (""). driver ist der Treiber, fuer den render_ops gerechnet hat; jeder Treiber schreibt heute gleich, mit einem snmpset.
+
+    snmp.SnmpError, wenn es keine Schreib-Identitaet gibt (Grund aus write_identity; dann ist nichts gesendet) oder snmpset scheitert.
+    Ein gescheitertes SET heisst NICHT "nicht geschrieben": nach einem Timeout ist offen, ob der Switch die Werte schon uebernommen hat
+    (das PDU wirkt als Ganzes, die Antwort kann trotzdem verloren gehen). Darum wiederholt apply_ops nie, und der Aufrufer
+    (changes.run_change) liest immer zurueck und prueft."""
+    if not ops:
+        return ""
+    return await snmp.set_vars(row["host"], poller.creds_of(row, write=True), list(ops))
