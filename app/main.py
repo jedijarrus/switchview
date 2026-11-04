@@ -33,6 +33,13 @@ log = logging.getLogger("switchview")
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
 
+# ── Single-Worker-Invariante ──────────────────────────────────────────────────
+# SwitchView laeuft mit genau EINEM uvicorn-Worker (kein --workers, kein WEB_CONCURRENCY). Der Zustand liegt im Prozess:
+# Scheduler, Login-Ratelimit (_login_hits), laufende Aenderungs-Tasks (_tasks) und die Locks je Switch fuer SSH
+# (sshcli._locks) und Abfrage (poller._locks). Mehrere Worker haetten je ihren eigenen Satz: Jobs liefen mehrfach, das
+# Ratelimit gaelte je Prozess, zwei Worker koennten gleichzeitig per SSH am selben Switch arbeiten (max. 5 Sessions),
+# und der Start (lifespan) markiert die laufende Aenderung eines anderen Workers als abgebrochen.
+
 
 async def _schedule():
     minutes = int(await get_setting("poll_minutes", "15") or 15)

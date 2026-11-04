@@ -43,6 +43,7 @@ docker compose up -d --build
 
 SwitchView listens on port 8080 (see `docker-compose.yml`). Data (SQLite) lives in `./data`.
 Run it behind a TLS-terminating reverse proxy in production (`X-Forwarded-Proto` is honoured).
+Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, login rate limit, per-switch SSH/poll locks and running changes live in process memory.
 
 Then add switches in the UI (management IP, SNMP credentials, optional SSH manager account). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again.
 
