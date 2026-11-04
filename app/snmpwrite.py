@@ -23,7 +23,9 @@ raw haelt beide getrennt: port2bp / bp2port fuer die Q-BRIDGE-Seite, ifindex fue
 
 render_ops macht aus dem Ziel pro Port (desired aus changes.plan_ports) die Varbinds fuer EIN snmpset, gerechnet auf den Bytes genau
 dieses Reads: jede PortList wird gelesen, nur die Bits der geaenderten Ports kippen, und sie geht ganz zurueck. Ein Revert ist kein
-eigener Weg: plan_ports mit desired = before gegen einen frischen Read, gerendert wie jede andere Aenderung.
+eigener Weg: plan_ports mit desired = before gegen einen frischen Read, gerendert wie jede andere Aenderung. Was an einem Port nicht
+geschrieben werden darf, steht genau einmal in snmp_block_reason: render_ops lehnt damit ab, plan_ports zeigt denselben Grund als
+gesperrten Port.
 """
 import asyncio
 import re
@@ -279,99 +281,151 @@ def _onoff(en: bool) -> str:
     return "an" if en else "aus"
 
 
-def _check_port(driver, cfg: dict, raw: dict, p: str, d: dict, member_of: dict[str, str]) -> None:
-    """ValueError, wenn render_ops Port p mit den Feldern d nicht anfassen darf (Reihenfolge der Pruefungen = Vorrang der Gruende)."""
+def is_vlan_id(value) -> bool:
+    """Ist value eine VLAN-ID 1..4094 als Text, wie ein Walk sie zeigt (Dezimal ohne fuehrende Null, nur ASCII-Ziffern)? So muss eine
+    ausdrueckliche pvid aussehen (R21); changes.plan_ports nimmt eine PVID aus raw auch nur so in before auf."""
+    return isinstance(value, str) and bool(_VLAN_ID.fullmatch(value)) and int(value) <= 4094
+
+
+def _touched(st: dict, u: str | None, t: list[str]) -> set[str]:
+    """Die VLANs, in denen sich ein Bit des Ports aendern kann, wenn er von st (u / t laut cfg) zu u / t geht: altes und neues ungetaggtes
+    VLAN (nur wenn u sich aendert) und jedes VLAN, das getaggt dazukommt oder wegfaellt."""
+    return ({st["u"], u} - {None} if u != st["u"] else set()) | (set(st["t"]) ^ set(t))
+
+
+def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, fields: dict) -> str | None:
+    """Warum render_ops Port `port` mit `fields` ({Feld: Zielwert} wie in desired) nicht schreiben darf: ein deutscher Grund ohne
+    "Port X: " davor, oder None, wenn nichts dagegen spricht (auch bei leeren fields). Die eine Quelle der Regeln pro Port: render_ops
+    wirft ValueError("Port X: <Grund>"), changes.plan_ports traegt {"port": X, "reason": <Grund>} in blocked ein und plant die anderen
+    Ports weiter. Gerechnet auf cfg / raw desselben Reads (read_cfg); die Reihenfolge der Pruefungen ist der Vorrang der Gruende.
+
+    Abgelehnt wird
+      - ein Port, den es nicht gibt, und ein anderes Feld als u / pvid / t / en / name (802.1X / MAC-Anmeldung gehen nur ueber die CLI,
+        PoE kommt erst mit dem PoE-Schreibweg);
+      - ein Port in raw["unmanaged"]; ein Trunk-Mitglied (der Trunk selbst geht: er ist ein Bridge-Port); ein Port ohne Bridge-Port oder
+        ifIndex (nur Anzeige, auch kein Abschalten) oder dessen Bridge-Port laut raw["bp2port"] nicht ihm gehoert; ein Feld, dessen
+        Faehigkeit der Treiber nicht hat (FIELD_CAPS, drivers.can);
+      - ein Wert, der keiner ist: u keine VLAN-ID als Text, t keine Liste verschiedener, pvid keine VLAN-ID 1..4094 (is_vlan_id), en
+        nicht wahr oder falsch, ein Name mit Steuerzeichen, ohne UTF-8-Form oder mit mehr als 64 Bytes in UTF-8;
+      - wenn sich VLANs aendern (u, t oder eine pvid): bei cisco_vmps (R20) jede pvid und alles ausser dem Access-VLAN eines Ports mit
+        vmVlan-Zeile, auch keins (vmVlan 0); bei qbridge ein Port, den der Read per vmVlan beschreibt; ein VLAN, das es auf dem Switch
+        nicht gibt, auch als pvid (R23); u zugleich in t; ein Port ohne jedes VLAN; eine pvid neben einem anderen ungetaggten VLAN (der
+        Port waere danach nicht verwaltbar, R12); jede andere vlan_strategy.
+    Was nur mehrere Ports zusammen betrifft (zwei Ports einer Aenderung auf einem ifIndex), prueft render_ops selbst."""
+    p, d = port, fields
+    if not d:
+        return None
     if p not in cfg["ports"]:
-        raise ValueError(f"Port {p}: gibt es auf diesem Switch nicht")
+        return "gibt es auf diesem Switch nicht"
     odd = sorted(str(k) for k in d if k not in FIELD_CAPS)
     if odd:
-        raise ValueError(f"Port {p}: per SNMP nicht änderbar: {', '.join(odd)}")
+        return f"per SNMP nicht änderbar: {', '.join(odd)}"
     if p in raw["unmanaged"]:
-        raise ValueError(f"Port {p}: {raw['unmanaged'][p]}")
+        return raw["unmanaged"][p]
+    member_of = {m: trunk for trunk, members in cfg["trunks"].items() for m in members}
     if p in member_of:  # ein Mitglied hat keinen eigenen Bridge-Port, seine VLANs sind die des Trunks
-        raise ValueError(f"Port {p}: gehört zu {member_of[p]}, bitte {member_of[p]} wählen")
+        return f"gehört zu {member_of[p]}, bitte {member_of[p]} wählen"
     if p not in raw["port2bp"] or p not in raw["ifindex"]:
         # etwa ein Management-Port ausserhalb der Bridge: nur Anzeige, auch kein Abschalten (es koennte SwitchViews eigener Zugang sein)
-        raise ValueError(f"Port {p}: kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige")
+        return "kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige"
     bp = raw["port2bp"][p]
     if raw["bp2port"].get(bp) != p:
         # build_cfg sorgt dafuer, dass der effektive Bridge-Port eines Ports, der kein Mitglied ist, ihm selbst gehoert. Stimmt das
         # nicht, waere es ein Fehler in raw: lieber nichts schreiben als die Bits eines fremden Ports kippen.
         owner = raw["bp2port"].get(bp)
-        raise ValueError(f"Port {p}: Bridge-Port {bp} gehört laut bp2port zu {f'Port {owner}' if owner else 'keinem Port'}")
+        return f"Bridge-Port {bp} gehört laut bp2port zu {f'Port {owner}' if owner else 'keinem Port'}"
     for k, cap in FIELD_CAPS.items():
         if k in d and not drivers.can(driver, cap):
-            raise ValueError(f"Port {p}: Treiber {driver.name} kann {_CAP_LABEL[cap]} nicht per SNMP schreiben")
+            return f"Treiber {driver.name} kann {_CAP_LABEL[cap]} nicht per SNMP schreiben"
+    st = cfg["ports"][p]
+    u, t, pvid = d.get("u", st["u"]), d.get("t", st["t"]), d.get("pvid")
+    if u is not None and not isinstance(u, str):
+        return f"u ist keine VLAN-ID ({u!r})"
+    if not isinstance(t, (list, tuple)) or not all(isinstance(v, str) for v in t) or len(set(t)) != len(t):
+        return f"t ist keine Liste verschiedener VLAN-IDs ({t!r})"
+    if "pvid" in d and not is_vlan_id(pvid):
+        return f"pvid ist keine VLAN-ID 1–4094 ({pvid!r})"
+    if u != st["u"] or set(t) != set(st["t"]) or pvid is not None:
+        reason = _vlan_refusal(driver, cfg, raw, p, st, u, list(t), pvid)
+        if reason:
+            return reason
+    if "en" in d and not isinstance(d["en"], bool):
+        return f"en ist nicht wahr oder falsch ({d['en']!r})"
+    if "name" in d:
+        return _name_refusal(d["name"])
+    return None
 
 
-def _check_name(p: str, name) -> None:
-    """ValueError, wenn `name` nicht als ifAlias geschrieben werden kann oder soll. Ein fuehrendes "-" ist erlaubt: der Name geht als
+def _name_refusal(name) -> str | None:
+    """Warum `name` nicht als ifAlias geschrieben werden kann oder soll (sonst None). Ein fuehrendes "-" ist erlaubt: der Name geht als
     Hex (Typ x) zu snmpset, getopt sieht ihn nie (R22)."""
     if not isinstance(name, str):
-        raise ValueError(f"Port {p}: Name ist kein Text ({name!r})")
+        return f"Name ist kein Text ({name!r})"
     if any(unicodedata.category(c) == "Cc" for c in name):  # NUL, Zeilenumbruch, Steuerzeichen: gehoeren in keinen Portnamen
-        raise ValueError(f"Port {p}: Name enthält Steuerzeichen")
+        return "Name enthält Steuerzeichen"
     try:
         size = len(name.encode("utf-8"))
     except UnicodeEncodeError:  # etwa ein einzelnes Surrogat aus einem JSON-Escape
-        raise ValueError(f"Port {p}: Name enthält Zeichen, die sich nicht als UTF-8 schreiben lassen") from None
+        return "Name enthält Zeichen, die sich nicht als UTF-8 schreiben lassen"
     if size > ALIAS_MAX:
-        raise ValueError(f"Port {p}: Name zu lang ({size} Bytes in UTF-8, ifAlias erlaubt höchstens {ALIAS_MAX})")
+        return f"Name zu lang ({size} Bytes in UTF-8, ifAlias erlaubt höchstens {ALIAS_MAX})"
+    return None
 
 
-def _target(p: str, st: dict, d: dict) -> tuple[str | None, list[str], str | None]:
-    """Ungetaggtes VLAN, getaggte VLANs und ausdrueckliche PVID von Port p nach der Aenderung (was d nicht nennt, bleibt, wie cfg es
-    hat; ohne pvid in d ist sie None)."""
-    u, t, pvid = d.get("u", st["u"]), d.get("t", st["t"]), d.get("pvid")
-    if u is not None and not isinstance(u, str):
-        raise ValueError(f"Port {p}: u ist keine VLAN-ID ({u!r})")
-    if not isinstance(t, (list, tuple)) or not all(isinstance(v, str) for v in t) or len(set(t)) != len(t):
-        raise ValueError(f"Port {p}: t ist keine Liste verschiedener VLAN-IDs ({t!r})")
-    if "pvid" in d and not (isinstance(pvid, str) and _VLAN_ID.fullmatch(pvid) and int(pvid) <= 4094):
-        raise ValueError(f"Port {p}: pvid ist keine VLAN-ID 1–4094 ({pvid!r})")
-    return u, list(t), pvid
-
-
-def _vlan_ops(driver, cfg: dict, raw: dict, p: str, st: dict, u: str | None, t: list[str], pvid: str | None,
-              portlists: dict[str, dict[str, bytes]], values: dict[str, dict[int, tuple[str, str]]]) -> list[str]:
-    """Port p bekommt das ungetaggte VLAN u, die getaggten t und, wenn pvid nicht None ist, ausdruecklich diese PVID (mindestens eins
-    davon ist neu): traegt die noetigen Bits in portlists ein, PVID / vmVlan in values, und liefert die shown-Zeilen dazu."""
+def _vlan_refusal(driver, cfg: dict, raw: dict, p: str, st: dict, u: str | None, t: list[str], pvid: str | None) -> str | None:
+    """Warum Port p (Zustand st laut cfg) nicht das ungetaggte VLAN u, die getaggten t und, wenn pvid nicht None ist, ausdruecklich diese
+    PVID bekommen darf (mindestens eins davon ist neu; die Werte sind schon als VLAN-IDs geprueft); sonst None."""
     u_changed, t_changed = u != st["u"], set(t) != set(st["t"])
     if driver.vlan_strategy == "cisco_vmps":
         # R20: nur das Access-VLAN eines Access-Ports (einer mit vmVlan-Zeile), ueber vmVlan; Trunk-VLANs fuehrt IOS in CISCO-VTP-MIB
         if pvid is not None:
-            raise ValueError(f"Port {p}: PVID per SNMP nur über Q-BRIDGE, nicht bei Cisco (vmVlan)")
+            return "PVID per SNMP nur über Q-BRIDGE, nicht bei Cisco (vmVlan)"
         if p not in raw["vmvlan"]:
-            raise ValueError(f"Port {p}: Trunk-VLANs auf Cisco per SNMP noch nicht unterstützt (CISCO-VTP-MIB)")
+            return "Trunk-VLANs auf Cisco per SNMP noch nicht unterstützt (CISCO-VTP-MIB)"
         if t_changed:
-            raise ValueError(f"Port {p}: Access-Port (vmVlan), getaggte VLANs gibt es dort nicht")
+            return "Access-Port (vmVlan), getaggte VLANs gibt es dort nicht"
         if u is None:  # vmVlan 0 (kein VLAN) laesst die MIB fuer einen statischen Port nicht zu
-            raise ValueError(f"Port {p}: Access-Port (vmVlan) ohne VLAN lässt sich per SNMP nicht setzen")
+            return "Access-Port (vmVlan) ohne VLAN lässt sich per SNMP nicht setzen"
         if u not in cfg["vlans"]:
-            raise ValueError(f"Port {p}: VLAN {u} gibt es auf diesem Switch nicht")
-        values["vmvlan"][raw["ifindex"][p]] = ("i", u)
-        return [f"Port {p}: Access-VLAN {_vlan(st['u'])} → {u}"]
+            return f"VLAN {u} gibt es auf diesem Switch nicht"
+        return None
     if driver.vlan_strategy != "qbridge":
-        raise ValueError(f"Port {p}: VLAN-Strategie {driver.vlan_strategy!r} des Treibers {driver.name} ist unbekannt")
+        return f"VLAN-Strategie {driver.vlan_strategy!r} des Treibers {driver.name} ist unbekannt"
     if p in raw["vmvlan"]:  # dieser Read beschreibt den Port per vmVlan, Q-BRIDGE ginge vom falschen VLAN aus
-        raise ValueError(f"Port {p}: als Access-Port per vmVlan gelesen, Treiber {driver.name} schreibt aber Q-BRIDGE")
-    # Jedes VLAN, das die Aenderung beruehrt, bekommt fuer den Bridge-Port den Zielzustand: Egress = ungetaggt oder getaggt,
-    # Untagged = ungetaggt. Alle anderen VLANs stehen schon so (cfg ist aus genau diesen Bits gelesen).
-    touched = ({st["u"], u} - {None} if u_changed else set()) | (set(st["t"]) ^ set(t))
-    for v in sorted(touched, key=lambda v: (len(v), v)):
+        return f"als Access-Port per vmVlan gelesen, Treiber {driver.name} schreibt aber Q-BRIDGE"
+    for v in sorted(_touched(st, u, t), key=lambda v: (len(v), v)):
         if v not in raw["egress"] or v not in raw["untagged"]:
-            raise ValueError(f"Port {p}: VLAN {v} gibt es auf diesem Switch nicht")
+            return f"VLAN {v} gibt es auf diesem Switch nicht"
     if u_changed or t_changed:
         if u is not None and u in t:  # ProCurve: die PVID (sie folgt u) darf nicht in der Tagged-Liste stehen
-            raise ValueError(f"Port {p}: VLAN {u} kann nicht ungetaggt und getaggt zugleich sein")
+            return f"VLAN {u} kann nicht ungetaggt und getaggt zugleich sein"
         if u is None and not t:
-            raise ValueError(f"Port {p}: wäre in keinem VLAN mehr")
+            return "wäre in keinem VLAN mehr"
     if pvid is not None and u is not None and pvid != u:
         # Mit einem ungetaggten VLAN muss die PVID es sein: sonst liest build_cfg den Port als nicht verwaltbar (R12), das Pruefen
         # faende u nicht wieder, und keine Aenderung, auch kein Revert, kaeme mehr an ihn heran.
-        raise ValueError(f"Port {p}: PVID {pvid} wiche vom ungetaggten VLAN {u} ab, der Port wäre danach per SNMP nicht verwaltbar")
+        return f"PVID {pvid} wiche vom ungetaggten VLAN {u} ab, der Port wäre danach per SNMP nicht verwaltbar"
+    if pvid is not None and pvid not in cfg["vlans"]:
+        # R23: ohne diese Pruefung ginge eine PVID ohne ungetaggtes VLAN an jeder VLAN-Pruefung vorbei; ein Revert auf eine PVID, deren
+        # VLAN es nicht mehr gibt, bekommt diesen Grund statt eines SET, das das Pruefen nur unklar faende. Zuletzt geprueft: jeder
+        # Grund von vor R23 bleibt, wie er war.
+        return f"PVID {pvid}: das VLAN gibt es auf diesem Switch nicht"
+    return None
+
+
+def _vlan_ops(driver, raw: dict, p: str, st: dict, u: str | None, t: list[str], pvid: str | None,
+              portlists: dict[str, dict[str, bytes]], values: dict[str, dict[int, tuple[str, str]]]) -> list[str]:
+    """Port p bekommt das ungetaggte VLAN u, die getaggten t und, wenn pvid nicht None ist, ausdruecklich diese PVID (mindestens eins
+    davon ist neu, snmp_block_reason hat nichts dagegen): traegt die noetigen Bits in portlists ein, PVID / vmVlan in values, und
+    liefert die shown-Zeilen dazu."""
+    u_changed, t_changed = u != st["u"], set(t) != set(st["t"])
+    if driver.vlan_strategy == "cisco_vmps":  # nur das Access-VLAN, ueber vmVlan (R20)
+        values["vmvlan"][raw["ifindex"][p]] = ("i", u)
+        return [f"Port {p}: Access-VLAN {_vlan(st['u'])} → {u}"]
+    # Jedes VLAN, das die Aenderung beruehrt, bekommt fuer den Bridge-Port den Zielzustand: Egress = ungetaggt oder getaggt,
+    # Untagged = ungetaggt. Alle anderen VLANs stehen schon so (cfg ist aus genau diesen Bits gelesen).
     bp = raw["port2bp"][p]
-    for v in touched:
+    for v in _touched(st, u, t):
         for kind, member in (("egress", v == u or v in t), ("untagged", v == u)):
             have = portlists[kind].get(v, raw[kind][v])
             if snmp.portlist_has_bit(have, bp) != member:
@@ -404,24 +458,19 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
     Untagged-Bit und das Egress-Bit nur, wenn es nicht getaggt bleibt; getaggt hinzu / weg aendert nur Egress. Alle Bits einer
     PortList gehen in EINE Kopie der gelesenen Bytes und EIN Varbind (eins je Port liesse im PDU den letzten gewinnen), und nur, wenn
     sie sich aendert; jedes andere Bit und die Laenge bleiben (nur ein Bit hinter dem Ende verlaengert die Liste bis dorthin).
-    dot1qPvid (R21): eine ausdrueckliche pvid (VLAN-ID 1..4094 als Text, nur Q-BRIDGE) geht vor, sonst das neue ungetaggte VLAN; bei
-    u -> None ohne pvid wird keine PVID geschrieben. Hat der Port danach ein ungetaggtes VLAN, muss eine ausdrueckliche pvid es sein
-    (sonst waere er per SNMP nicht verwaltbar, R12). Eine pvid, die schon gilt, schreibt nichts (ausser zusammen mit u). cisco_vmps
-    (R20): VLANs nur als Access-VLAN eines Ports mit vmVlan-Zeile, ueber vmVlan.<ifIndex>, keine pvid. An/Aus und Name bei jedem
-    Treiber ueber IF-MIB: ifAdminStatus / ifAlias .<ifIndex>.
+    dot1qPvid (R21): eine ausdrueckliche pvid (VLAN-ID 1..4094 als Text, ein VLAN des Switches, R23, nur Q-BRIDGE) geht vor, sonst das
+    neue ungetaggte VLAN; bei u -> None ohne pvid wird keine PVID geschrieben. Hat der Port danach ein ungetaggtes VLAN, muss eine
+    ausdrueckliche pvid es sein (sonst waere er per SNMP nicht verwaltbar, R12). Eine pvid, die schon gilt, schreibt nichts (ausser
+    zusammen mit u). cisco_vmps (R20): VLANs nur als Access-VLAN eines Ports mit vmVlan-Zeile, ueber vmVlan.<ifIndex>, keine pvid. An/Aus
+    und Name bei jedem Treiber ueber IF-MIB: ifAdminStatus / ifAlias .<ifIndex>.
 
     Feste Reihenfolge der Varbinds (das SET-PDU wirkt laut RFC 3416 als Ganzes): Egress, Untagged (je nach VLAN-ID), dot1qPvid (nach
     Bridge-Port), vmVlan, ifAdminStatus, ifAlias (je nach ifIndex). Ein Feld mit schon dem Zielwert, ein Port ohne Felder: nichts.
 
-    ValueError mit deutschem Grund ("Port X: ...") und ohne Teilergebnis, sobald ein Port nicht geht, auch wo der Planer es schon
-    sperrt: ein anderes Feld als u / pvid / t / en / name; ein Port, den es nicht gibt, der in raw["unmanaged"] steht, der Mitglied
-    eines Trunks ist (der Trunk selbst geht: ein Bridge-Port), ohne Bridge-Port / ifIndex (nur Anzeige, auch kein Abschalten) oder
-    dessen Bridge-Port laut raw["bp2port"] nicht ihm gehoert; eine Faehigkeit, die der Treiber nicht hat; ein VLAN, das es nicht gibt;
-    u zugleich in t; ein Port ohne jedes VLAN; eine pvid, die keine VLAN-ID ist oder neben einem ungetaggten VLAN ein anderes nennt;
-    ein Name mit Steuerzeichen oder mehr als 64 Bytes UTF-8; bei cisco_vmps eine pvid und jede VLAN-Aenderung ausser dem Access-VLAN
-    eines vmVlan-Ports. cfg, raw und desired bleiben unveraendert.
+    ValueError mit deutschem Grund ("Port X: <Grund>") und ohne Teilergebnis, sobald snmp_block_reason einen Port ablehnt (dort stehen
+    die Regeln; changes.plan_ports sperrt solche Ports schon beim Planen und rendert nur die anderen), die Felder eines Ports kein dict
+    sind oder zwei Ports der Aenderung denselben ifIndex haetten. cfg, raw und desired bleiben unveraendert.
     """
-    member_of = {m: trunk for trunk, members in cfg["trunks"].items() for m in members}
     portlists: dict[str, dict[str, bytes]] = {"egress": {}, "untagged": {}}  # VLAN -> PortList mit allen Bits dieses Plans
     values: dict[str, dict[int, tuple[str, str]]] = {"pvid": {}, "vmvlan": {}, "ifadmin": {}, "ifalias": {}}  # Index -> (Typ, Wert)
     owner: dict[int, str] = {}  # ifIndex -> Port; zwei Ports auf einem ifIndex ueberschrieben einander (Bridge-Ports: bp2port)
@@ -432,25 +481,21 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
             raise ValueError(f"Port {p}: keine Felder ({d!r})")
         if not d:
             continue
-        _check_port(driver, cfg, raw, p, d, member_of)
+        reason = snmp_block_reason(driver, cfg, raw, p, d)
+        if reason:
+            raise ValueError(f"Port {p}: {reason}")
         st, ifi = cfg["ports"][p], raw["ifindex"][p]
         if owner.setdefault(ifi, p) != p:
             raise ValueError(f"Port {p}: ifIndex {ifi} gehört auch zu Port {owner[ifi]}")
-        u, t, pvid = _target(p, st, d)
+        u, t, pvid = d.get("u", st["u"]), list(d.get("t", st["t"])), d.get("pvid")
         if u != st["u"] or set(t) != set(st["t"]) or pvid is not None:
-            shown += _vlan_ops(driver, cfg, raw, p, st, u, t, pvid, portlists, values)
-        if "en" in d:
-            en = d["en"]
-            if not isinstance(en, bool):
-                raise ValueError(f"Port {p}: en ist nicht wahr oder falsch ({en!r})")
-            if en != st["en"]:
-                values["ifadmin"][ifi] = ("i", "1" if en else "2")
-                shown.append(f"Port {p}: {_onoff(st['en'])} → {_onoff(en)}")
-        if "name" in d:
-            _check_name(p, d["name"])
-            if d["name"] != st["name"]:
-                values["ifalias"][ifi] = ("x", d["name"].encode("utf-8").hex().upper())
-                shown.append(f"Port {p}: Name {_quote(st['name'])} → {_quote(d['name'])}")
+            shown += _vlan_ops(driver, raw, p, st, u, t, pvid, portlists, values)
+        if "en" in d and d["en"] != st["en"]:
+            values["ifadmin"][ifi] = ("i", "1" if d["en"] else "2")
+            shown.append(f"Port {p}: {_onoff(st['en'])} → {_onoff(d['en'])}")
+        if "name" in d and d["name"] != st["name"]:
+            values["ifalias"][ifi] = ("x", d["name"].encode("utf-8").hex().upper())
+            shown.append(f"Port {p}: Name {_quote(st['name'])} → {_quote(d['name'])}")
     ops = [(f"{driver.oids[kind]}.{vid}", "x", snmp.portlist_to_hex(data))
            for kind in ("egress", "untagged") for vid, data in sorted(portlists[kind].items(), key=lambda kv: int(kv[0]))
            if data != raw[kind][vid]]

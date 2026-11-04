@@ -20,6 +20,7 @@ from netmiko.exceptions import ConfigInvalidException
 
 import cfgparse
 import poller
+import snmpwrite
 import sshcli
 from crypto import decrypt
 from db import audit, db, get_setting
@@ -122,8 +123,30 @@ def _desired_from_set(cfg: dict, ports: list[str], s: dict) -> dict:
     return out
 
 
-def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
-    """req: {ports:[..], set:{..}, expert:bool} oder {desired:{port:{feld:wert}}, expert:bool}"""
+def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ssh", driver=None, raw: dict | None = None) -> dict:
+    """req: {ports:[..], set:{..}, expert:bool} oder {desired:{port:{feld:wert}}, expert:bool}
+
+    mechanism ist der Schreibweg. "ssh" (Vorgabe): cfg aus der running-config, commands = shown = ProCurve-CLI-Zeilen (_commands).
+    "snmp": cfg und raw aus demselben Live-Read (snmpwrite.read_cfg), driver der Treiber des Switches; ops (die Varbinds) und shown
+    (je Port und Feld vorher -> nachher) kommen aus snmpwrite.render_ops, commands ist leer. _commands und cfgparse.compress_ports laufen
+    dort nie: sie kennen nur ProCurve-Portnamen.
+
+    Gesperrt wird auf beiden Wegen gleich (Uplink / Trunk nur im Expertenmodus, kein NAC auf Uplinks und Trunks, ein Trunk-Mitglied nur
+    ueber seinen Trunk, VLANs muss es geben, ...). Trunk ist TrkN oder jeder Trunk / LAG in cfg["trunks"] (Po1, ae0, ...); Mitglied ist
+    ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
+    snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...). Ein gesperrter
+    Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter geplant;
+    ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
+
+    before haelt die Werte der geplanten Felder vor der Aenderung (die Quelle eines Reverts: plan_ports mit desired = before), per SNMP
+    dazu die PVID (R21, siehe _snmp_before). Ergebnis: commands, shown, desired, before, blocked, warnings, expert, mechanism; per SNMP
+    dazu ops. ValueError fuer eine ungueltige Anfrage oder einen unbekannten mechanism (per SNMP auch aus render_ops, wenn raw in sich
+    nicht stimmt: zwei Ports auf einem ifIndex, was read_cfg nie liefert), TypeError fuer "snmp" ohne driver oder raw."""
+    if mechanism not in ("ssh", "snmp"):
+        raise ValueError(f"Unbekannter Schreibweg: {mechanism!r}")
+    over_snmp = mechanism == "snmp"
+    if over_snmp and (driver is None or raw is None):
+        raise TypeError("plan_ports: der SNMP-Weg braucht driver und raw (aus snmpwrite.read_cfg)")
     blocked, warnings = [], []
     expert = bool(req.get("expert"))
     vlans = cfg.get("vlans") or {}
@@ -132,7 +155,10 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
         desired = {}
         for p, d in req["desired"].items():
             cur = cfgparse.port_state(cfg, p)
-            desired[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur[k]) != v}
+            if over_snmp:
+                desired[p] = {k: v for k, v in d.items() if _snmp_differs(raw, p, cur, k, v)}
+            else:
+                desired[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur[k]) != v}
     else:
         ports = [str(p) for p in req.get("ports") or []]
         s = req.get("set") or {}
@@ -146,6 +172,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
     if not ports:
         raise ValueError("Keine Ports gewählt")
 
+    trunks = cfg.get("trunks") or {}
+    member_of = {m: t for t, members in trunks.items() for m in members}  # frisch gelesen; das Inventar (Poll) kann aelter sein
     needs_radius = False
     for p in ports:
         ip = inv["ports"].get(p)
@@ -154,9 +182,10 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
         if not ip:
             blocked.append({"port": p, "reason": "Port gibt es auf diesem Switch nicht"})
             continue
-        is_trk = p.startswith("Trk")
-        if ip["tr"] and not is_trk:
-            blocked.append({"port": p, "reason": f"gehört zu {ip['tr']}, bitte {ip['tr']} wählen"})
+        is_trk = p.startswith("Trk") or p in trunks  # auch der LAG eines anderen Herstellers (Po1, ae0, Bridge-Aggregation1, ...)
+        trk = ip["tr"] or member_of.get(p, "")
+        if trk and not is_trk:
+            blocked.append({"port": p, "reason": f"gehört zu {trk}, bitte {trk} wählen"})
             continue
         if not d:
             continue
@@ -170,6 +199,14 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
         if is_trk and ("name" in d or "en" in d):
             blocked.append({"port": p, "reason": "Name und An/Aus nur an den Mitglied-Ports des Trunks"})
             continue
+        if over_snmp:
+            # Vor den VLAN-Pruefungen unten: ein nicht verwaltbarer Port (u None ist dort nur ein Platzhalter) oder einer ohne Bridge-Port
+            # bekommt so seinen eigentlichen Grund, und ein NAC-Feld (per SNMP immer abgelehnt) kommt nie bis needs_radius: cfg aus SNMP
+            # kennt die RADIUS-Einrichtung nicht, "nicht vorbereitet" waere dort immer falsch.
+            reason = snmpwrite.snmp_block_reason(driver, cfg, raw, p, d)
+            if reason:
+                blocked.append({"port": p, "reason": reason})
+                continue
         for vid in [d.get("u")] + [v for v in d.get("t", []) if v not in cur["t"]] + [d.get("xuv"), d.get("muv")]:
             if vid and vid not in vlans:
                 blocked.append({"port": p, "reason": f"VLAN {vid} gibt es auf diesem Switch nicht"})
@@ -199,10 +236,40 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict) -> dict:
 
     skip = {b["port"] for b in blocked}
     desired = {p: d for p, d in desired.items() if d and p not in skip}
+    if over_snmp:
+        ops, shown = snmpwrite.render_ops(driver, cfg, raw, desired)
+        return {"commands": [], "shown": shown, "ops": ops, "desired": desired,
+                "before": {p: _snmp_before(driver, cfg, raw, p, d) for p, d in desired.items()}, "blocked": blocked,
+                "warnings": list(dict.fromkeys(warnings)), "expert": expert, "mechanism": "snmp"}
     before = {p: {k: cfgparse.port_state(cfg, p)[k] for k in d} for p, d in desired.items()}
     cmds = _commands(cfg, desired)
     return {"commands": cmds, "shown": cmds, "desired": desired, "before": before, "blocked": blocked,
-            "warnings": list(dict.fromkeys(warnings)), "expert": expert}
+            "warnings": list(dict.fromkeys(warnings)), "expert": expert, "mechanism": "ssh"}
+
+
+def _snmp_differs(raw: dict, p: str, cur: dict, k: str, v) -> bool:
+    """Revert per SNMP (desired = before einer Aenderung): ist Feld k von Port p (cur = port_state) nicht schon v? Die PVID kennt cfg
+    nicht, sie steht in raw (R21). Was der SNMP-Weg nicht lesen kann (alles ausser snmpwrite.FIELD_CAPS, etwa 802.1X / MAC-Anmeldung:
+    cfg zeigt dafuer nur Vorgabewerte), zaehlt immer als Aenderung: so lehnt snmp_block_reason den Port ab, statt dass ein Revert still
+    nur seinen VLAN-Teil zuruecknimmt."""
+    if k not in snmpwrite.FIELD_CAPS:
+        return True
+    if k == "pvid":
+        return raw["pvid"].get(p) != v
+    return (sorted(cur[k], key=int) if k == "t" else cur[k]) != v
+
+
+def _snmp_before(driver, cfg: dict, raw: dict, p: str, d: dict) -> dict:
+    """before eines per SNMP geplanten Ports: die Felder aus d, wie dieser Read sie zeigt, und dazu die PVID aus raw (R21), wenn u oder
+    pvid sich aendern, damit der Revert sie wiederherstellt (sonst bliebe nach u -> None die PVID des VLANs, das der Port gerade
+    verlassen hat). Nur bei Q-BRIDGE fuer einen Port ohne vmVlan-Zeile und nur eine VLAN-ID 1..4094: cisco_vmps schreibt keine PVID
+    (render_ops lehnte jeden Revert ab, der eine traegt), und eine fehlende oder kaputte (etwa "0") liesse sich nicht zurueckschreiben."""
+    st = cfgparse.port_state(cfg, p)
+    b = {k: st[k] for k in d if k != "pvid"}
+    pvid = raw["pvid"].get(p)
+    if ("u" in d or "pvid" in d) and driver.vlan_strategy == "qbridge" and p not in raw["vmvlan"] and snmpwrite.is_vlan_id(pvid):
+        b["pvid"] = pvid
+    return b
 
 
 def _commands(cfg: dict, desired: dict) -> list[str]:

@@ -323,6 +323,32 @@ def test_a_pvid_is_refused_on_cisco(port, d):
         snmpwrite.render_ops(CISCO, cfg, raw, {port: d})
 
 
+@pytest.mark.parametrize("W, port, d", [
+    (SAMPLE, "3", {"pvid": "4000"}),                           # PVID only: before R23 no VLAN check saw it
+    (SAMPLE, "3", {"u": None, "pvid": "42"}),
+    (SAMPLE, "6", {"u": None, "t": ["30"], "pvid": "4094"}),   # a revert to tagged-only whose PVID's VLAN is gone since
+    (ODD, "A99", {"u": None, "t": ["7"], "pvid": "9"}),        # a port without dot1qPvid row (bridge port 13)
+], ids=["pvid-only", "u-none", "u-to-none", "no-pvid-row"])
+def test_a_pvid_whose_vlan_the_switch_does_not_have_is_refused(W, port, d):
+    """R23: an explicit pvid must name a VLAN of the switch (cfg["vlans"]); a revert to a PVID whose VLAN is gone gets this reason
+    instead of a SET that verify would only find unclear. One rule in snmp_block_reason, so plan_ports blocks with the same text."""
+    cfg, raw = _read(W)
+    reason = f"PVID {d['pvid']}: das VLAN gibt es auf diesem Switch nicht"
+    with pytest.raises(ValueError, match=rf"^Port {port}: {reason}$"):
+        snmpwrite.render_ops(PROCURVE, cfg, raw, {port: d})
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, port, d) == reason
+
+
+def test_r23_comes_after_every_reason_of_before():
+    """R23 is checked last: a request render_ops refused before R23 keeps its reason (here a pvid next to another untagged VLAN, R21),
+    R23 only refuses what was rendered before."""
+    cfg, raw = _read(SAMPLE)
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "6", {"u": "20", "pvid": "4000"}) == \
+        "PVID 4000 wiche vom ungetaggten VLAN 20 ab, der Port wäre danach per SNMP nicht verwaltbar"
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "6", {"name": "a\nb", "u": None, "t": ["30"], "pvid": "4000"}) == \
+        "PVID 4000: das VLAN gibt es auf diesem Switch nicht"    # but among the VLAN checks, i.e. before en / name, as always
+
+
 # ── Q-BRIDGE: tagged, and both together ────────────────────────────────────────────────────────────────────────────────────────────
 def test_tagged_add_and_remove_only_touch_egress():
     """Port 1 (bridge port 3 = 0x20): VLAN 30 off (62 -> 42), VLAN 99 on (82 -> A2). No untagged list, no PVID."""
@@ -748,28 +774,26 @@ def test_the_token_ignores_other_ports_in_the_same_portlist_but_not_the_port_its
     (CISCO_SW, "procurve", CISCO, ["Gi1/0/1", "Gi1/0/2"], {"untagged": "20", "status": "off", "name": "Kasse"}),
 ], ids=["procurve-untagged", "procurve-tagged", "rename-to-dashes", "revert-dashes-and-umlaut", "cisco-access"])
 def test_a_planned_change_and_its_revert_round_trip(monkeypatch, W, selection, driver, ports, change):
-    """End to end with changes.plan_ports, which builds `desired`: the change is planned on the switch as read, rendered and stored.
-    The revert is planned the way main._make_plan plans one (R7: desired = the change's `before`, against a fresh read), rendered and
-    stored as well: afterwards the switch is byte for byte the one of the start (PortLists, PVIDs, admin status, aliases, vmVlan).
-    Two things are filled in for the planner of Task 9: it records the PVID in `before` whenever u changes (R21; plan_ports cannot
-    carry a pvid field yet, so it is added to the revert here), and its ProCurve CLI lines cannot name a port like Gi1/0/1
-    (cfgparse.compress_ports raises; the SNMP branch does not need them), so for the Cisco switch that rendering is stubbed out."""
-    if driver is not PROCURVE:
-        monkeypatch.setattr(changes, "_commands", lambda cfg, desired: [])
+    """End to end with the SNMP planner (changes.plan_ports, mechanism "snmp"), which builds `desired`, records `before` (with the PVID
+    of a Q-BRIDGE port whose u changes, R21) and renders with render_ops: the change is planned on the switch as read, and its varbinds
+    pass the simulated switch. The revert is planned the way main._make_plan plans one (R7: desired = the change's `before`, against a
+    fresh read) and stored as well: afterwards the switch is byte for byte the one of the start (PortLists, PVIDs, admin status,
+    aliases, vmVlan). The ProCurve CLI rendering never runs on this path (it could not even name a port like Gi1/0/1)."""
+    def no_cli(*args):
+        raise AssertionError("ProCurve CLI rendering on the SNMP path")
+    monkeypatch.setattr(changes, "_commands", no_cli)
     cfg0, raw0 = _read(W, selection)
     inv = {"ports": {n: {"n": n, "tr": next((t for t, ms in cfg0["trunks"].items() if n in ms), ""), "l": [], "o": False}
                      for n in cfg0["ports"]}, "uplinks": set()}
-    plan = changes.plan_ports("K.15.99.0001", inv, cfg0, {"ports": ports, "set": change})
+    plan = changes.plan_ports("K.15.99.0001", inv, cfg0, {"ports": ports, "set": change}, mechanism="snmp", driver=driver, raw=raw0)
     assert plan["blocked"] == [] and plan["desired"]
-    pvids = {p: raw0["pvid"][p] for p, d in plan["desired"].items()
-             if "u" in d and p in raw0["pvid"] and driver.vlan_strategy == "qbridge"}
-    ops, _ = _render_and_store(W, driver, plan["desired"], selection)
-    W1 = store(W, ops)
-    revert = changes.plan_ports("K.15.99.0001", inv, _read(W1, selection)[0], {"desired": plan["before"]})
+    assert (plan["ops"], plan["shown"]) == _render_and_store(W, driver, plan["desired"], selection)
+    W1 = store(W, plan["ops"])
+    cfg1, raw1 = _read(W1, selection)
+    revert = changes.plan_ports("K.15.99.0001", inv, cfg1, {"desired": plan["before"]}, mechanism="snmp", driver=driver, raw=raw1)
     assert revert["blocked"] == [] and revert["desired"] == plan["before"]
-    desired = {p: {**d, **({"pvid": pvids[p]} if p in pvids else {})} for p, d in revert["desired"].items()}
-    ops2, _ = _render_and_store(W1, driver, desired, selection)
-    assert store(W1, ops2) == W
+    assert (revert["ops"], revert["shown"]) == _render_and_store(W1, driver, revert["desired"], selection)
+    assert store(W1, revert["ops"]) == W
 
 
 # ── property: random switches, random requests ─────────────────────────────────────────────────────────────────────────────────────
@@ -815,7 +839,7 @@ def _must_refuse(driver, cfg: dict, raw: dict, desired: dict) -> bool:
         st = cfg["ports"][p]
         u, t = d.get("u", st["u"]), d.get("t", st["t"])
         if "pvid" in d and (not _good_pvid(d["pvid"]) or driver.vlan_strategy != "qbridge" or p in raw["vmvlan"]
-                            or (u is not None and d["pvid"] != u)):
+                            or d["pvid"] not in cfg["vlans"] or (u is not None and d["pvid"] != u)):
             return True
         if u == st["u"] and set(t) == set(st["t"]):
             continue
@@ -845,8 +869,10 @@ def _random_desired(rng: random.Random, cfg: dict, raw: dict, driver) -> dict:
     """A random request. Mostly (clean) one the planner could send: ports the write path may touch, u from the switch's VLANs, t without
     u and never leaving the port in no VLAN, a pvid only on Q-BRIDGE and only the untagged VLAN (or any VLAN without one), names that
     can be written, on cisco VLAN changes only as the access VLAN of a vmVlan port. Otherwise (wild) anything: any port, no or a missing
-    VLAN, u in t, a pvid that is no VLAN ID or not the untagged VLAN, bad names, a CLI-only field, a port that does not exist."""
+    VLAN, u in t, a pvid that is no VLAN ID, not the untagged VLAN or one the switch does not have, bad names, a CLI-only field, a port
+    that does not exist."""
     vids, desired = list(cfg["vlans"]), {}
+    missing = next(str(v) for v in range(1, 4095) if str(v) not in cfg["vlans"])    # a VLAN ID, but no VLAN of this switch
     members = {m for ms in cfg["trunks"].values() for m in ms}
     writable = [p for p in cfg["ports"] if p not in raw["unmanaged"] and p not in members and p in raw["port2bp"]]
     clean = bool(writable) and rng.random() < 0.7
@@ -874,13 +900,15 @@ def _random_desired(rng: random.Random, cfg: dict, raw: dict, driver) -> dict:
             u = d.get("u", st["u"])
             d["pvid"] = u if u is not None else rng.choice(vids)
         if not clean and rng.random() < 0.08:
-            d["pvid"] = rng.choice([*vids, *BAD_PVIDS])
+            d["pvid"] = rng.choice([*vids, *BAD_PVIDS, missing])
         if rng.random() < 0.3:
             d["en"] = rng.random() < 0.5
         if rng.random() < 0.3:
             d["name"] = rng.choice(GOOD_NAMES if clean or rng.random() < 0.5 else BAD_NAMES)
         if not clean and rng.random() < 0.05:
             d[rng.choice(["x", "m", "cl", "al", "xuv", "muv", "poe"])] = True
+        if not clean and rng.random() < 0.06:    # a revert to tagged-only whose PVID's VLAN is gone since (R23)
+            d.update(u=None, t=[rng.choice(vids)], pvid=missing)
         desired[p] = d
     if not clean and rng.random() < 0.05:
         desired["no-such-port"] = {"en": False}
@@ -898,6 +926,30 @@ def _flipped(raw: dict, op: tuple[str, str, str]) -> set[int]:
     """The bridge ports whose bit a PortList varbind flips against the list as read."""
     base, _, vid = op[0].rpartition(".")
     return _bits(bytes.fromhex(op[2])) ^ _bits(raw[PORTLISTS[base]][vid])
+
+
+def test_snmp_block_reason_is_the_one_source_of_the_refusals():
+    """The refusal rules per port exist once, in snmp_block_reason: render_ops raises "Port X: <reason>" with its reason, and
+    changes.plan_ports lists the same reason as a blocked entry. On random switches and requests (the clean and the wild ones of the
+    property test below), render_ops of a single port refuses exactly when snmp_block_reason gives a reason, and with exactly that text;
+    a refusal render_ops made up somewhere else, or a reason it would not act on, fails here."""
+    rng = random.Random(9)
+    seen = {"refused": 0, "rendered": 0, "R23": 0}
+    for case in range(800):
+        W, driver, selection = _random_switch(rng)
+        cfg, raw = _read(W, selection)
+        for p, d in _random_desired(rng, cfg, raw, driver).items():
+            reason = snmpwrite.snmp_block_reason(driver, cfg, raw, p, d)
+            if reason is None:
+                snmpwrite.render_ops(driver, cfg, raw, {p: d})
+                seen["rendered"] += 1
+                continue
+            with pytest.raises(ValueError) as refused:
+                snmpwrite.render_ops(driver, cfg, raw, {p: d})
+            assert str(refused.value) == f"Port {p}: {reason}", case
+            seen["refused"] += 1
+            seen["R23"] += reason == f"PVID {d.get('pvid')}: das VLAN gibt es auf diesem Switch nicht"
+    assert min(seen["refused"], seen["rendered"]) > 400 and seen["R23"] > 10, seen
 
 
 def test_render_ops_on_random_switches_against_the_simulated_switch():

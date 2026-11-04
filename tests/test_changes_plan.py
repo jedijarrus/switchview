@@ -191,7 +191,7 @@ def test_commands_split_long_lines():
 
 # ── plan_ports: the whole plan ────────────────────────────────────────────────────────────────────────────────────
 def test_plan_ports_untagged_change_golden(cfg):
-    """The complete plan dict, key for key: the plan of the SSH path has to keep exactly this shape."""
+    """The complete plan dict, key for key: the plan of the SSH path has to keep exactly this shape (Task 9 added only "mechanism")."""
     plan = changes.plan_ports(FW, make_inv(), cfg, {"ports": ["A2"], "set": {"untagged": "20"}})
     assert plan == {
         "commands": ["vlan 20 untagged A2"],
@@ -201,6 +201,7 @@ def test_plan_ports_untagged_change_golden(cfg):
         "blocked": [],
         "warnings": [],
         "expert": False,
+        "mechanism": "ssh",                  # Task 9: the plan names its write path; SSH is the default
     }
 
 
@@ -226,6 +227,7 @@ def test_plan_ports_radius_on_access_port_golden(cfg, sample_running_config):
         "blocked": [],
         "warnings": ["Port A2: dort hängt ap-1.example (LLDP). Muss sich danach selbst anmelden können"],
         "expert": False,
+        "mechanism": "ssh",
     }
     # The switch does not print "addr-limit 1" (the default); the parser fills it in, so the read-back still verifies.
     after = sample_running_config + (
