@@ -8,10 +8,10 @@ which trunks (LAGs) they form. The display poller (poller._build, run for every 
     with any ifType rows at all: procurve never looks at them.
   * every other driver selects by ifType (IANAifType). 6 ethernetCsmacd and 117 gigabitEthernet are physical ports, 161
     ieee8023adLag is a trunk (Port-channel, ae, Bridge-Aggregation, lag), and its members are the interfaces stacked below it in
-    ifStack. So is an interface of type 53 propVirtual with a LAG name and at least one physical port stacked below it (ruling
-    R17: classic IOS reports its Port-channels that way). Every other type (VLAN interfaces, loopback, null, tunnels,
-    subinterfaces, ...) and every other 53 is no port, whatever its name. There is no ifIndex ceiling (a classic Catalyst numbers
-    its ports from 10101).
+    ifStack. So is an interface of type 53 propVirtual or 54 propMultiplexor with a LAG name (in any case) and at least one
+    physical port stacked below it (rulings R17 / R17b: classic IOS reports its Port-channels that way). Every other type (VLAN
+    interfaces, loopback, null, tunnels, subinterfaces, ...) and every other 53 / 54 is no port, whatever its name. There is no
+    ifIndex ceiling (a classic Catalyst numbers its ports from 10101).
   * for a non-ProCurve switch the display and the write path agree on every port, on fixtures and on random switches, and both
     match the random generator's own truth.
   * the wiring: poll_switch walks ifType for every switch and hands the row's driver to _build (empty means procurve). A failed
@@ -45,7 +45,7 @@ _rows = t7._rows
 
 # IANAifType values. Ports: physical (6, 117) and LAG (161). Never ports: everything else, e.g. these.
 ETHERNET, GIGABIT, LAG = "6", "117", "161"    # ethernetCsmacd, gigabitEthernet (deprecated, still in use), ieee8023adLag
-OTHER, LOOPBACK, PROP_VIRTUAL, TUNNEL, L2VLAN, L3IPVLAN = "1", "24", "53", "131", "135", "136"
+OTHER, LOOPBACK, PROP_VIRTUAL, PROP_MULTIPLEXOR, TUNNEL, L2VLAN, L3IPVLAN = "1", "24", "53", "54", "131", "135", "136"
 
 # Every driver except procurve selects by ifType, and so does a driver name the registry does not know (drivers.driver_for makes it
 # generic; poll_switch passes the row's name through as it is).
@@ -331,21 +331,26 @@ def test_an_empty_lag_is_a_trunk_and_other_stacking_makes_no_members():
     assert _display(W, "cisco")[:3] == [(5001, "Po1", "Po1", ["Gi1/0/3", "Gi1/0/4"]), (5002, "Po2", "Po2", []), (10101, "Gi1/0/1", "", [])]
 
 
-# ── R17: a Port-channel of type 53 (propVirtual), as classic IOS reports it ───────────────────────────────────────────────────────
-# An interface of ifType 53 is a LAG when its name is a LAG name and at least one selected physical port (ifType 6 / 117, with ifName
-# and numeric ifIndex) is stacked directly below it; then it is a trunk exactly like a 161 LAG. LAG names, each directly followed by a
-# digit: Po, Port-channel, Port-Channel (Cisco, Arista, Dell), ae (Juniper), Bridge-Aggregation, BAGG (Comware), lag (AOS-CX), ch,
-# Trk. The name and the physical member keep everything else of type 53 out: SVIs (Vl10), stack ports, logical units (ge-0/0/0.0,
-# ae0.0 on its LAG), and a Port-channel that has nothing physical below it.
+# ── R17: a Port-channel of type 53 (propVirtual) or 54 (propMultiplexor), as classic IOS reports it ─────────────────────────────────
+# An interface of ifType 53 or 54 is a LAG when its name is a LAG name and at least one selected physical port (ifType 6 / 117, with
+# ifName and numeric ifIndex) is stacked directly below it; then it is a trunk exactly like a 161 LAG. LAG names, in any case, each
+# directly followed by a digit: Po, Port-channel (Cisco, Arista, Dell), ae (Juniper), Bridge-Aggregation, BAGG (Comware), lag
+# (AOS-CX), ch, Trk. The name and the physical member keep everything else of these types out: SVIs (Vl10), stack ports, logical
+# units (ge-0/0/0.0, ae0.0 on its LAG), and a Port-channel that has nothing physical below it.
 LAG_NAMES = ["Po1", "Port-channel2", "Port-Channel2", "ae0", "Bridge-Aggregation1", "BAGG1", "lag1", "ch1", "Trk1"]
+# The case does not matter (Dell OS10 "port-channel1"), and 54 counts like 53
+NAMED_LAGS = ([(name, PROP_VIRTUAL) for name in LAG_NAMES]
+              + [("port-channel1", PROP_VIRTUAL), ("po1", PROP_VIRTUAL), ("PO2", PROP_VIRTUAL), ("AE0", PROP_VIRTUAL),
+                 ("bridge-aggregation3", PROP_VIRTUAL), ("LAG4", PROP_VIRTUAL), ("CH5", PROP_VIRTUAL), ("trk6", PROP_VIRTUAL),
+                 ("Po3", PROP_MULTIPLEXOR), ("Port-Channel7", PROP_MULTIPLEXOR), ("lag8", PROP_MULTIPLEXOR)])
 
 
-@pytest.mark.parametrize("lag", LAG_NAMES)
-def test_a_propvirtual_port_channel_with_physical_members_is_a_trunk(lag):
-    """The Catalyst with its Po1 reported as ifType 53, under each LAG name: a trunk exactly as with 161. Its members are protected
-    (member_of / members, the display names the LAG as their trunk), and build_cfg gives them the LAG's bridge port 56 for VLANs and
-    PVID, never Gi1/0/4's own bridge port 4."""
-    W = t7._edit(W_CATALYST, ifName={"5001": lag}, ifType={"5001": PROP_VIRTUAL})
+@pytest.mark.parametrize("lag, kind", NAMED_LAGS)
+def test_a_propvirtual_port_channel_with_physical_members_is_a_trunk(lag, kind):
+    """The Catalyst with its Po1 reported as ifType 53 or 54, under each LAG name in any case: a trunk exactly as with 161. Its
+    members are protected (member_of / members, the display names the LAG as their trunk), and build_cfg gives them the LAG's bridge
+    port 56 for VLANs and PVID, never Gi1/0/4's own bridge port 4."""
+    W = t7._edit(W_CATALYST, ifName={"5001": lag}, ifType={"5001": kind})
     ports, member_of, members = poller.select_ports(*_tables(W), "cisco")
     assert ports == ["5001", "10101", "10102", "10103", "10104"]
     assert member_of == {"10103": "5001", "10104": "5001"} and members == {"5001": ["10103", "10104"]}
@@ -365,18 +370,19 @@ def _catalyst_with(name: str, iftype: str, stack: dict, **edits) -> dict:
                     ifAdmin={"30": "1"}, ifStack=stack, **edits)
 
 
+@pytest.mark.parametrize("kind", [PROP_VIRTUAL, PROP_MULTIPLEXOR])
 @pytest.mark.parametrize("name, stack, extra", [
     ("Po9", {}, {}),                                      # a Port-channel name, but nothing stacked below it
-    ("Po9", {"30.0": "1"}, {}),                           # ... and said so explicitly
+    ("port-channel9", {"30.0": "1"}, {}),                 # ... and said so explicitly
     ("Po9", {"30.1": "1", "30.10": "1"}, {}),             # only the SVIs Vl1 and Vl10 below it (type 53, no physical ports)
     ("Po9.0", {"30.5001": "1"}, {}),                      # a logical unit on the LAG Po1: a LAG name, but only a LAG below it
     ("ae0.0", {"30.5001": "1"}, {}),                      # the same as Junos names it
     ("Po9", {"30.77": "1"}, {"ifType": {"77": ETHERNET}}),    # ifIndex 77 says ethernet, but has no ifName: no selected port
 ])
-def test_a_propvirtual_lag_name_without_a_physical_member_is_no_trunk(name, stack, extra):
-    """A LAG name is not enough: an ifType-53 interface without a selected physical port directly below it is no trunk and no port,
-    for every non-ProCurve driver, and the switch reads exactly as without it."""
-    W = _catalyst_with(name, PROP_VIRTUAL, stack, **extra)
+def test_a_propvirtual_lag_name_without_a_physical_member_is_no_trunk(name, stack, extra, kind):
+    """A LAG name is not enough: an interface of type 53 or 54 without a selected physical port directly below it is no trunk and no
+    port, for every non-ProCurve driver, and the switch reads exactly as without it."""
+    W = _catalyst_with(name, kind, stack, **extra)
     for driver in NON_PROCURVE:
         assert poller.select_ports(*_tables(W), driver) == poller.select_ports(*_tables(W_CATALYST), driver), driver
         assert snmpwrite.build_cfg(W, driver) == snmpwrite.build_cfg(W_CATALYST, driver), driver
@@ -389,21 +395,24 @@ def test_a_propvirtual_lag_name_without_a_physical_member_is_no_trunk(name, stac
     ("ge-0/0/1.0", PROP_VIRTUAL),      # a logical unit (Junos)
     ("Gi1/0/1.100", PROP_VIRTUAL),     # a subinterface
     ("Port-channel", PROP_VIRTUAL),    # a LAG word, but no digit right after it
+    ("PORT-CHANNEL", PROP_VIRTUAL),
     ("Po", PROP_VIRTUAL),
     ("Pool1", PROP_VIRTUAL),
     ("chassis1", PROP_VIRTUAL),
+    ("CHASSIS1", PROP_VIRTUAL),
     ("Trunk1", PROP_VIRTUAL),
     ("uplink-Po1", PROP_VIRTUAL),      # a LAG name has to start the name
-    ("port-channel1", PROP_VIRTUAL),   # spelled exactly as listed: Port-channel / Port-Channel, Po, ae, lag, ...
-    ("PO1", PROP_VIRTUAL),
-    ("Po1", OTHER),                    # a LAG name on any other type than 53 or 161 counts for nothing
-    ("Po1", "54"),                     # propMultiplexor
+    ("Vl10", PROP_MULTIPLEXOR),        # the same for type 54
+    ("ge-0/0/1.0", PROP_MULTIPLEXOR),
+    ("mux1", PROP_MULTIPLEXOR),
+    ("Po1", OTHER),                    # a LAG name on any other type than 53, 54 or 161 counts for nothing
     ("Po1", L2VLAN),
+    ("port-channel1", TUNNEL),
     ("Trk1", LOOPBACK),
 ])
 def test_a_physical_member_alone_makes_no_trunk(name, iftype):
-    """Gi1/0/1 is stacked below each of these, yet none is a trunk or a port: of type 53 they lack a LAG name, and the LAG names count
-    only for type 53. Gi1/0/1 stays an ordinary port, a member of nothing."""
+    """Gi1/0/1 is stacked below each of these, yet none is a trunk or a port: of type 53 or 54 they lack a LAG name, and the LAG
+    names count only for types 53 and 54. Gi1/0/1 stays an ordinary port, a member of nothing."""
     W = _with_interface(name, iftype, stack={"30.1": "1"})
     for driver in NON_PROCURVE:
         assert poller.select_ports(*_tables(W), driver) == (["1", "2"], {}, {}), driver
@@ -502,8 +511,9 @@ def _random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
     """A random, well-formed switch of another vendor: W in walk order (ifType included) and the generator's own truth.
 
     Its physical ports (ifType 6 or 117) are numbered from wherever the vendor starts (1, 1001, 10101 or 49153). It has up to two
-    LAGs with members stacked below them, now and then none. A LAG is mostly of type 161; now and then it is of type 53 as on
-    classic IOS (only for the LAG names of R17, not "bond"), and then it is a trunk only with a member, otherwise no port at all.
+    LAGs with members stacked below them, now and then none. A LAG is mostly of type 161; now and then it is of type 53 or 54 as on
+    classic IOS (only for the LAG names of R17, in any case, not "bond"), and then it is a trunk only with a member, otherwise no
+    port at all.
     There are interfaces that are no ports, under any name and at any ifIndex (VLAN interfaces, loopback, null, tunnel,
     subinterface, stack port, one without an ifType row), some of them stacked over a port or a LAG, and logical units of type 53
     named after a port or LAG ("Po1.0", "ge-0/0/1.0") stacked on it. Now and then there is a non-numeric index (even with a
@@ -532,11 +542,11 @@ def _random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
         ifi = fresh(1, 6000)
         drawn[ifi] = rng.sample(free, rng.randint(0, min(3, len(free))))
         free = [p for p in free if p not in drawn[ifi]]
-        names[ifi] = lag_fmt.format(n + 1)
-        types[ifi] = PROP_VIRTUAL if lag_fmt != "bond{}" and rng.random() < 0.35 else LAG
-    lags = {lag: mem for lag, mem in drawn.items() if types[lag] == LAG or mem}    # the trunks: a 53 LAG needs a member
+        names[ifi] = rng.choice((str, str.lower, str.upper))(lag_fmt.format(n + 1))    # a LAG name counts in any case
+        types[ifi] = rng.choice((PROP_VIRTUAL, PROP_MULTIPLEXOR)) if lag_fmt != "bond{}" and rng.random() < 0.35 else LAG
+    lags = {lag: mem for lag, mem in drawn.items() if types[lag] == LAG or mem}    # the trunks: a 53 / 54 LAG needs a member
     kept = {i: name for i, name in names.items() if i in phys or i in lags}       # ifIndex -> port name
-    dropped = {i: name for i, name in names.items() if i not in kept}             # a 53 LAG without members: no port
+    dropped = {i: name for i, name in names.items() if i not in kept}             # a 53 / 54 LAG without members: no port
     noise = {}
     for _ in range(rng.randint(0, 4)):
         fmt, kind = rng.choice(NO_PORTS)

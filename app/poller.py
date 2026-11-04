@@ -39,15 +39,17 @@ HEX = {"baseMac", "vlanEgress", "vlanUntagged"}
 # Portauswahl nach ifType (IANAifType; der Walk liefert die Zahl), siehe select_ports
 PHYS_IFTYPES = frozenset({"6", "117"})  # ethernetCsmacd, gigabitEthernet: physische Ports
 LAG_IFTYPE = "161"  # ieee8023adLag: Trunk / LAG (Port-channel, ae, Bridge-Aggregation, lag, ...)
-VIRTUAL_IFTYPE = "53"  # propVirtual: als LAG nur mit LAG_NAME und physischem Port darunter (klassisches IOS meldet Port-channels so)
-# Namen, die ein LAG vom Typ 53 haben muss, jeweils direkt gefolgt von einer Ziffer (gross/klein wie hier):
-#   Po, Port-channel, Port-Channel   Cisco (IOS-ifName "Po1"), Arista ("Port-Channel1"), Dell ("Po1", "Port-channel1")
-#   ae                               Juniper ("ae0")
-#   Bridge-Aggregation, BAGG         HPE/H3C Comware (lang und kurz)
-#   lag                              Aruba AOS-CX ("lag1")
-#   ch                               Channel-Gruppen mancher Smart-Switches ("ch1")
-#   Trk                              HPE ProCurve / AOS-S ("Trk1"), falls so ein Switch unter einem anderen Treiber laeuft
-LAG_NAME = re.compile(r"(?:Po|Port-channel|Port-Channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk)\d")
+# propVirtual (53) und propMultiplexor (54): als LAG nur mit LAG_NAME und physischem Port darunter (klassisches IOS meldet
+# Port-channels so)
+NAMED_LAG_IFTYPES = frozenset({"53", "54"})
+# Namen, die ein LAG dieser Typen haben muss, jeweils direkt gefolgt von einer Ziffer, Gross-/Kleinschreibung egal:
+#   Po, Port-channel           Cisco (IOS-ifName "Po1"), Arista ("Port-Channel1"), Dell ("Po1", OS10 "port-channel1")
+#   ae                         Juniper ("ae0")
+#   Bridge-Aggregation, BAGG   HPE/H3C Comware (lang und kurz)
+#   lag                        Aruba AOS-CX ("lag1")
+#   ch                         Channel-Gruppen mancher Smart-Switches ("ch1")
+#   Trk                        HPE ProCurve / AOS-S ("Trk1"), falls so ein Switch unter einem anderen Treiber laeuft
+LAG_NAME = re.compile(r"(?:Po|Port-channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk)\d", re.IGNORECASE)
 
 _locks: dict[int, asyncio.Lock] = {}
 
@@ -96,12 +98,12 @@ def select_ports(ifname: dict[str, str], iftype: dict[str, str], ifstack: dict[s
     Interface namens Trk... steht; members fuehrt nur Trunks mit Mitgliedern (ein leerer TrkN ist ueber seinen Namen Trunk).
 
     Jeder andere Treiber, nach ifType, ohne ifIndex-Grenze: Port ist ein Interface vom Typ 6 / 117 (physisch) oder ein LAG. LAG
-    ist ein Interface vom Typ 161, und eines vom Typ 53 (propVirtual), dessen Name zu LAG_NAME passt und unter dem im ifStack direkt
-    mindestens ein physischer Port steht (so meldet klassisches IOS seine Port-channels; Name und physisches Mitglied halten SVIs,
-    Stack-Ports und logische Units wie ge-0/0/0.0 oder ae0.0 heraus). Alles andere ist kein Port, auch ein Interface ohne
-    ifType-Zeile: VLAN-Interfaces, Loopback, Null, Tunnel, Subinterfaces, Stack-Ports, ... Trunk ist jeder LAG-Port: members fuehrt
-    ihn, ein 161er auch ohne Mitglieder (dann mit []). Mitglied ist, was im ifStack direkt unter ihm steht; was unter einem anderen
-    Interface steht (unter einem Subinterface oder einer logischen Unit), ist kein Mitglied.
+    ist ein Interface vom Typ 161, und eines vom Typ 53 (propVirtual) oder 54 (propMultiplexor), dessen Name zu LAG_NAME passt und
+    unter dem im ifStack direkt mindestens ein physischer Port steht (so meldet klassisches IOS seine Port-channels; Name und
+    physisches Mitglied halten SVIs, Stack-Ports und logische Units wie ge-0/0/0.0 oder ae0.0 heraus). Alles andere ist kein Port,
+    auch ein Interface ohne ifType-Zeile: VLAN-Interfaces, Loopback, Null, Tunnel, Subinterfaces, Stack-Ports, ... Trunk ist jeder
+    LAG-Port: members fuehrt ihn, ein 161er auch ohne Mitglieder (dann mit []). Mitglied ist, was im ifStack direkt unter ihm steht;
+    was unter einem anderen Interface steht (unter einem Subinterface oder einer logischen Unit), ist kein Mitglied.
     """
     member_of: dict[str, str] = {}
     members: dict[str, list[str]] = {}
@@ -131,7 +133,7 @@ def select_ports(ifname: dict[str, str], iftype: dict[str, str], ifstack: dict[s
     def is_lag(ifi: str) -> bool:
         if iftype.get(ifi) == LAG_IFTYPE:
             return True
-        return iftype.get(ifi) == VIRTUAL_IFTYPE and ifi in over_physical and LAG_NAME.match(ifname[ifi]) is not None
+        return iftype.get(ifi) in NAMED_LAG_IFTYPES and ifi in over_physical and LAG_NAME.match(ifname[ifi]) is not None
 
     ports = [ifi for ifi in order if ifi in physical or (ifi.isdigit() and is_lag(ifi))]
     members = {ifi: [] for ifi in ports if ifi not in physical}
