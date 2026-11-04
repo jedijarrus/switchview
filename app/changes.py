@@ -46,6 +46,9 @@ ORDER = ["dot1x_off", "mac_off", "vlan_untagged", "vlan_tagged", "no_vlan_tagged
 TERMINAL = {"ok", "unclear", "failed", "aborted"}
 # R26: ohne snmp_autosave steht ein SNMP-Set nur in der laufenden Konfiguration des Switches
 SNMP_UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Switch speichern (z. B. write memory / copy running-config startup-config)"
+# Hinter jedem Schritt, mit dem ein SNMP-Lauf nach dem SET unklar endet, je nach snmp_autosave des Treibers
+SNMP_KEPT = {True: "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst).",
+             False: "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert."}
 
 
 def _now() -> str:
@@ -353,17 +356,23 @@ def verify_ports(cfg_after: dict, desired: dict) -> list[str]:
     return bad
 
 
-def verify_snmp(driver, cfg_after: dict, raw_after: dict, desired: dict) -> list[str]:
+def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: dict) -> list[str]:
     """Das Pruefen nach einem SNMP-SET, das Gegenstueck zu verify_ports: was im Read-back (cfg_after, raw_after aus snmpwrite.read_cfg)
-    nicht so ist, wie desired es will, je eine Zeile, Ports in natuerlicher Reihenfolge; leer heisst ok.
+    nicht so ist, wie die Aenderung desired es aus cfg (dem Read, gegen den sie geplant ist) machen will, je eine Zeile, Ports in
+    natuerlicher Reihenfolge; leer heisst ok.
       - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]) oder als nicht verwaltbar fuehrt
         (raw_after["unmanaged"]), weicht ab: cfg haelt fuer ihn nur Platzhalter (port_state fuellte Vorgaben ein, u ist None), an denen
         ein Ziel wie "kein ungetaggtes VLAN" oder "Name leer" sonst unbemerkt vorbeikaeme.
-      - u, t, en, name wie verify_ports.
+      - Aendert sich u oder t, zaehlt die GANZE VLAN-Zugehoerigkeit (R32): u und t, wie cfg sie zeigt, mit desired darueber. Ein
+        VLAN-Wechsel sind mehrere Varbinds (Egress und Untagged des alten und des neuen VLANs, die PVID); kaeme einer nicht an, stuende
+        der Port sonst etwa noch getaggt im alten VLAN. Wechselt u zu einem VLAN und zeigt der Read-back es (sonst meldet verify_ports
+        schon u), muss bei Q-BRIDGE dazu dessen Egress-Bit gesetzt sein: ungetaggt ohne Egress zeigt cfg nicht (u kommt aus der
+        Untagged-Liste), der Port gaebe das VLAN aber nicht aus.
+      - en und name wie verify_ports, wenn desired sie hat.
       - Die PVID (R21) bei Q-BRIDGE (vlan_strategy "qbridge") fuer einen Port ohne vmVlan-Zeile, gelesen aus raw_after["pvid"]:
         erwartet ist eine ausdrueckliche pvid aus desired, sonst das neue ungetaggte VLAN, wenn u zu einem VLAN wechselt (genau das
         schreibt render_ops). Sonst (u -> None, nur t / en / name) schreibt render_ops keine PVID, und keine wird erwartet. Bei
-        cisco_vmps nie: vmVlan ist dort das VLAN des Access-Ports (u), dot1qPvid schreibt dieser Weg nicht."""
+        cisco_vmps nie: vmVlan ist dort das VLAN des Access-Ports (u); Egress-Bits und dot1qPvid schreibt dieser Weg nicht."""
     bad = []
     for p in sorted(desired, key=snmpwrite.port_order):
         d = desired[p]
@@ -373,12 +382,21 @@ def verify_snmp(driver, cfg_after: dict, raw_after: dict, desired: dict) -> list
         if p in raw_after["unmanaged"]:
             bad.append(f"Port {p}: nach der Änderung {raw_after['unmanaged'][p]}")
             continue
-        bad += verify_ports(cfg_after, {p: {k: v for k, v in d.items() if k != "pvid"}})
-        want = d["pvid"] if "pvid" in d else d.get("u")
-        if want is not None and driver.vlan_strategy == "qbridge" and p not in raw_after["vmvlan"]:
-            have = raw_after["pvid"].get(p)
-            if have != want:
-                bad.append(f"Port {p}: pvid ist {have!r}, erwartet {want!r}")
+        want = {k: v for k, v in d.items() if k != "pvid"}
+        if {"u", "t"} & set(d):
+            st = cfgparse.port_state(cfg, p)
+            want = {"u": st["u"], "t": st["t"]} | want
+        bad += verify_ports(cfg_after, {p: want})
+        if driver.vlan_strategy != "qbridge" or p in raw_after["vmvlan"]:
+            continue
+        u = d.get("u")
+        if u is not None and cfgparse.port_state(cfg_after, p)["u"] == u:  # ungetaggt im neuen VLAN, wie gewollt: auch mit Egress-Bit?
+            bp, egress = raw_after["port2bp"].get(p), raw_after["egress"].get(u)
+            if bp and egress is not None and not snmp.portlist_has_bit(egress, bp):
+                bad.append(f"Port {p}: VLAN {u} ungetaggt, aber ohne Egress-Bit")
+        pvid = d["pvid"] if "pvid" in d else d.get("u")
+        if pvid is not None and raw_after["pvid"].get(p) != pvid:
+            bad.append(f"Port {p}: pvid ist {raw_after['pvid'].get(p)!r}, erwartet {pvid!r}")
     return bad
 
 
@@ -629,32 +647,32 @@ async def run_change(cid: int):
 async def _run_snmp(cid: int, ch, row):
     """run_change per SNMP (Spec §6, Q2): der Ablauf des SSH-Wegs, im selben Lock des Switches (sshcli.lock), damit Aenderungen an
     einem Switch nacheinander laufen, gleich ueber welchen Weg.
-      1. Ohne Schreib-Identitaet (poller.creds_of(row, write=True)): failed, nichts gelesen, nichts gesendet.
+      1. Ohne Schreib-Identitaet (poller.creds_of(row, write=True)): failed, nichts gelesen, nichts gesendet. Nach dem Warten auf den
+         Lock noch einmal, mit der Switch-Zeile von dann (R33): SNMP-Schreiben kann inzwischen aus sein, die Zugangsdaten weg. Ab da
+         gilt diese Zeile (Zugangsdaten, Treiber).
       2. Live lesen: snmpwrite.read_cfg selbst, nie main._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
          reentrant). Scheitert es: failed.
-      3. Gegen diesen Read neu planen (die Anfrage der Aenderung): gesperrt oder shown anders als in der Vorschau -> aborted, nichts
-         geschrieben. before kommt aus diesem Read (mit der PVID, R21).
+      3. Gegen diesen Read neu planen (die Anfrage der Aenderung): gesperrt oder shown anders als in der Vorschau -> aborted, ebenso ein
+         Plan ohne Varbinds ("Nichts zu ändern": nie ok ohne Zuruecklesen und Pruefen); nichts geschrieben. before kommt aus diesem
+         Read (mit der PVID, R21) und steht in der Zeile, bevor das SET hinausgeht.
       4. EIN SET (snmpwrite.apply_ops). Scheitert es (Timeout, Fehlerpaket), ist offen, ob der Switch es uebernommen hat: kein failed,
          das Zuruecklesen entscheidet.
-      5. Zuruecklesen und pruefen (verify_snmp): scheitert der Read oder weicht etwas ab, unclear. Sonst ok, saved=1 nur bei einem
-         Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
-    Was ab dem SET schiefgeht, ist unclear, davor failed. Nie SSH, keine Sicherung, kein switch_cfg: es gibt keine running-config. Den
-    zwischengespeicherten SSH-Read verwirft der SET (invalidate_cfg), er beschreibt den Switch danach nicht mehr."""
+      5. Zuruecklesen und pruefen (verify_snmp, die ganze VLAN-Zugehoerigkeit, R32): scheitert der Read oder weicht etwas ab, unclear.
+         Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
+    Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed; ein
+    abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". Nie SSH, keine Sicherung, kein
+    switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg)."""
     sid = ch["switch_id"]
     if ch["kind"] != "ports":  # Speichern und RADIUS-Vorbereitung gibt es nur per SSH (main lehnt sie vorher ab)
         return await _refuse(cid, ch, "Per SNMP gibt es nur Port-Änderungen: nichts ausgeführt")
     req, previewed = json.loads(ch["request"] or "{}"), json.loads(ch["commands"] or "[]")
     steps: list = []
     status, error, saved, output = None, None, 0, ""
-    sent = False  # ab hier kann der Switch etwas uebernommen haben
+    sent, kept = False, ""  # sent: ab hier kann der Switch etwas uebernommen haben; kept: was das dann heisst (SNMP_KEPT)
     try:
-        driver = drivers.driver_for(row)
-        autosave = drivers.can(driver, "snmp_autosave")
-        kept = "Was der Switch davon übernommen hat, hat er selbst gespeichert." if autosave else "Nicht dauerhaft gespeichert."
-        try:
-            poller.creds_of(row, write=True)
-        except snmp.SnmpError as e:
-            status, error = "failed", str(e)
+        reason = _no_write_identity(row)
+        if reason:
+            status, error = "failed", reason
             await _step(cid, steps, error, "error")
             return
         inv = await inventory(sid)
@@ -663,6 +681,15 @@ async def _run_snmp(cid: int, ch, row):
             await _step(cid, steps, "Warte auf laufende Aktion an diesem Switch")
         async with lock:
             await _upd(cid, status="running")
+            row = await _switch_row(sid)
+            reason = _no_write_identity(row) if row is not None else "Switch nicht gefunden"
+            if reason:
+                status, error = "failed", reason
+                await _step(cid, steps, error, "error")
+                return
+            driver = drivers.driver_for(row)
+            autosave = drivers.can(driver, "snmp_autosave")
+            kept = SNMP_KEPT[autosave]
             await _step(cid, steps, f"Lese {row['host']} per SNMP")
             try:
                 cfg, raw = await snmpwrite.read_cfg(row, driver)
@@ -680,30 +707,33 @@ async def _run_snmp(cid: int, ch, row):
                 status, error = "aborted", "Der Switch hat sich seit der Vorschau geändert. Bitte Vorschau neu laden."
                 await _step(cid, steps, error, "error")
                 return
+            if not plan["ops"]:
+                status, error = "aborted", "Nichts zu ändern"
+                await _step(cid, steps, error, "error")
+                return
             await _upd(cid, before=json.dumps(plan["before"]))
-            if plan["ops"]:
-                n = len(plan["ops"])
-                await _step(cid, steps, f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
-                sent = True
-                invalidate_cfg(sid)
-                try:
-                    output = await snmpwrite.apply_ops(row, driver, plan["ops"])
-                except (snmp.SnmpError, OSError) as e:
-                    output = str(e)
-                    await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
-                try:
-                    cfg_after, raw_after = await snmpwrite.read_cfg(row, driver)
-                except (snmp.SnmpError, OSError) as e:
-                    status, error = "unclear", f"Zurücklesen per SNMP fehlgeschlagen: {e}"
-                    await _step(cid, steps, f"{error}. {kept}", "error")
-                    return
-                await _step(cid, steps, "Zustand nachher gelesen")
-                bad = verify_snmp(driver, cfg_after, raw_after, plan["desired"])
-                if bad:
-                    status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
-                    await _step(cid, steps, f"{error}. {kept}", "error")
-                    return
-                await _step(cid, steps, "Prüfung ok")
+            n = len(plan["ops"])
+            await _step(cid, steps, f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
+            sent = True
+            invalidate_cfg(sid)
+            try:
+                output = await snmpwrite.apply_ops(row, driver, plan["ops"])
+            except (snmp.SnmpError, OSError) as e:
+                output = str(e)
+                await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
+            try:
+                cfg_after, raw_after = await snmpwrite.read_cfg(row, driver)
+            except (snmp.SnmpError, OSError) as e:
+                status, error = "unclear", f"Zurücklesen per SNMP fehlgeschlagen: {e}"
+                await _step(cid, steps, f"{error}. {kept}", "error")
+                return
+            await _step(cid, steps, "Zustand nachher gelesen")
+            bad = verify_snmp(driver, cfg, cfg_after, raw_after, plan["desired"])
+            if bad:
+                status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
+                await _step(cid, steps, f"{error}. {kept}", "error")
+                return
+            await _step(cid, steps, "Prüfung ok")
             status = "ok"
             if autosave:
                 saved = 1
@@ -713,22 +743,39 @@ async def _run_snmp(cid: int, ch, row):
     except Exception as e:  # noqa: BLE001
         log.exception("Änderung %s", cid)
         status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {str(e)[:300]}"
-        await _step(cid, steps, error, "error")
+        await _step(cid, steps, f"{error}. {kept}" if sent else error, "error")
     finally:
-        await _close(cid, ch, status or ("unclear" if sent else "failed"), error, saved, output)
+        if status is None:  # nicht zu Ende gelaufen: der Task wurde abgebrochen
+            status, error = ("unclear" if sent else "failed"), "Abgebrochen (Prozess beendet)"
+            steps.append([_now(), f"{error}. {kept}" if sent else error, "error"])
+        await _close(cid, ch, status, error, saved, output, steps)
+
+
+def _no_write_identity(row) -> str | None:
+    """Warum keine SNMP-SETs an den Switch row gehen duerfen (der Grund aus poller.creds_of(row, write=True)), sonst None."""
+    try:
+        poller.creds_of(row, write=True)
+    except snmp.SnmpError as e:
+        return str(e)
+    return None
+
+
+async def _switch_row(sid: int):
+    async with db() as conn:
+        async with conn.execute("SELECT * FROM switches WHERE id = ?", (sid,)) as cur:
+            return await cur.fetchone()
 
 
 async def _refuse(cid: int, ch, error: str):
     """Eine Aenderung abbrechen, ohne den Switch anzufassen (aborted, mit Grund)."""
-    await _step(cid, [], error, "error")
-    await _close(cid, ch, "aborted", error, 0, "")
+    await _close(cid, ch, "aborted", error, 0, "", [[_now(), error, "error"]])
 
 
-async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str):
-    """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis in die Zeile, Audit wie auf dem SSH-Weg, dazu der Schreibweg, und
-    die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config."""
+async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str, steps: list):
+    """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis und Schritte in EINEM Schreiben in die Zeile, Audit wie auf dem
+    SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config."""
     sid = ch["switch_id"]
-    await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output)
+    await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
     await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
     if status in ("ok", "unclear", "failed") and ch["kind"] != "save":
         asyncio.create_task(_repoll(sid))

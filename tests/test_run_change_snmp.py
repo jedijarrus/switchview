@@ -56,9 +56,13 @@ DRIFT = "Der Switch hat sich seit der Vorschau geändert. Bitte Vorschau neu lad
 AUTOSAVED = "Gespeichert (der Switch speichert SNMP-Änderungen selbst)"
 UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Switch speichern (z. B. write memory / copy running-config startup-config)"
 MISMATCH = "Prüfung nach der Änderung passt nicht: "
-SAVED_NOTE = "Was der Switch davon übernommen hat, hat er selbst gespeichert."    # behind an unclear step: driver with snmp_autosave
-UNSAVED_NOTE = "Nicht dauerhaft gespeichert."                                      # behind an unclear step: any other driver
+# Behind every step that ends a run unclear: what the switch may already have taken is in effect, and saved or not (R26).
+SAVED_NOTE = "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst)."
+UNSAVED_NOTE = "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert."
+CANCELLED = "Abgebrochen (Prozess beendet)"
+NOTHING = "Nichts zu ändern"
 WRITE_DISABLED = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
+NO_WRITE_CREDS = "Keine SNMP-Schreib-Zugangsdaten hinterlegt"
 R12_PORT2 = ("PVID 1 weicht vom ungetaggten VLAN 99 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS zugewiesen) – per SNMP nicht "
              "verwaltbar")
 HYBRID_1_20 = "ungetaggt in mehreren VLANs (1, 20): Hybrid-/General-Port, per SNMP nicht verwaltbar"
@@ -152,8 +156,10 @@ class Agent:
     """The switch behind SNMP: snmp.walk answers from its rows W (switchfix.agent format), snmp.set_vars goes through switchfix.store.
     Records every walk (OID, cred), every SET (host, cred, varbinds) and whether the switch's change lock was held at each of them.
     Knobs: set_mode "apply" (default), "ignore" (answers, takes nothing), "lost" (takes it, the answer never comes: SnmpError),
-    "timeout" (takes nothing, no answer); drop: base OIDs whose varbinds it silently ignores; after_set: W -> W, what else changes on
-    the switch right after the SET; read_error / readback_error: what every walk raises before / after the first SET."""
+    "timeout" (takes nothing, no answer); drop: OIDs, or base OIDs, whose varbinds it silently ignores (a partly applied SET);
+    after_set: W -> W, what else changes on the switch right after the SET; read_error / readback_error: what every walk raises
+    before / after the first SET; on_set: a coroutine function awaited as the SET arrives; set_raises: what the SET raises then,
+    before taking anything."""
 
     def __init__(self, W: dict, sid: int):
         self.W, self.sid = W, sid
@@ -163,6 +169,8 @@ class Agent:
         self.set_mode, self.drop, self.after_set = "apply", set(), None
         self.read_error: BaseException | None = None
         self.readback_error: BaseException | None = None
+        self.on_set = None
+        self.set_raises: BaseException | None = None
 
     async def walk(self, host, cred, oid, hex_values=False, timeout=60, strict=False):
         assert (host, strict) == (HOST, True), (host, strict)
@@ -177,8 +185,12 @@ class Agent:
     async def set_vars(self, host, cred, varbinds, timeout=20):
         self.sets.append((host, cred, list(varbinds)))
         self.locked.append(sshcli.lock(self.sid).locked())
+        if self.on_set:
+            await self.on_set()
+        if self.set_raises:
+            raise self.set_raises
         if self.set_mode in ("apply", "lost"):
-            self.W = store(self.W, [vb for vb in varbinds if vb[0].rpartition(".")[0] not in self.drop])
+            self.W = store(self.W, [vb for vb in varbinds if vb[0] not in self.drop and vb[0].rpartition(".")[0] not in self.drop])
             if self.after_set:
                 self.W = self.after_set(self.W)
         if self.set_mode in ("lost", "timeout"):
@@ -588,6 +600,46 @@ async def test_snmp_written_port_missing_afterwards_unclear(env):
     assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 1: beim Zurücklesen nicht gefunden")
 
 
+# R32: a VLAN move is several varbinds (Egress and Untagged of the old and the new VLAN, the PVID); the verify checks the port's whole
+# VLAN membership, not only the field the request named. Port 2 (bridge port 1) moves 99 -> 20; its varbinds: Egress 20 (E2), Egress 99
+# (02), Untagged 20 (A0), Untagged 99 (00), PVID 20.
+@pytest.mark.parametrize("dropped, bad", [
+    pytest.param({VLAN_EGRESS}, "Port 2: t ist ['99'], erwartet []; Port 2: VLAN 20 ungetaggt, aber ohne Egress-Bit", id="both-egress"),
+    pytest.param({f"{VLAN_EGRESS}.99"}, "Port 2: t ist ['99'], erwartet []", id="old-egress"),
+    pytest.param({f"{VLAN_EGRESS}.20"}, "Port 2: VLAN 20 ungetaggt, aber ohne Egress-Bit", id="new-egress"),
+])
+async def test_snmp_verify_checks_the_whole_vlan_membership(env, dropped, bad):
+    """The switch takes the move only in part. Old Egress bit left: port 2 reads as untagged 20 AND tagged 99 - right u, right PVID,
+    but t must stay []. New Egress bit missing: cfg cannot show it (u comes from the Untagged list), yet the port would not send VLAN 20
+    out; the read-back's Egress list must have it. Each is unclear, never ok."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.drop = dropped
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"], ch["error"]) == ("unclear", 0, MISMATCH + bad)
+
+
+async def test_snmp_revert_to_no_untagged_vlan_verifies_t(env):
+    """The revert takes port 3 back to no untagged VLAN (u None): its tagged VLANs 20 and 30 are part of what must be true afterwards.
+    The Egress bit of 99 stays (dropped), so port 3 would keep 99 as a tagged VLAN -> unclear."""
+    sid, cid = await forward_port3(env)
+    rid, _ = await apply(sid, {"mode": "revert", "of": cid})
+    env.agent.drop = {f"{VLAN_EGRESS}.99"}
+    ch = await run(env, rid)
+    assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 3: t ist ['20', '30', '99'], erwartet ['20', '30']")
+
+
+async def test_snmp_tagged_change_verifies_u_too(env):
+    """Only t changes (port 1: tagged 30 -> 30, 99), but right after the SET port 1 is no longer in VLAN 20 at all: its t is what was
+    asked for, its u (20 before, untouched by the change) is gone -> unclear."""
+    sid = await env.switch("procurve")
+    cid, plan = await apply(sid, {"ports": ["1"], "change": {"tagged_add": ["99"]}})
+    assert (plan["shown"], plan["ops"]) == (["Port 1: VLAN getaggt 30 → 30, 99"], [(f"{VLAN_EGRESS}.99", "x", "A2" + PAD)])
+    env.agent.after_set = lambda W: edit_walks(W, vlanEgress={"20": pl("42")}, vlanUntagged={"20": pl("00")})
+    ch = await run(env, cid)
+    assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 1: u ist None, erwartet '20'")
+
+
 # ── Drift since the preview: aborted, nothing written ─────────────────────────────────────────────────────────────────────────────
 async def test_snmp_preview_drift_aborted(env):
     """Between preview and run someone moved port 2 from VLAN 99 to VLAN 1: the fresh plan's line reads "1 → 20", not the previewed
@@ -680,27 +732,72 @@ async def test_snmp_without_write_identity_fails_before_reading(env):
     assert env.agent.walks == [] and env.agent.sets == []
 
 
-async def test_snmp_unexpected_error_after_the_set_is_unclear(env, monkeypatch):
-    """Any other exception once the SET is out (here: in the verify) is unclear, never failed: the switch may have taken it."""
+async def test_snmp_without_write_identity_does_not_wait_for_the_lock(env):
+    """A change that could not write anyway fails at once, without queueing behind another action on the switch."""
     sid = await env.switch("procurve")
     cid, _ = await apply(sid, PC_PROBE)
+    await sql("UPDATE switches SET snmp_write = 0 WHERE id = ?", (sid,))
+    lock = sshcli.lock(sid)
+    await lock.acquire()
+    try:
+        ch = await asyncio.wait_for(run(env, cid), timeout=2)
+    finally:
+        lock.release()
+    assert (ch["status"], ch["error"], steps(ch)) == ("failed", WRITE_DISABLED, [(WRITE_DISABLED, "error")])
+
+
+@pytest.mark.parametrize("driver, payload, note", [("procurve", PC_PROBE, SAVED_NOTE), ("generic", GI_PROBE, UNSAVED_NOTE)])
+async def test_snmp_unexpected_error_after_the_set_is_unclear(env, monkeypatch, driver, payload, note):
+    """Any other exception once the SET is out (here: in the verify) is unclear, never failed: the switch may have taken it. Its step
+    says so, and whether that is saved (R26)."""
+    sid = await env.switch(driver)
+    cid, _ = await apply(sid, payload)
 
     def broken(*args, **kwargs):
         raise KeyError("pvid")
     monkeypatch.setattr(changes, "verify_snmp", broken)
     ch = await run(env, cid)
-    assert (ch["status"], ch["error"]) == ("unclear", "KeyError: 'pvid'")
+    assert (ch["status"], ch["error"], steps(ch)[-1]) == ("unclear", "KeyError: 'pvid'", (f"KeyError: 'pvid'. {note}", "error"))
     assert len(env.agent.sets) == 1
 
 
-@pytest.mark.parametrize("when, status", [("before", "failed"), ("after", "unclear")])
-async def test_snmp_cancelled_run_ends_by_whether_the_set_was_out(env, monkeypatch, when, status):
-    """Cancelled (say the app shuts down) during the first read: failed, nothing was sent. Cancelled once the SET is out (here in the
-    verify): unclear, never failed. Either way the change does not stay "running"."""
+async def test_snmp_error_raised_by_the_set_itself_is_unclear(env):
+    """Not an SnmpError but any exception out of the SET: the varbinds may be on the switch already, so unclear (the run counts as
+    "sent" before the SET is handed over, not after it returns)."""
     sid = await env.switch("procurve")
     cid, _ = await apply(sid, PC_PROBE)
-    if when == "before":
+    env.agent.set_raises = RuntimeError("Fehler im Agenten")
+    ch = await run(env, cid)
+    error = "RuntimeError: Fehler im Agenten"
+    assert (ch["status"], ch["error"], steps(ch)[-1]) == ("unclear", error, (f"{error}. {SAVED_NOTE}", "error"))
+    assert len(env.agent.sets) == 1
+
+
+async def test_snmp_before_is_stored_before_the_set(env):
+    """By the time the SET reaches the switch, the change row already holds the `before` of the live read (here PVID 30, drifted since
+    the preview's 1): a run that dies during the SET can still be taken back to the true state."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, {"ports": ["3"], "change": {"untagged": "99"}})
+    env.agent.W = edit_walks(env.agent.W, pvid={"2": "30"})
+    seen = []
+
+    async def look():
+        seen.append((await change(cid))["before"])
+    env.agent.on_set = look
+    assert (await run(env, cid))["status"] == "ok"
+    assert seen == [{"3": {"u": None, "pvid": "30"}}]
+
+
+@pytest.mark.parametrize("when, status", [("first read", "failed"), ("set", "unclear"), ("verify", "unclear")])
+async def test_snmp_cancelled_run_ends_by_whether_the_set_was_out(env, monkeypatch, when, status):
+    """Cancelled (say the app shuts down) during the first read: failed, nothing was sent. Cancelled during the SET or after it (here in
+    the verify): unclear, never failed. Either way the change does not stay "running", and says why it ended."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    if when == "first read":
         env.agent.read_error = asyncio.CancelledError()
+    elif when == "set":
+        env.agent.set_raises = asyncio.CancelledError()
     else:
         def cancelled(*args, **kwargs):
             raise asyncio.CancelledError()
@@ -708,8 +805,88 @@ async def test_snmp_cancelled_run_ends_by_whether_the_set_was_out(env, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await changes.run_change(cid)
     ch = await change(cid)
-    assert (ch["status"], len(env.agent.sets)) == (status, 0 if when == "before" else 1)
+    assert (ch["status"], ch["error"], len(env.agent.sets)) == (status, CANCELLED, 0 if when == "first read" else 1)
+    assert steps(ch)[-1] == ((CANCELLED, "error") if status == "failed" else (f"{CANCELLED}. {SAVED_NOTE}", "error"))
     assert ch["finished_at"] is not None
+
+
+# ── R33: the write identity once more after the wait for the lock ─────────────────────────────────────────────────────────────────
+async def hold_the_lock_while(env: Env, sid: int, cid: int, meanwhile) -> dict:
+    """Run change cid while another action holds the switch's lock; once the run waits for it, await meanwhile() (an edit of the
+    switch, say), then release the lock and let the run finish. The changes row afterwards."""
+    lock = sshcli.lock(sid)
+    await lock.acquire()
+    task = asyncio.create_task(changes.run_change(cid))
+    try:
+        for _ in range(300):
+            if (await change(cid))["steps"]:
+                break
+            await asyncio.sleep(0.01)
+        assert steps(await change(cid)) == [("Warte auf laufende Aktion an diesem Switch", "info")]
+        await meanwhile()
+    finally:
+        lock.release()
+    await task
+    await asyncio.sleep(0)
+    return await change(cid)
+
+
+@pytest.mark.parametrize("edit, reason", [
+    ("UPDATE switches SET snmp_write = 0 WHERE id = ?", WRITE_DISABLED),
+    ("UPDATE switches SET snmp_rw_community = NULL, snmp_community = NULL WHERE id = ?", NO_WRITE_CREDS),
+])
+async def test_snmp_write_identity_checked_again_after_waiting_for_the_lock(env, edit, reason):
+    """SNMP writing was switched off, or the write credentials removed, while the change waited for the lock: failed with the reason,
+    nothing read, no SET."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.walks.clear()
+
+    async def meanwhile():
+        await sql(edit, (sid,))
+    ch = await hold_the_lock_while(env, sid, cid, meanwhile)
+    assert (ch["status"], ch["error"]) == ("failed", reason)
+    assert steps(ch) == [("Warte auf laufende Aktion an diesem Switch", "info"), (reason, "error")]
+    assert env.agent.walks == [] and env.agent.sets == []
+
+
+async def test_snmp_run_uses_the_switch_row_as_it_is_after_the_wait(env):
+    """The RW community was changed while the change waited: the SET goes out with the new one."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+
+    async def meanwhile():
+        await sql("UPDATE switches SET snmp_rw_community = ? WHERE id = ?", (crypto.encrypt("rw-neu"), sid))
+    ch = await hold_the_lock_while(env, sid, cid, meanwhile)
+    assert ch["status"] == "ok"
+    assert [cred for _, cred, _ in env.agent.sets] == [{**RW_CRED, "snmp_community": "rw-neu"}]
+
+
+# ── Nothing to write: aborted, never ok without a verify ──────────────────────────────────────────────────────────────────────────
+async def test_snmp_plan_without_ops_aborts(env, monkeypatch):
+    """The live plan matches the preview but has no varbinds (here a renderer that loses them): aborted, nothing written, never ok,
+    "Gespeichert" or the R26 warning without a read-back and a verify."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    real = snmpwrite.render_ops
+
+    def no_ops(*args, **kwargs):
+        return [], real(*args, **kwargs)[1]
+    monkeypatch.setattr(snmpwrite, "render_ops", no_ops)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["error"], ch["saved"]) == ("aborted", NOTHING, 0)
+    assert steps(ch) == [*READ_STEPS, (NOTHING, "error")]
+    assert env.agent.sets == [] and env.repolls == []
+
+
+async def test_snmp_change_already_in_place_aborts(env):
+    """A change whose target already is the switch's state (an empty preview, as only a direct create_change can store one): aborted."""
+    sid = await env.switch("procurve")
+    plan = {"desired": {}, "before": {}, "shown": [], "blocked": [], "expert": False, "mechanism": "snmp"}
+    cid = await changes.create_change(sid, USER, "ports", "Port 2: VLAN 99", {"ports": ["2"], "set": {"untagged": "99"}}, plan)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["error"]) == ("aborted", NOTHING)
+    assert env.agent.sets == []
 
 
 # ── Never SSH on the SNMP path ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -879,42 +1056,65 @@ async def test_apply_ops_without_a_write_identity_refuses(set_calls, cols, reaso
 
 
 # ── verify_snmp ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-def readback(ports: dict, *, pvid=None, unmanaged=None, vmvlan=None) -> tuple[dict, dict]:
+def readback(ports: dict, *, pvid=None, unmanaged=None, vmvlan=None, port2bp=None, egress=None) -> tuple[dict, dict]:
     """A hand-made read-back: cfg with these ports (fields over cfgparse's defaults), raw with an ifIndex for each of them."""
     cfg = {"ports": {p: {**cfgparse._empty_port(), **st} for p, st in ports.items()}}
-    raw = {"ifindex": {p: i for i, p in enumerate(ports, 1)}, "pvid": pvid or {}, "unmanaged": unmanaged or {}, "vmvlan": vmvlan or {}}
+    raw = {"ifindex": {p: i for i, p in enumerate(ports, 1)}, "pvid": pvid or {}, "unmanaged": unmanaged or {}, "vmvlan": vmvlan or {},
+           "port2bp": port2bp or {}, "egress": egress or {}}
     return cfg, raw
 
 
 CISCO = drivers.DRIVERS["cisco"]
 
 
-@pytest.mark.parametrize("drv, desired, ports, extra, bad", [
-    pytest.param(GENERIC, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {"pvid": {"2": "20"}}, [], id="u-and-implicit-pvid"),
-    pytest.param(GENERIC, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {"pvid": {"2": "99"}}, ["Port 2: pvid ist '99', erwartet '20'"],
-                 id="implicit-pvid-differs"),
-    pytest.param(GENERIC, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {}, ["Port 2: pvid ist None, erwartet '20'"], id="no-pvid-row"),
-    pytest.param(GENERIC, {"3": {"u": None, "pvid": "1"}}, {"3": {}}, {"pvid": {"3": "1"}}, [], id="explicit-pvid"),
-    pytest.param(GENERIC, {"3": {"u": None, "pvid": "1"}}, {"3": {}}, {"pvid": {"3": "99"}}, ["Port 3: pvid ist '99', erwartet '1'"],
-                 id="explicit-pvid-differs"),
-    pytest.param(GENERIC, {"3": {"pvid": "1"}}, {"3": {}}, {"pvid": {"3": "5"}}, ["Port 3: pvid ist '5', erwartet '1'"], id="pvid-only"),
-    pytest.param(GENERIC, {"3": {"u": None}}, {"3": {}}, {"pvid": {"3": "99"}}, [], id="u-to-none-expects-no-pvid"),
-    pytest.param(GENERIC, {"3": {"t": ["20"], "en": False}}, {"3": {"t": ["20"], "en": False}}, {"pvid": {"3": "7"}}, [],
-                 id="no-vlan-change-expects-no-pvid"),
-    pytest.param(CISCO, {"Gi1/0/2": {"u": "10"}}, {"Gi1/0/2": {"u": "10"}}, {"pvid": {"Gi1/0/2": "1"}}, [], id="cisco-skips-pvid"),
-    pytest.param(GENERIC, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {"pvid": {"2": "1"}, "vmvlan": {"2": "20"}}, [],
-                 id="vmvlan-row-skips-pvid"),
-    pytest.param(GENERIC, {"2": {"en": False, "name": "x"}}, {"2": {}}, {}, ["Port 2: en ist True, erwartet False",
-                                                                            "Port 2: name ist '', erwartet 'x'"], id="fields"),
-    pytest.param(GENERIC, {"9": {"name": ""}}, {"2": {}}, {}, ["Port 9: beim Zurücklesen nicht gefunden"], id="missing"),
-    pytest.param(GENERIC, {"3": {"u": None, "pvid": "1"}}, {"3": {}}, {"pvid": {"3": "1"}, "unmanaged": {"3": "Grund"}},
+# drv, pre (the read the plan was made from: port -> u / t), desired, ports of the read-back, more of the read-back's raw, mismatches
+@pytest.mark.parametrize("drv, pre, desired, ports, extra, bad", [
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {"pvid": {"2": "20"}}, [], id="u-and-implicit-pvid"),
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {"pvid": {"2": "99"}},
+                 ["Port 2: pvid ist '99', erwartet '20'"], id="implicit-pvid-differs"),
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}}, {}, ["Port 2: pvid ist None, erwartet '20'"],
+                 id="no-pvid-row"),
+    pytest.param(GENERIC, {"3": {"u": "99", "t": ["20"]}}, {"3": {"u": None, "pvid": "1"}}, {"3": {"t": ["20"]}}, {"pvid": {"3": "1"}}, [],
+                 id="explicit-pvid"),
+    pytest.param(GENERIC, {"3": {"u": "99", "t": ["20"]}}, {"3": {"u": None, "pvid": "1"}}, {"3": {"t": ["20"]}}, {"pvid": {"3": "99"}},
+                 ["Port 3: pvid ist '99', erwartet '1'"], id="explicit-pvid-differs"),
+    pytest.param(GENERIC, {"3": {"t": ["20"]}}, {"3": {"pvid": "1"}}, {"3": {}}, {"pvid": {"3": "5"}}, ["Port 3: pvid ist '5', erwartet '1'"],
+                 id="pvid-only-checks-no-vlans"),
+    pytest.param(GENERIC, {"3": {"u": "99", "t": ["20"]}}, {"3": {"u": None}}, {"3": {"t": ["20"]}}, {"pvid": {"3": "99"}}, [],
+                 id="u-to-none-expects-no-pvid"),
+    pytest.param(GENERIC, {"3": {"t": ["30"]}}, {"3": {"t": ["20"], "en": False}}, {"3": {"t": ["20"], "en": False}}, {"pvid": {"3": "7"}},
+                 [], id="no-u-change-expects-no-pvid"),
+    # R32: the whole VLAN membership of a port whose u or t changes
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20", "t": ["99"]}}, {"pvid": {"2": "20"}},
+                 ["Port 2: t ist ['99'], erwartet []"], id="u-change-checks-t"),
+    pytest.param(GENERIC, {"1": {"u": "20", "t": ["30"]}}, {"1": {"t": ["30", "99"]}}, {"1": {"t": ["30", "99"]}}, {"pvid": {"1": "20"}},
+                 ["Port 1: u ist None, erwartet '20'"], id="t-change-checks-u"),
+    # ... but the PVID still follows what was written: a t change writes none, so a port without a PVID row is fine
+    pytest.param(GENERIC, {"1": {"u": "20", "t": ["30"]}}, {"1": {"t": ["30", "99"]}}, {"1": {"u": "20", "t": ["30", "99"]}}, {}, [],
+                 id="t-change-expects-no-pvid"),
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}},
+                 {"pvid": {"2": "20"}, "port2bp": {"2": 1}, "egress": {"20": bytes([0x00, 0x00])}},
+                 ["Port 2: VLAN 20 ungetaggt, aber ohne Egress-Bit"], id="new-u-without-egress-bit"),
+    pytest.param(GENERIC, {"2": {"u": "99"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}},
+                 {"pvid": {"2": "20"}, "port2bp": {"2": 1}, "egress": {"20": bytes([0x80, 0x00])}}, [], id="new-u-with-egress-bit"),
+    pytest.param(GENERIC, {"1": {"u": "20"}}, {"1": {"t": ["30"]}}, {"1": {"u": "20", "t": ["30"]}},
+                 {"pvid": {"1": "20"}, "port2bp": {"1": 3}, "egress": {"20": bytes([0x00])}}, [], id="unchanged-u-egress-not-written"),
+    pytest.param(CISCO, {"Gi1/0/2": {"u": "1"}}, {"Gi1/0/2": {"u": "10"}}, {"Gi1/0/2": {"u": "10"}},
+                 {"pvid": {"Gi1/0/2": "1"}, "port2bp": {"Gi1/0/2": 2}, "egress": {"10": bytes([0x00])}}, [], id="cisco-skips-q-bridge"),
+    pytest.param(GENERIC, {"2": {"u": "1"}}, {"2": {"u": "20"}}, {"2": {"u": "20"}},
+                 {"pvid": {"2": "1"}, "vmvlan": {"2": "20"}, "port2bp": {"2": 1}, "egress": {"20": bytes([0x00])}}, [],
+                 id="vmvlan-row-skips-q-bridge"),
+    pytest.param(GENERIC, {}, {"2": {"en": False, "name": "x"}}, {"2": {}}, {},
+                 ["Port 2: en ist True, erwartet False", "Port 2: name ist '', erwartet 'x'"], id="fields"),
+    pytest.param(GENERIC, {}, {"9": {"name": ""}}, {"2": {}}, {}, ["Port 9: beim Zurücklesen nicht gefunden"], id="missing"),
+    pytest.param(GENERIC, {"3": {"u": "99"}}, {"3": {"u": None, "pvid": "1"}}, {"3": {}}, {"pvid": {"3": "1"}, "unmanaged": {"3": "Grund"}},
                  ["Port 3: nach der Änderung Grund"], id="unmanaged"),
-    pytest.param(GENERIC, {"Gi1/0/10": {"name": ""}, "Gi1/0/2": {"name": ""}}, {}, {},
+    pytest.param(GENERIC, {}, {"Gi1/0/10": {"name": ""}, "Gi1/0/2": {"name": ""}}, {}, {},
                  ["Port Gi1/0/2: beim Zurücklesen nicht gefunden", "Port Gi1/0/10: beim Zurücklesen nicht gefunden"], id="natural-order"),
 ])
-def test_verify_snmp(drv, desired, ports, extra, bad):
-    cfg, raw = readback(ports, **extra)
-    assert changes.verify_snmp(drv, cfg, raw, desired) == bad
+def test_verify_snmp(drv, pre, desired, ports, extra, bad):
+    cfg_after, raw_after = readback(ports, **extra)
+    assert changes.verify_snmp(drv, readback(pre)[0], cfg_after, raw_after, desired) == bad
 
 
 # ── The host guard in snmp.py ─────────────────────────────────────────────────────────────────────────────────────────────────────
