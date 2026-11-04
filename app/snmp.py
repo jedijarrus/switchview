@@ -1,6 +1,6 @@
-"""SNMP-Lesezugriff ueber net-snmp (snmpbulkwalk/snmpget), nur lesend.
+"""SNMP-Zugriff ueber net-snmp: Lesen mit snmpbulkwalk/snmpget (walk, get), Schreiben mit snmpset (set_vars).
 
-Ausgabe immer numerisch (-On), ohne Typ (-Oq), Enums als Zahl (-Oe),
+Lesen: Ausgabe immer numerisch (-On), ohne Typ (-Oq), Enums als Zahl (-Oe),
 Timeticks als Zahl (-Ot). Bitmaps (VLAN-Portlisten, MACs) mit -Ox als Hex.
 """
 import asyncio
@@ -80,6 +80,22 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
     cmd = ["snmpget", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", host, *oids]
     return dict(_parse(await _run(cmd, timeout)))
+
+
+async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], timeout: float = 20) -> str:
+    """snmpset: schreibt alle `varbinds` = [(oid, typ, wert), ...] mit EINEM Aufruf und liefert die Ausgabe von snmpset.
+
+    `cred` ist die Schreib-Identitaet (RW-Community bzw. v3-User); der Aufrufer baut sie, hier geht sie unveraendert an _auth_args.
+    `typ` ist der snmpset-Typbuchstabe: i = INTEGER, u = Unsigned32/Gauge, s = String, x = Hex-String (Wert ohne Trennzeichen, siehe
+    portlist_to_hex). Dieses `x` ist ein eigenes Argument zwischen OID und Wert, nicht das `-x` (v3-Privacy-Protokoll) aus _auth_args.
+    Wie bei walk/get steht der Host positional hinter den Optionen, und es gibt keine Shell: jedes Argument ist ein eigenes Argv-Element,
+    Werte mit Leerzeichen oder leere Werte brauchen kein Quoting. Fehler kommen als SnmpError aus _run; ein SnmpError heisst nicht
+    "nicht gesetzt": nach einem Timeout ist offen, ob der Switch den Wert schon uebernommen hat (darum Read-back-Verify beim Aufrufer).
+    """
+    cmd = ["snmpset", *_auth_args(cred), "-On", host]
+    for oid, typ, val in varbinds:
+        cmd += [oid, typ, val]
+    return await _run(cmd, timeout)
 
 
 def hex_to_bytes(val: str) -> bytes:
