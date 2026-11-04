@@ -98,5 +98,44 @@ def bitmap_ports(val: str) -> set[int]:
     return {i * 8 + j + 1 for i, byte in enumerate(b) for j in range(8) if byte & (0x80 >> j)}
 
 
+# PortList schreiben: Gegenstueck zu bitmap_ports mit derselben Zaehlung (1-basiert, Bit 1 = MSB von Byte 0, also 0x80 >> j). Beim
+# Read-Modify-Write eines VLAN-Eintrags darf genau ein Bit der vom Switch gelesenen Bytes kippen: alle anderen Bits und die Laenge
+# bleiben erhalten. set/clear liefern darum immer eine NEUE Bytefolge, kuerzen nie und verlaengern nur, wenn der Port dahinter liegt.
+def _portlist_pos(port: int) -> tuple[int, int]:
+    """Byte-Index und Bitmaske von Bridge-Port `port` in einer PortList."""
+    if port < 1:
+        # Port 0 oder negativ ergaebe einen negativen Index und wuerde stillschweigend das LETZTE Byte aendern statt zu scheitern.
+        raise ValueError(f"PortList-Portnummern beginnen bei 1, nicht bei {port}")
+    i, j = divmod(port - 1, 8)
+    return i, 0x80 >> j
+
+
+def portlist_has_bit(raw: bytes, port: int) -> bool:
+    """Ist Bridge-Port `port` in der PortList `raw` gesetzt? Ports hinter dem letzten Byte gelten als nicht gesetzt."""
+    i, mask = _portlist_pos(port)
+    return i < len(raw) and bool(raw[i] & mask)
+
+
+def portlist_set_bit(raw: bytes, port: int) -> bytes:
+    """Neue PortList mit gesetztem Bit fuer `port`, alle anderen Bits unveraendert. Zu kurzes `raw` wird mit Nullbytes verlaengert."""
+    i, mask = _portlist_pos(port)
+    buf = bytearray(raw.ljust(i + 1, b"\x00"))
+    buf[i] |= mask
+    return bytes(buf)
+
+
+def portlist_clear_bit(raw: bytes, port: int) -> bytes:
+    """Neue PortList mit geloeschtem Bit fuer `port`, alle anderen Bits und die Laenge unveraendert (zu kurzes `raw` wie bei set verlaengert)."""
+    i, mask = _portlist_pos(port)
+    buf = bytearray(raw.ljust(i + 1, b"\x00"))
+    buf[i] &= 0xFF ^ mask
+    return bytes(buf)
+
+
+def portlist_to_hex(raw: bytes) -> str:
+    """PortList als Hex ohne Trennzeichen in Grossbuchstaben (ein Token, z. B. als Wert vom Typ `x` bei snmpset)."""
+    return raw.hex().upper()
+
+
 def fmt_mac(raw: bytes) -> str:
     return ":".join(f"{x:02x}" for x in raw[:6])
