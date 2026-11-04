@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SwitchView</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <div class="login-card">
+    <div class="brand big"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><path d="M6 6.5h.01M10 6.5h.01M6 17.5h.01M10 17.5h.01"/></svg>SwitchView</div>
+    <p class="muted">Switches, Ports und VLANs im Blick.</p>
+    <button id="btn-sso" class="btn primary wide" type="button" hidden>Mit Microsoft anmelden</button>
+    <form id="form-local" class="stack" hidden>
+      <div class="sep" id="sep-local" hidden><span>oder</span></div>
+      <label class="field"><span>Benutzer</span><input id="l-user" autocomplete="username" required></label>
+      <label class="field"><span>Kennwort</span><input id="l-pass" type="password" autocomplete="current-password" required></label>
+      <button class="btn wide" type="submit">Anmelden</button>
+    </form>
+    <p class="error" id="login-error" role="alert" hidden></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header class="bar">
+    <div class="bar-in">
+      <div class="brand"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><path d="M6 6.5h.01M10 6.5h.01M6 17.5h.01M10 17.5h.01"/></svg>SwitchView</div>
+      <nav class="tabs" aria-label="Bereiche">
+        <button type="button" data-view="overview" aria-current="page">Übersicht</button>
+        <button type="button" data-view="switches">Switches</button>
+        <button type="button" data-view="vlans">VLANs</button>
+        <button type="button" data-view="devices">Geräte</button>
+        <button type="button" data-view="backups">Sicherungen</button>
+        <button type="button" data-view="audit">Protokoll</button>
+        <button type="button" data-view="settings">Einstellungen</button>
+      </nav>
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" type="search" autocomplete="off" placeholder="Gerät, IP, MAC, Port …" aria-label="Netz durchsuchen">
+        <div class="results" id="results" hidden></div>
+      </div>
+      <div class="user"><span id="user-name" class="muted"></span><button type="button" class="btn ghost small" id="btn-logout">Abmelden</button></div>
+    </div>
+  </header>
+  <main class="wrap" id="view"></main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="dr-title" role="dialog">
+  <div class="dr-h">
+    <div><h3 id="dr-title"></h3><div class="sub" id="dr-sub"></div></div>
+    <button class="icon-btn" id="dr-x" type="button" aria-label="Schließen"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </div>
+  <div id="dr-body"></div>
+</aside>
+<div class="modal-wrap" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+    <div class="m-h"><h3 id="m-title"></h3><button class="icon-btn" type="button" data-close aria-label="Schließen"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="m-b" id="m-body"></div>
+    <div class="m-f" id="m-foot"></div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/msal-browser.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

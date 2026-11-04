@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+aiosqlite==0.20.0
+cryptography==44.0.0
+apscheduler==3.10.4
+httpx==0.28.1
+PyJWT[crypto]==2.10.1
+netmiko[par4]==4.8.0
