@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 import auth
 import cfgparse
 import changes
+import drivers
 import names as names_mod
 import pf
 import poller
@@ -176,6 +177,8 @@ NAME_RE = r"^[\w .\-+()/]{1,64}$"
 
 
 class SwitchIn(BaseModel):
+    """Body von POST und PUT /api/switches. Geheimnisse (SECRET_FIELDS): None = unveraendert, "" = loeschen. Die Felder in
+    UPDATE_IF_SENT aendert ein PUT nur, wenn er sie mitschickt."""
     name: str = Field(pattern=NAME_RE)
     host: str = Field(max_length=64)
     zone: str = Field(default="", max_length=40)
@@ -190,27 +193,83 @@ class SwitchIn(BaseModel):
     snmp_priv_pass: str | None = Field(default=None, max_length=128)
     ssh_user: str | None = Field(default=None, max_length=64)
     ssh_pass: str | None = Field(default=None, max_length=128)
+    # Treiber und SNMP-Schreibweg. Die eigene Schreib-Identitaet snmp_rw_* gilt nur mit snmp_write; welche Identitaet schreibt,
+    # entscheidet allein poller.write_identity.
+    driver: str = Field(default="procurve", max_length=32)
+    snmp_write: bool = False
+    snmp_rw_community: str | None = Field(default=None, max_length=64)
+    snmp_rw_user: str | None = Field(default=None, max_length=64)
+    snmp_rw_auth_proto: str | None = None
+    snmp_rw_auth_pass: str | None = Field(default=None, max_length=128)
+    snmp_rw_priv_proto: str | None = None
+    snmp_rw_priv_pass: str | None = Field(default=None, max_length=128)
 
 
-SECRET_FIELDS = ("snmp_community", "snmp_auth_pass", "snmp_priv_pass", "ssh_pass")
+# Alle Geheimnis-Spalten von switches: verschluesselt abgelegt, nie ausgeliefert (nur als *_set), im Audit beim Namen genannt.
+SECRET_FIELDS = ("snmp_community", "snmp_auth_pass", "snmp_priv_pass", "ssh_pass", "snmp_rw_community", "snmp_rw_auth_pass",
+                 "snmp_rw_priv_pass")
+# Felder, die erst mit dem SNMP-Schreibweg kamen: ein PUT ohne sie laesst sie stehen. Das Switch-Formular von vorher kennt sie nicht und
+# setzte sonst bei jedem Speichern den Treiber auf procurve zurueck, schaltete SNMP-Schreiben ab und loeschte den RW-Benutzer (der
+# Schreibweg fiele damit still auf die Lese-Identitaet zurueck). Mitgeschickt gilt wie bei den alten Feldern: null bzw. "" = leer.
+UPDATE_IF_SENT = ("driver", "snmp_write", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto")
+# Was GET /api/switches von einer Zeile ausliefert, als ALLOWLIST: eine neue Spalte erscheint erst, wenn sie hier steht. Geheimnisse
+# (SECRET_FIELDS) stehen nie hier, von ihnen liefert _public nur das *_set-Flag.
+PUBLIC_FIELDS = ("id", "name", "host", "zone", "sort", "enabled", "snmp_version", "snmp_user", "snmp_auth_proto", "snmp_priv_proto",
+                 "ssh_user", "sys_name", "sys_descr", "model", "firmware", "base_mac", "uptime", "last_poll", "last_poll_ok", "last_error",
+                 "created_at", "driver", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto")
+# Hostname: das erste Zeichen kein "-" (und kein "."). net-snmp bekommt den Host als eigenes Argument und laese "-..." als Option.
+HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,63}")
 
 
 def _validate(body: SwitchIn):
     try:
         ipaddress.ip_address(body.host)
     except ValueError:
-        if not re.fullmatch(r"[A-Za-z0-9.\-]{1,64}", body.host):
+        if not HOST_RE.fullmatch(body.host):
             raise HTTPException(422, "Adresse ist weder IP noch gültiger Hostname")
-    if body.snmp_auth_proto and body.snmp_auth_proto not in snmp.AUTH_PROTOS:
-        raise HTTPException(422, "Unbekanntes SNMP-Auth-Verfahren")
-    if body.snmp_priv_proto and body.snmp_priv_proto not in snmp.PRIV_PROTOS:
-        raise HTTPException(422, "Unbekanntes SNMP-Verschlüsselungsverfahren")
+    if body.driver not in drivers.DRIVERS:
+        raise HTTPException(422, "Unbekannter Treiber")
+    for proto in (body.snmp_auth_proto, body.snmp_rw_auth_proto):
+        if proto and proto not in snmp.AUTH_PROTOS:
+            raise HTTPException(422, "Unbekanntes SNMP-Auth-Verfahren")
+    for proto in (body.snmp_priv_proto, body.snmp_rw_priv_proto):
+        if proto and proto not in snmp.PRIV_PROTOS:
+            raise HTTPException(422, "Unbekanntes SNMP-Verschlüsselungsverfahren")
+
+
+def _columns(body: SwitchIn, update: bool) -> dict:
+    """Die Spalten ohne Geheimnisse, wie POST (alle) und PUT (UPDATE_IF_SENT nur, wenn mitgeschickt) sie schreiben."""
+    cols = {"name": body.name, "host": body.host, "zone": body.zone, "sort": body.sort, "enabled": int(body.enabled),
+            "snmp_version": body.snmp_version, "snmp_user": body.snmp_user or None, "snmp_auth_proto": body.snmp_auth_proto or None,
+            "snmp_priv_proto": body.snmp_priv_proto or None, "ssh_user": body.ssh_user or None, "driver": body.driver,
+            "snmp_write": int(body.snmp_write), "snmp_rw_user": body.snmp_rw_user or None,
+            "snmp_rw_auth_proto": body.snmp_rw_auth_proto or None, "snmp_rw_priv_proto": body.snmp_rw_priv_proto or None}
+    if update:
+        for k in UPDATE_IF_SENT:
+            if k not in body.model_fields_set:
+                del cols[k]
+    return cols
+
+
+def _write_info(row) -> dict:
+    """Mit welcher Identitaet SNMP-SETs an diesen Switch gingen, ohne ein Geheimnis, aus poller.write_identity: snmp_write_via "rw"
+    (die eigene RW-Identitaet) oder "read" (die Lese-Identitaet, sie muss am Geraet schreiben duerfen), sonst None und der Grund in
+    snmp_write_error; snmp_rw_insecure, wenn der SET faelschbar hinausginge (v2c-Community im Klartext, v3 ohne Authentifizierung)."""
+    try:
+        via, cred = poller.write_identity(row)
+    except snmp.SnmpError as e:
+        return {"snmp_write_via": None, "snmp_write_error": str(e), "snmp_rw_insecure": False}
+    insecure = cred["snmp_version"] != "3" or not (cred["snmp_auth_proto"] and cred["snmp_auth_pass"])
+    return {"snmp_write_via": via, "snmp_write_error": None, "snmp_rw_insecure": insecure}
 
 
 def _public(row) -> dict:
-    d = {k: row[k] for k in row.keys() if k not in SECRET_FIELDS}
+    d = {k: row[k] for k in PUBLIC_FIELDS}
+    d["snmp_write"] = bool(row["snmp_write"])
+    d["caps"] = sorted(drivers.driver_for(row).caps)
     for k in SECRET_FIELDS:
         d[k + "_set"] = bool(row[k])
+    d.update(_write_info(row))
     return d
 
 
@@ -225,14 +284,11 @@ async def list_switches(user=Depends(auth.current_user)):
 @app.post("/api/switches")
 async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
     _validate(body)
+    fields = _columns(body, update=False) | {k: encrypt(getattr(body, k)) for k in SECRET_FIELDS}
     async with db() as conn:
         try:
-            cur = await conn.execute(
-                "INSERT INTO switches(name, host, zone, sort, enabled, snmp_version, snmp_community, snmp_user, snmp_auth_proto, snmp_auth_pass, "
-                "snmp_priv_proto, snmp_priv_pass, ssh_user, ssh_pass) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (body.name, body.host, body.zone, body.sort, int(body.enabled), body.snmp_version, encrypt(body.snmp_community),
-                 body.snmp_user or None, body.snmp_auth_proto or None, encrypt(body.snmp_auth_pass), body.snmp_priv_proto or None,
-                 encrypt(body.snmp_priv_pass), body.ssh_user or None, encrypt(body.ssh_pass)))
+            cur = await conn.execute(f"INSERT INTO switches({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
+                                     tuple(fields.values()))
         except Exception as e:  # noqa: BLE001
             if "UNIQUE" in str(e):
                 raise HTTPException(409, "Ein Switch mit dieser Adresse existiert bereits")
@@ -246,9 +302,7 @@ async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
 @app.put("/api/switches/{sid}")
 async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user)):
     _validate(body)
-    fields = {"name": body.name, "host": body.host, "zone": body.zone, "sort": body.sort, "enabled": int(body.enabled),
-              "snmp_version": body.snmp_version, "snmp_user": body.snmp_user or None, "snmp_auth_proto": body.snmp_auth_proto or None,
-              "snmp_priv_proto": body.snmp_priv_proto or None, "ssh_user": body.ssh_user or None}
+    fields = _columns(body, update=True)
     # Geheimnisse nur ueberschreiben, wenn ein neuer Wert mitkommt ("" = loeschen)
     for k in SECRET_FIELDS:
         v = getattr(body, k)
@@ -794,7 +848,8 @@ async def build_map() -> dict:
         switches.append({"k": s["name"], "id": s["id"], "sys": s["sys_name"] or "", "model": s["model"] or "", "fw": s["firmware"] or "",
                          "zone": s["zone"] or "", "host": s["host"], "lastPoll": s["last_poll"], "ok": bool(s["last_poll_ok"]),
                          "error": s["last_error"] or "", "baseMac": s["base_mac"] or "", "ports": ports_by.get(s["id"], []),
-                         "ssh": bool(s["ssh_user"] and s["ssh_pass"]), "cfgAt": cfgs.get(s["id"], (None, None))[0],
+                         "ssh": bool(s["ssh_user"] and s["ssh_pass"]), "driver": s["driver"], "caps": sorted(drivers.driver_for(s).caps),
+                         "snmp_write": bool(s["snmp_write"]), "cfgAt": cfgs.get(s["id"], (None, None))[0],
                          "ready": changes.readiness(cfgs[s["id"]][1], server or None) if s["id"] in cfgs else None,
                          "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], [])})
     links = _links(switches, all_macs)

@@ -54,7 +54,18 @@ LAG_NAME = re.compile(r"(?:Po|Port-channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk
 _locks: dict[int, asyncio.Lock] = {}
 
 
-def creds_of(row) -> dict:
+WRITE_DISABLED = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
+NO_WRITE_CREDS = "Keine SNMP-Schreib-Zugangsdaten hinterlegt"
+
+
+def creds_of(row, write: bool = False) -> dict:
+    """Die SNMP-Identitaet einer switches-Zeile als cred fuer snmp.walk / get / set_vars (Schluessel, wie snmp._auth_args sie liest).
+
+    write=False: die Lese-Identitaet (snmp_version, snmp_community bzw. snmp_user ...), unveraendert wie seit jeher.
+    write=True: die Schreib-Identitaet fuer SNMP-SETs, oder snmp.SnmpError mit dem Grund; Regel und Gruende siehe write_identity.
+    """
+    if write:
+        return write_identity(row)[1]
     return {
         "snmp_version": row["snmp_version"],
         "snmp_community": decrypt(row["snmp_community"]),
@@ -64,6 +75,66 @@ def creds_of(row) -> dict:
         "snmp_priv_proto": row["snmp_priv_proto"],
         "snmp_priv_pass": decrypt(row["snmp_priv_pass"]),
     }
+
+
+def write_identity(row) -> tuple[str, dict]:
+    """Mit welcher Identitaet SNMP-SETs an diesen Switch gehen: ("rw" | "read", cred). Die EINE Stelle, die das entscheidet
+    (creds_of(row, write=True) ist ihr cred, die Anzeige in main._public ihre Quelle). Read-only-Zugangsdaten werden nie still
+    schreibfaehig, darum snmp.SnmpError mit dem Grund statt eines Ersatzes:
+
+    1. snmp_write aus: Fehler, auch wenn Schreib-Zugangsdaten hinterlegt sind.
+    2. eine eigene RW-Identitaet ("rw"): der v3-Benutzer snmp_rw_user mit snmp_rw_auth_* / snmp_rw_priv_*, sonst die v2c-Community
+       snmp_rw_community. Der v3-Benutzer gewinnt, wenn beide gesetzt sind (die Community bleibt dann ungelesen).
+    3. sonst die Lese-Identitaet ("read", muss am Geraet schreiben duerfen), nach snmp_version und nur eine echte: v3 mit Benutzer,
+       v2c mit nicht leerer Community. Aus einer leeren Community machte snmp._auth_args "public".
+    4. sonst Fehler: keine Schreib-Zugangsdaten.
+    Ein Geheimnis der gewaehlten Identitaet, das sich nicht entschluesseln laesst, und ein v3-Kennwort, das _auth_args nicht verwenden
+    wuerde, sind ebenfalls Fehler: sonst ginge der SET still mit einer anderen Identitaet oder einer schwaecheren Stufe hinaus. Ein
+    Protokoll ohne Kennwort ist dagegen kein Fehler (das Switch-Formular schickt die Protokoll-Auswahl immer mit), es heisst: unbenutzt.
+    """
+    if not row["snmp_write"]:
+        raise snmp.SnmpError(WRITE_DISABLED)
+    if row["snmp_rw_user"]:
+        return "rw", _write_v3(row, "snmp_rw_")
+    if row["snmp_rw_community"]:
+        return "rw", _write_v2c(row, "snmp_rw_community")
+    if row["snmp_version"] == "3":
+        if row["snmp_user"]:
+            return "read", _write_v3(row, "snmp_")
+    elif row["snmp_community"]:
+        return "read", _write_v2c(row, "snmp_community")
+    raise snmp.SnmpError(NO_WRITE_CREDS)
+
+
+def _write_secret(row, key: str) -> str | None:
+    """Das Geheimnis row[key] im Klartext fuer die Schreib-Identitaet, None wenn keins gespeichert ist. Ein gespeichertes, das sich nicht
+    entschluesseln laesst (decrypt gibt dann None), ist ein Fehler und nie "nicht gesetzt"."""
+    if not row[key]:
+        return None
+    value = decrypt(row[key])
+    if not value:
+        raise snmp.SnmpError(f"SNMP-Schreib-Zugangsdaten nicht lesbar: {key} lässt sich nicht entschlüsseln (SECRET_KEY geändert?)")
+    return value
+
+
+def _write_v2c(row, key: str) -> dict:
+    """v2c mit der Community row[key]; nur fuer einen gesetzten key, also nie leer und nie "public" per Vorgabe."""
+    return {"snmp_version": "2c", "snmp_community": _write_secret(row, key), "snmp_user": None, "snmp_auth_proto": None,
+            "snmp_auth_pass": None, "snmp_priv_proto": None, "snmp_priv_pass": None}
+
+
+def _write_v3(row, prefix: str) -> dict:
+    """v3 mit dem Benutzer row[prefix + "user"] und dessen auth/priv-Spalten (prefix "snmp_rw_" oder "snmp_"). Stufe wie snmp._auth_args:
+    authPriv mit beiden Paaren, authNoPriv mit Auth-Paar, sonst noAuthNoPriv."""
+    ap, apass = row[prefix + "auth_proto"], _write_secret(row, prefix + "auth_pass")
+    pp, ppass = row[prefix + "priv_proto"], _write_secret(row, prefix + "priv_pass")
+    auth = bool(ap and apass)
+    if apass and not auth:
+        raise snmp.SnmpError("SNMPv3-Schreib-Zugang unvollständig: Auth-Kennwort ohne Auth-Verfahren")
+    if ppass and not (auth and pp):
+        raise snmp.SnmpError("SNMPv3-Schreib-Zugang unvollständig: Priv-Kennwort ohne Verschlüsselungsverfahren oder ohne Authentifizierung")
+    return {"snmp_version": "3", "snmp_community": None, "snmp_user": row[prefix + "user"], "snmp_auth_proto": ap, "snmp_auth_pass": apass,
+            "snmp_priv_proto": pp, "snmp_priv_pass": ppass}
 
 
 def parse_descr(descr: str) -> tuple[str, str]:
