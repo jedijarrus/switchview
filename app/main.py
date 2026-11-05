@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 import auth
+import bodylimit
 import cfgparse
 import changes
 import drivers
@@ -28,6 +28,7 @@ import poller
 import snmp
 import snmpwrite
 import sshcli
+import throttle
 from config import settings
 from crypto import encrypt
 from db import audit, db, get_setting, init_db, set_setting
@@ -39,7 +40,7 @@ scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
 
 # ── Single-Worker-Invariante ──────────────────────────────────────────────────
 # SwitchView laeuft mit genau EINEM uvicorn-Worker (kein --workers, kein WEB_CONCURRENCY). Der Zustand liegt im Prozess:
-# Scheduler, Login-Ratelimit (_login_hits), laufende Aenderungs-Tasks (_tasks) und die Locks je Switch fuer SSH
+# Scheduler, Login-Ratelimit (_LOGIN), laufende Aenderungs-Tasks (_tasks) und die Locks je Switch fuer SSH
 # (sshcli._locks) und Abfrage (poller._locks). Mehrere Worker haetten je ihren eigenen Satz: Jobs liefen mehrfach, das
 # Ratelimit gaelte je Prozess, zwei Worker koennten gleichzeitig per SSH am selben Switch arbeiten (max. 5 Sessions),
 # und der Start (lifespan) markiert die laufende Aenderung eines anderen Workers als abgebrochen.
@@ -69,6 +70,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SwitchView", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+# Added before the security_headers decorator below, so that one wraps it and the 413 carries the same headers as every answer.
+app.add_middleware(bodylimit.BodyLimit)
 
 
 @app.middleware("http")
@@ -97,22 +100,16 @@ async def static(name: str):
 
 
 # ── Anmeldung ─────────────────────────────────────────────────────────────────
-_login_hits: dict[str, list[float]] = defaultdict(list)
+# Failed emergency logins count per identity (F1), never per client address: an address is forged with X-Forwarded-For or shared
+# behind a proxy. Every attempt without a valid device cookie shares the key "local"; a browser in which the emergency login succeeded
+# once carries a device cookie (auth.device_token) and counts under its own key, so an attacker hammering "local" cannot lock it out.
+# SSO is not throttled: an id_token cannot be guessed, and auth bounds what a bad one costs (JWKS reloads).
+_LOGIN = throttle.LoginThrottle()
 
 
-def _rate_limit(request: Request):
-    ip = request.client.host if request.client else "?"
-    now = time.time()
-    hits = [t for t in _login_hits[ip] if now - t < 60]
-    if len(hits) >= 10:
-        raise HTTPException(429, "Zu viele Anmeldeversuche, bitte eine Minute warten")
-    hits.append(now)
-    _login_hits[ip] = hits
-
-
-def _set_cookie(resp: Response, request: Request, token: str):
-    resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", secure=auth.is_https(request),
-                    max_age=settings.session_hours * 3600, path="/")
+def _set_cookie(resp: Response, request: Request, name: str, value: str, max_age: int):
+    """The one place that sets a cookie of SwitchView: httponly, SameSite=Lax, path /, Secure for https."""
+    resp.set_cookie(name, value, httponly=True, samesite="lax", secure=auth.is_https(request), max_age=max_age, path="/")
 
 
 @app.get("/api/auth/config")
@@ -128,12 +125,17 @@ class LocalLogin(BaseModel):
 
 @app.post("/api/auth/local")
 async def login_local(body: LocalLogin, request: Request, response: Response):
-    _rate_limit(request)
+    dev = auth.device_id(request.cookies.get(auth.DEVICE_COOKIE), body.username)
+    keys = [f"dev:{dev}"] if dev else ["local"]
+    if _LOGIN.blocked(keys):
+        raise HTTPException(429, "Zu viele Anmeldeversuche, bitte eine Minute warten")
     if not auth.check_local(body.username, body.password):
+        _LOGIN.fail(keys)
         await audit(body.username, "login_failed", "local")
         raise HTTPException(401, "Benutzername oder Kennwort falsch")
     token = await auth.create_session(body.username, body.username, "local")
-    _set_cookie(response, request, token)
+    _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
+    _set_cookie(response, request, auth.DEVICE_COOKIE, auth.device_token(body.username), auth.DEVICE_DAYS * 86400)
     await audit(body.username, "login", "local")
     return {"ok": True}
 
@@ -144,11 +146,10 @@ class AzureLogin(BaseModel):
 
 @app.post("/api/auth/azure")
 async def login_azure(body: AzureLogin, request: Request, response: Response):
-    _rate_limit(request)
     if not settings.sso_active:
         raise HTTPException(400, "SSO ist nicht eingerichtet")
-    try:
-        claims = auth.verify_id_token(body.id_token)
+    try:  # in a thread: a JWKS fetch from Microsoft blocks
+        claims = await asyncio.to_thread(auth.verify_id_token, body.id_token)
     except PermissionError as e:
         raise HTTPException(403, str(e))
     except Exception:  # noqa: BLE001
@@ -156,7 +157,7 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
         raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
     user = claims.get("preferred_username") or claims.get("upn") or claims.get("email") or claims["sub"]
     token = await auth.create_session(user, claims.get("name") or user, "entra")
-    _set_cookie(response, request, token)
+    _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
     await audit(user, "login", "entra")
     return {"ok": True}
 

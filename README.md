@@ -79,8 +79,20 @@ docker compose up -d --build
 ```
 
 SwitchView listens on port 8080 (see `docker-compose.yml`). Data (SQLite) lives in `./data`.
-Run it behind a TLS-terminating reverse proxy in production (`X-Forwarded-Proto` is honoured).
-Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, login rate limit, per-switch SSH/poll locks and running changes live in process memory.
+Run it behind a TLS-terminating reverse proxy in production, and set `FORWARDED_ALLOW_IPS` in `.env` to the proxy's address as the
+container sees it (comma-separated addresses or networks, e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container
+of the compose network): only that sender may set `X-Forwarded-For` and `X-Forwarded-Proto`. To find the address, open SwitchView
+through the proxy and look at the uvicorn access log (`docker compose logs switchview`): before the variable is set, every request
+shows the proxy as its client (for a proxy on the Docker host usually the gateway of the compose network). Without the variable
+uvicorn trusts proxy headers only from 127.0.0.1, which inside the container is nobody else: SwitchView works the same, but the log
+shows the proxy's address for every client.
+
+The emergency login (`ADMIN_USER` / `ADMIN_PASSWORD`) is throttled: after 10 failed attempts within 60 seconds from browsers
+without a device cookie, it refuses such browsers (HTTP 429) until those failures are older than 60 seconds. A browser in which the
+emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out. Entra SSO is
+never throttled.
+
+Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, the login throttle (`main._LOGIN`), per-switch SSH/poll locks and running changes live in process memory.
 
 Then add switches in the UI (management IP, driver, SNMP credentials, for ProCurve an optional SSH manager account, optional SNMP write access). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again.
 
