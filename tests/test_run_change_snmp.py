@@ -38,8 +38,8 @@ import snmp
 import snmpwrite
 import sshcli
 from drivers import Driver
-from switchfix import (CATALYST_VMVLAN, HOST, IF_ALIAS, IFTYPE_SAMPLE, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_SAMPLE,
-                       WALK_BASES, agent, edit_walks, store)
+from switchfix import (CATALYST_VMVLAN, HOST, IF_ADMIN, IF_ALIAS, IFTYPE_SAMPLE, POE_ADMIN, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN,
+                       W_CATALYST, W_CATALYST_POE, W_SAMPLE, WALK_BASES, agent, edit_walks, store)
 
 USER = "tester"
 FW = "WB.16.99.0001"
@@ -930,6 +930,56 @@ async def test_snmp_change_already_in_place_aborts(env):
     ch = await run(env, cid)
     assert (ch["status"], ch["error"]) == ("aborted", NOTHING)
     assert env.agent.sets == []
+
+
+# ── M1: Cisco access ports outside VLAN 1 (BRIDGE-MIB per VLAN context) ──────────────────────────────────────────────────────────────
+# Classic IOS serves BRIDGE-MIB per VLAN (community@vlan, v3 context vlan-N): in the default context dot1dBasePortIfIndex lists only the
+# VLAN-1 ports. The Catalyst with PoE so: Gi1/0/1 (ifIndex 10101) an access port in VLAN 20 (vmVlan) and so no bridge port, "Drucker",
+# PoE entry 1.1 on; Gi1/0/2 (10102) an access port in VLAN 1, bridge port 2; Po1 = Gi1/0/3 + Gi1/0/4 (bridge port 56).
+CISCO_CONTEXT = agent(edit_walks({**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}, bp2if={"1": None}, vmVlan={"10101": "20"}))
+NO_BRIDGE_PORT = "kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige"
+
+
+async def test_cisco_access_port_without_a_bridge_port_is_written_and_verified(env):
+    """R45: on cisco_vmps a port with a vmVlan row is a switchport even without a bridge port in the default context: its access VLAN
+    (vmVlan), on / off (ifAdminStatus), name (ifAlias) and PoE are planned, written in ONE SET by ifIndex / PoE entry and verified."""
+    sid = await env.switch("cisco", CISCO_CONTEXT)
+    payload = {"ports": ["Gi1/0/1"], "change": {"untagged": "10", "status": "off", "name": "Drucker-2", "poe": False}}
+    cid, plan = await apply(sid, payload)
+    assert plan["shown"] == ["Port Gi1/0/1: Access-VLAN 20 → 10", "Port Gi1/0/1: an → aus", 'Port Gi1/0/1: Name "Drucker" → "Drucker-2"',
+                             "Port Gi1/0/1: PoE an → aus"]
+    assert plan["ops"] == [(f"{VMVLAN}.10101", "i", "10"), (f"{IF_ADMIN}.10101", "i", "2"), (f"{IF_ALIAS}.10101", "x", "447275636B65722D32"),
+                           (f"{POE_ADMIN}.1.1", "i", "2")]
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"], ch["error"], steps(ch)[-1]) == ("ok", 0, None, (UNSAVED, "warn"))
+    st = read(env.agent.W, "cisco")[0]["ports"]["Gi1/0/1"]
+    assert (st["u"], st["en"], st["name"], st["poe"]) == ("10", False, "Drucker-2", False)
+    assert env.ssh == []
+
+
+async def test_cisco_access_port_that_leaves_the_default_context_verifies(env):
+    """Gi1/0/2 moves from VLAN 1 to 20 through vmVlan; right after the SET the default context no longer lists it as a bridge port (it
+    is no VLAN-1 port any more). The SET used no bridge port, so the read-back without one is no mismatch: ok."""
+    sid = await env.switch("cisco", CISCO_CONTEXT)
+    cid, plan = await apply(sid, {"ports": ["Gi1/0/2"], "change": {"untagged": "20"}})
+    assert plan["ops"] == [(f"{VMVLAN}.10102", "i", "20")]
+    env.agent.after_set = lambda W: edit_walks(W, bp2if={"2": None})
+    ch = await run(env, cid)
+    assert "Gi1/0/2" not in read(env.agent.W, "cisco")[1]["port2bp"]
+    assert (ch["status"], ch["error"]) == ("ok", None)
+
+
+@pytest.mark.parametrize("port, change", [
+    ("Gi1/0/2", {"status": "off"}),                  # no vmVlan row (a trunk port) and no bridge port: display only, as before
+    ("Gi1/0/2", {"name": "x"}),
+    ("Gi1/0/2", {"untagged": "20"}),
+    ("Gi1/0/1", {"tagged_add": ["10"]}),             # a Q-BRIDGE field still needs a bridge port
+])
+async def test_cisco_port_without_a_bridge_port_stays_refused_otherwise(env, port, change):
+    """Gi1/0/2 here: up, no vmVlan row, no bridge port."""
+    sid = await env.switch("cisco", edit_walks(CISCO_CONTEXT, bp2if={"2": None}, vmVlan={"10102": None}, ifAdmin={"10102": "1"}))
+    plan, _, _, _ = await main._make_plan(await switch_row(sid), main.PlanIn(ports=[port], change=main.PortChange(**change)))
+    assert (plan["blocked"], plan["ops"]) == ([{"port": port, "reason": NO_BRIDGE_PORT}], [])
 
 
 # ── Never SSH on the SNMP path ────────────────────────────────────────────────────────────────────────────────────────────────────

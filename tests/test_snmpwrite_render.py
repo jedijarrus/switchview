@@ -833,7 +833,9 @@ def _must_refuse(driver, cfg: dict, raw: dict, desired: dict) -> bool:
             continue
         if p not in cfg["ports"] or set(d) - {"u", "pvid", "t", "en", "name"}:
             return True
-        if p in raw["unmanaged"] or p in members or p not in raw["port2bp"] or p not in raw["ifindex"]:
+        # R45: on cisco_vmps a port with a vmVlan row needs no bridge port, unless the request has a Q-BRIDGE field (t, pvid)
+        switchport = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"] and not {"t", "pvid"} & set(d)
+        if p in raw["unmanaged"] or p in members or (p not in raw["port2bp"] and not switchport) or p not in raw["ifindex"]:
             return True
         if "name" in d and _bad_name(d["name"]):
             return True
@@ -875,7 +877,8 @@ def _random_desired(rng: random.Random, cfg: dict, raw: dict, driver) -> dict:
     vids, desired = list(cfg["vlans"]), {}
     missing = next(str(v) for v in range(1, 4095) if str(v) not in cfg["vlans"])    # a VLAN ID, but no VLAN of this switch
     members = {m for ms in cfg["trunks"].values() for m in ms}
-    writable = [p for p in cfg["ports"] if p not in raw["unmanaged"] and p not in members and p in raw["port2bp"]]
+    switchport = {p for p in raw["vmvlan"] if driver.vlan_strategy == "cisco_vmps"}    # R45: no bridge port needed (clean: no t / pvid)
+    writable = [p for p in cfg["ports"] if p not in raw["unmanaged"] and p not in members and (p in raw["port2bp"] or p in switchport)]
     clean = bool(writable) and rng.random() < 0.7
     qbridge = driver.vlan_strategy == "qbridge"
     pool = writable if clean else list(cfg["ports"])
@@ -962,7 +965,7 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
     reaching what matters."""
     rng = random.Random(8)
     seen: dict[str, int] = dict.fromkeys(("rendered", "refused", "drifted", "shared PortList", "trunk VLANs", "u -> None",
-                                          "tagged -> untagged", "vmVlan", "explicit pvid"), 0)
+                                          "tagged -> untagged", "vmVlan", "explicit pvid", "no bridge port"), 0)
     for case in range(1500):
         W, driver, selection = _random_switch(rng)
         cfg, raw = _read(W, selection)
@@ -993,9 +996,10 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             ("tagged -> untagged", any(k == "u" and desired[p]["u"] in cfg["ports"][p]["t"] for p, k in changed)),
             ("vmVlan", any(oid.startswith(VMVLAN + ".") for oid, _, _ in ops)),
             ("explicit pvid", any(k == "pvid" for _, k in changed)),
+            ("no bridge port", any(p not in raw["port2bp"] for p, _ in changed)),    # R45: a cisco vmVlan port, written all the same
         ):
             seen[key] += hit
-        own = {raw["port2bp"][p] for p, d in desired.items() if d}
+        own = {raw["port2bp"][p] for p, d in desired.items() if d and p in raw["port2bp"]}
         lists = [(key, v, bp) for key, kind in (("vlanEgress", "egress"), ("vlanUntagged", "untagged")) for v in raw[kind]
                  for bp in range(1, 8 * len(raw[kind][v]) + 1) if bp not in own]
         if lists:
@@ -1004,3 +1008,4 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             seen["drifted"] += 1
     assert min(seen["rendered"], seen["drifted"]) > 800 and seen["refused"] > 400, seen
     assert min(seen[k] for k in ("shared PortList", "trunk VLANs", "u -> None", "tagged -> untagged", "vmVlan", "explicit pvid")) > 50, seen
+    assert seen["no bridge port"] > 10, seen
