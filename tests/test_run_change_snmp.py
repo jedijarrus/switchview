@@ -932,6 +932,35 @@ async def test_snmp_change_already_in_place_aborts(env):
     assert env.agent.sets == []
 
 
+# ── R41: unmanaged ports take en / name ───────────────────────────────────────────────────────────────────────────────────────────────
+# The sample ProCurve with an unmanaged port: R12 port 2 (bridge port 1, untagged 99) with PVID 1; R9 port 3 (bridge port 2) untagged in
+# VLAN 1 and 20 (a hybrid port).
+R12_VIEW = edit_walks(VIEWS["procurve"], pvid={"1": "1"})
+R9_VIEW = edit_walks(VIEWS["procurve"], vlanEgress={"1": pl("4A")}, vlanUntagged={"1": pl("4A"), "20": pl("60")})
+
+
+@pytest.mark.parametrize("W, port, reason", [(R12_VIEW, "2", R12_PORT2), (R9_VIEW, "3", HYBRID_1_20)], ids=["R12", "R9"])
+async def test_unmanaged_port_off_on_and_name_round_trip(env, W, port, reason):
+    """R41 end to end (ProCurve without SSH, so over SNMP): an unmanaged port is switched off, on again ("on", R43) and named; each
+    change is written, verified ok although the port reads as unmanaged before and after (that counts only for a VLAN change), and
+    the revert of the name restores the name alone. u / t changes stay refused with the unmanaged reason."""
+    sid = await env.switch("procurve", W)
+    for change, shown in (({"status": "off"}, "an → aus"), ({"status": "on"}, "aus → an"), ({"name": "Telefon"}, 'Name "" → "Telefon"')):
+        cid, plan = await apply(sid, {"ports": [port], "change": change})
+        assert (plan["shown"], plan["blocked"]) == ([f"Port {port}: {shown}"], [])
+        ch = await run(env, cid)
+        assert (ch["status"], ch["saved"], ch["error"]) == ("ok", 1, None), ch["steps"]
+    assert read(env.agent.W, "procurve")[1]["unmanaged"] == {port: reason}
+    rid, plan = await apply(sid, {"mode": "revert", "of": cid})
+    assert (plan["desired"], plan["before"]) == ({port: {"name": ""}}, {port: {"name": "Telefon"}})
+    assert (await run(env, rid))["status"] == "ok"
+    assert env.agent.W == W
+    for change in ({"untagged": "20"}, {"tagged_add": ["99"]}):
+        plan, _, _, _ = await main._make_plan(await switch_row(sid), main.PlanIn(ports=[port], change=main.PortChange(**change)))
+        assert plan["blocked"] == [{"port": port, "reason": reason}]
+    assert env.ssh == []
+
+
 # ── R43: status "on" ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async def test_procurve_without_ssh_switches_a_port_off_and_on_again_over_snmp(env):
     """R43: on a ProCurve without SSH a port switched off over SNMP comes back on with "on" (before it, only "Protected" re-enabled a
@@ -1247,6 +1276,15 @@ CISCO = drivers.DRIVERS["cisco"]
     pytest.param(GENERIC, {}, {"9": {"name": ""}}, {"2": {}}, {}, ["Port 9: beim Zurücklesen nicht gefunden"], id="missing"),
     pytest.param(GENERIC, {"3": {"u": "99"}}, {"3": {"u": None, "pvid": "1"}}, {"3": {}}, {"pvid": {"3": "1"}, "unmanaged": {"3": "Grund"}},
                  ["Port 3: nach der Änderung Grund"], id="unmanaged"),
+    pytest.param(GENERIC, {"3": {"t": ["20"]}}, {"3": {"t": ["20", "30"]}}, {"3": {"t": ["20", "30"]}}, {"unmanaged": {"3": "Grund"}},
+                 ["Port 3: nach der Änderung Grund"], id="unmanaged-after-a-t-change"),
+    pytest.param(GENERIC, {"3": {"t": ["20"]}}, {"3": {"pvid": "20"}}, {"3": {"t": ["20"]}}, {"pvid": {"3": "20"}, "unmanaged": {"3": "Grund"}},
+                 ["Port 3: nach der Änderung Grund"], id="unmanaged-after-a-pvid-change"),
+    # R41: en / name / poe never read the VLAN slot, they are checked field by field; an unmanaged port is no mismatch for them
+    pytest.param(GENERIC, {}, {"3": {"en": False, "name": "x"}}, {"3": {"en": False, "name": "x"}}, {"unmanaged": {"3": "Grund"}}, [],
+                 id="unmanaged-after-en-and-name"),
+    pytest.param(GENERIC, {}, {"3": {"en": False}}, {"3": {}}, {"unmanaged": {"3": "Grund"}}, ["Port 3: en ist True, erwartet False"],
+                 id="unmanaged-en-still-verified"),
     pytest.param(GENERIC, {}, {"Gi1/0/10": {"name": ""}, "Gi1/0/2": {"name": ""}}, {}, {},
                  ["Port Gi1/0/2: beim Zurücklesen nicht gefunden", "Port Gi1/0/10: beim Zurücklesen nicht gefunden"], id="natural-order"),
 ])

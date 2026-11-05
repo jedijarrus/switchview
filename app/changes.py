@@ -234,7 +234,9 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
         u_new, t_new = d.get("u", cur["u"]), d.get("t", cur["t"])
         if u_new and u_new in t_new:
             blocked.append({"port": p, "reason": f"VLAN {u_new} kann nicht ungetaggt und getaggt zugleich sein"})
-        if not u_new and not t_new:
+        # Per SNMP nur, wenn sich VLANs aendern (L17): An / Aus, Name und PoE lassen sie, wie sie sind, und bei einem nicht verwaltbaren
+        # Port (snmp_block_reason laesst ihn dafuer zu) ist das leere u nur ein Platzhalter. Per SSH wie bisher immer.
+        if not u_new and not t_new and (not over_snmp or snmpwrite.VLAN_FIELDS & set(d)):
             blocked.append({"port": p, "reason": "Port wäre in keinem VLAN mehr"})
         if (d.get("x") or d.get("m")) or ((x_new or m_new) and ("cl" in d or "al" in d or "xuv" in d or "muv" in d)):
             needs_radius = True
@@ -382,9 +384,10 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
     """Das Pruefen nach einem SNMP-SET, das Gegenstueck zu verify_ports: was im Read-back (cfg_after, raw_after aus snmpwrite.read_cfg)
     nicht so ist, wie die Aenderung desired es aus cfg / raw (dem Read, gegen den sie geplant und gerendert ist) machen will, je eine
     Zeile, Ports in natuerlicher Reihenfolge; leer heisst ok.
-      - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]) oder als nicht verwaltbar fuehrt
-        (raw_after["unmanaged"]), weicht ab: cfg haelt fuer ihn nur Platzhalter (port_state fuellte Vorgaben ein, u ist None), an denen
-        ein Ziel wie "kein ungetaggtes VLAN" oder "Name leer" sonst unbemerkt vorbeikaeme.
+      - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]), weicht ab: cfg haelt fuer ihn nur
+        Platzhalter (port_state fuellte Vorgaben ein), an denen ein Ziel wie "Name leer" sonst unbemerkt vorbeikaeme. Ebenso einer, den
+        er als nicht verwaltbar fuehrt (raw_after["unmanaged"]), wenn sich ein VLAN-Feld aendert (R41): sein u ist nur ein Platzhalter
+        (None), an dem "kein ungetaggtes VLAN" vorbeikaeme. en, name und poe lesen u nie, sie werden einzeln geprueft wie unten.
       - Ebenso einer, der im Read-back ein anderes Interface ist als in raw (M4): ein anderer ifIndex, oder bei Q-BRIDGE fuer eine
         VLAN-Aenderung (die ueber den Bridge-Port geht, PortList-Bits und dot1qPvid) ein anderer Bridge-Port. Dann wurden Interfaces
         zwischen Lesen und Zuruecklesen umnummeriert, das SET kann ein anderes Interface getroffen haben, und was der Read-back unter
@@ -413,7 +416,7 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
         if raw_after["ifindex"][p] != raw["ifindex"].get(p) or (via_bp and raw_after["port2bp"].get(p) != raw["port2bp"].get(p)):
             bad.append(f"Port {p}: Interface-Nummer hat sich geändert")
             continue
-        if p in raw_after["unmanaged"]:
+        if p in raw_after["unmanaged"] and snmpwrite.VLAN_FIELDS & set(d):    # R41: nur die VLAN-Felder lesen den Platzhalter u
             bad.append(f"Port {p}: nach der Änderung {raw_after['unmanaged'][p]}")
             continue
         want = {k: v for k, v in d.items() if k != "pvid"}

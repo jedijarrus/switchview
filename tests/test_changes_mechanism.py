@@ -26,8 +26,8 @@ import cfgparse
 import changes
 import snmpwrite
 from drivers import DRIVERS, Driver
-from switchfix import (CATALYST_VMVLAN, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_CISCO, W_ODD, W_SAMPLE, agent,
-                       edit_walks, store)
+from switchfix import (CATALYST_VMVLAN, IF_ADMIN, IF_ALIAS, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_CISCO, W_ODD,
+                       W_SAMPLE, agent, edit_walks, store)
 
 FW = "K.15.99.0001"
 PROCURVE, CISCO, ARISTA, GENERIC = DRIVERS["procurve"], DRIVERS["cisco"], DRIVERS["arista"], DRIVERS["generic"]
@@ -245,8 +245,9 @@ def test_a_lag_of_another_vendor_is_a_trunk(monkeypatch):
     # snmp_block_reason
     pytest.param(SAMPLE, "procurve", PROCURVE, {"extra": {"7"}}, False, {"7": {"en": False}, "2": {"u": "30"}}, "7",
                  "gibt es auf diesem Switch nicht", id="not-in-the-live-read"),
-    pytest.param(HYBRID, "procurve", PROCURVE, {}, False, {"3": {"name": "x"}, "2": {"u": "30"}}, "3", R_HYBRID, id="unmanaged-hybrid"),
-    pytest.param(PVID_OFF, "procurve", PROCURVE, {}, False, {"1": {"en": False}, "2": {"u": "30"}}, "1",
+    pytest.param(HYBRID, "procurve", PROCURVE, {}, False, {"3": {"t": ["30", "99"]}, "2": {"u": "30"}}, "3", R_HYBRID,
+                 id="unmanaged-hybrid"),
+    pytest.param(PVID_OFF, "procurve", PROCURVE, {}, False, {"1": {"u": "99", "en": False}, "2": {"u": "30"}}, "1",
                  "PVID 1 weicht vom ungetaggten VLAN 20 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS zugewiesen) – per SNMP nicht "
                  "verwaltbar", id="unmanaged-pvid"),
     pytest.param(ODD, "procurve", PROCURVE, {}, False, {"A3": {"en": True}, "A1": {"name": "core"}}, "A3",
@@ -277,6 +278,51 @@ def test_snmp_plan_respects_blocked(monkeypatch, W, selection, driver, inv_kw, e
     assert plan["desired"] == rest
     assert (plan["ops"], plan["shown"]) == snmpwrite.render_ops(driver, cfg, raw, rest)
     assert plan["ops"] and plan["commands"] == [] and plan["mechanism"] == "snmp"
+
+
+# port 2 (bp 1): untagged 99 and no tagged VLAN, PVID 1 since (R12): unmanaged, and cfg shows it in no VLAN at all (u None is a placeholder)
+PVID_OFF_2 = edit_walks(SAMPLE, pvid={"1": "1"})
+R12_2 = ("PVID 1 weicht vom ungetaggten VLAN 99 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS zugewiesen) – per SNMP nicht "
+         "verwaltbar")
+
+
+OFF_AND_NAMED = {"status": "off", "name": "Telefon"}
+TELEFON = "54656C65666F6E"    # "Telefon" as the hex of an ifAlias varbind
+
+
+@pytest.mark.parametrize("W, req, ops, before", [
+    pytest.param(HYBRID, {"ports": ["3"], "set": OFF_AND_NAMED}, [(f"{IF_ADMIN}.3", "i", "2"), (f"{IF_ALIAS}.3", "x", TELEFON)],
+                 {"3": {"en": True, "name": ""}}, id="hybrid"),
+    pytest.param(PVID_OFF, {"ports": ["1"], "set": {"status": "off"}}, [(f"{IF_ADMIN}.1", "i", "2")], {"1": {"en": True}},
+                 id="pvid-mismatch"),
+    # L17: cfg shows port 2 in no VLAN (u None is only the placeholder of an unmanaged port), yet en / name are no VLAN change: not
+    # "Port wäre in keinem VLAN mehr"
+    pytest.param(PVID_OFF_2, {"ports": ["2"], "set": OFF_AND_NAMED}, [(f"{IF_ADMIN}.2", "i", "2"), (f"{IF_ALIAS}.2", "x", TELEFON)],
+                 {"2": {"en": True, "name": ""}}, id="pvid-mismatch-in-no-vlan"),
+    pytest.param(PVID_OFF_2, {"desired": {"2": {"en": False}}}, [(f"{IF_ADMIN}.2", "i", "2")], {"2": {"en": True}}, id="revert-form"),
+])
+def test_snmp_unmanaged_port_takes_en_and_name(monkeypatch, W, req, ops, before):
+    """R41: an unmanaged port (R9 hybrid, R12 PVID != untagged) is refused only for its VLAN fields; on / off and the name are planned
+    like on any port, with exactly their own varbinds, and before holds just those fields (a revert restores only them)."""
+    forbid_cli_rendering(monkeypatch)
+    plan = plan_snmp(W, PROCURVE, req)
+    (port,) = before
+    assert port in read(W)[1]["unmanaged"]
+    assert (plan["blocked"], plan["ops"], plan["before"]) == ([], ops, before)
+
+
+def test_snmp_unmanaged_port_still_refuses_its_vlan_fields():
+    """u / t on the unmanaged port 2 keep the R12 reason; nothing of the port is planned (also not its en, which alone would go)."""
+    for change in ({"untagged": "20"}, {"tagged_add": ["30"]}, {"untagged": "20", "status": "off"}):
+        plan = plan_snmp(PVID_OFF_2, PROCURVE, {"ports": ["2"], "set": change})
+        assert (plan["blocked"], plan["ops"]) == ([{"port": "2", "reason": R12_2}], [])
+
+
+def test_snmp_no_vlan_left_still_blocks_a_vlan_change():
+    """L17 gates only the en / name / PoE requests: a VLAN change that would leave a managed port in no VLAN is still refused (port 3,
+    tagged in 20 and 30, no untagged VLAN, drops both)."""
+    plan = plan_snmp(SAMPLE, PROCURVE, {"desired": {"3": {"t": []}}})
+    assert plan["blocked"] == [{"port": "3", "reason": "wäre in keinem VLAN mehr"}]
 
 
 @pytest.mark.parametrize("change, fields", [

@@ -335,7 +335,8 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
     Abgelehnt wird
       - ein Port, den es nicht gibt, und ein anderes Feld als u / pvid / t / en / name / poe (802.1X / MAC-Anmeldung gehen nur ueber die
         CLI);
-      - ein Port in raw["unmanaged"]; ein Trunk-Mitglied (der Trunk selbst geht: er ist ein Bridge-Port); ein Port ohne Bridge-Port oder
+      - ein Port in raw["unmanaged"], fuer ein VLAN-Feld (VLAN_FIELDS: u, t, pvid; R41, An / Aus, Name und PoE gehen); ein
+        Trunk-Mitglied (der Trunk selbst geht: er ist ein Bridge-Port); ein Port ohne Bridge-Port oder
         ifIndex (nur Anzeige, auch kein Abschalten; ausser bei cisco_vmps ein Port mit vmVlan-Zeile ohne t / pvid, R45) oder dessen
         Bridge-Port laut raw["bp2port"] nicht ihm gehoert; ein Feld, dessen Faehigkeit der Treiber nicht hat (FIELD_CAPS, drivers.can);
       - ein Wert, der keiner ist: u keine VLAN-ID als Text, t keine Liste verschiedener, pvid keine VLAN-ID 1..4094 (is_vlan_id), en
@@ -356,7 +357,8 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
     odd = sorted(str(k) for k in d if k not in FIELD_CAPS)
     if odd:
         return f"per SNMP nicht änderbar: {', '.join(odd)}"
-    if p in raw["unmanaged"]:
+    if p in raw["unmanaged"] and VLAN_FIELDS & set(d):
+        # R41: nicht eindeutig ist nur seine VLAN-Zugehoerigkeit (cfg hat ein einziges u); An / Aus, Name und PoE lesen u nie
         return raw["unmanaged"][p]
     member_of = {m: trunk for trunk, members in cfg["trunks"].items() for m in members}
     if p in member_of:  # ein Mitglied hat keinen eigenen Bridge-Port, seine VLANs sind die des Trunks

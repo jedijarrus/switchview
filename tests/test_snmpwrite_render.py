@@ -522,23 +522,41 @@ HYBRID = edit_walks(SAMPLE, vlanEgress={"1": "4A 00 00 00 00 00 00 00"},
                     vlanUntagged={"1": "4A 00 00 00 00 00 00 00", "20": "60 00 00 00 00 00 00 00"})    # port 3 untagged in 1 and 20
 
 
+PVID_MISMATCH = edit_walks(SAMPLE, pvid={"3": "1"})    # port 1 (bp 3): untagged 20, PVID 1 (R12)
+
+
 @pytest.mark.parametrize("W, selection, desired, message", [
-    (HYBRID, "procurve", {"3": {"en": False}},
+    (HYBRID, "procurve", {"3": {"u": "99"}},
      r"^Port 3: ungetaggt in mehreren VLANs \(1, 20\): Hybrid-/General-Port, per SNMP nicht verwaltbar$"),
-    (HYBRID, "procurve", {"3": {"name": "x"}}, r"^Port 3: ungetaggt in mehreren VLANs"),
-    (edit_walks(SAMPLE, pvid={"3": "1"}), "procurve", {"1": {"u": "99"}}, r"^Port 1: PVID 1 weicht vom ungetaggten VLAN 20 ab"),
-    (edit_walks(SAMPLE, pvid={"3": "1"}), "procurve", {"1": {"pvid": "20"}}, r"^Port 1: PVID 1 weicht vom ungetaggten VLAN 20 ab"),
+    (HYBRID, "procurve", {"3": {"t": ["30", "99"], "en": False}}, r"^Port 3: ungetaggt in mehreren VLANs"),
+    (PVID_MISMATCH, "procurve", {"1": {"u": "99"}}, r"^Port 1: PVID 1 weicht vom ungetaggten VLAN 20 ab"),
+    (PVID_MISMATCH, "procurve", {"1": {"pvid": "20"}}, r"^Port 1: PVID 1 weicht vom ungetaggten VLAN 20 ab"),
     (ODD, "procurve", {"A3": {"en": False}}, r"^Port A3: kein Bridge-Port \(etwa ein Management-Port\), per SNMP nur zur Anzeige$"),
     (ODD, "procurve", {"Trk3": {"name": "x"}}, r"^Port Trk3: kein Bridge-Port"),    # an empty trunk without a bridge port
     (ODD, "procurve", {"A2": {"u": "5"}}, r"^Port A2: gehört zu Trk2, bitte Trk2 wählen$"),
     (SAMPLE, "procurve", {"7": {"en": False}}, r"^Port 7: gibt es auf diesem Switch nicht$"),
     (SAMPLE, "procurve", {"DEFAULT_VLAN": {"en": False}}, r"^Port DEFAULT_VLAN: gibt es auf diesem Switch nicht$"),
-], ids=["hybrid", "hybrid-name", "pvid-mismatch", "pvid-mismatch-pvid", "no-bridge-port", "empty-trunk", "member", "unknown",
+], ids=["hybrid", "hybrid-tagged", "pvid-mismatch", "pvid-mismatch-pvid", "no-bridge-port", "empty-trunk", "member", "unknown",
         "vlan-interface"])
 def test_a_port_the_write_path_must_not_touch_is_refused(W, selection, desired, message):
+    """An unmanaged port (R9 hybrid, R12 PVID != untagged) is refused for its VLAN fields (u, t, pvid): those are what cfg cannot
+    describe with its one u."""
     cfg, raw = _read(W, selection)
     with pytest.raises(ValueError, match=message):
         snmpwrite.render_ops(PROCURVE, cfg, raw, desired)
+
+
+@pytest.mark.parametrize("W, port, old_name", [(HYBRID, "3", ""), (PVID_MISMATCH, "1", "Platz-107")], ids=["hybrid", "pvid-mismatch"])
+def test_an_unmanaged_port_still_takes_en_and_name(W, port, old_name):
+    """R41: only the VLAN slot of an unmanaged port is ambiguous; on / off and the name never read u. They are written as on any port
+    (ifAdminStatus / ifAlias by ifIndex, here = the port number), and the VLAN bits of the port stay untouched (the oracle of
+    _render_and_store checks every bit and the read-back)."""
+    cfg, raw = _read(W, "procurve")
+    assert port in raw["unmanaged"]
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, port, {"en": False, "name": "Telefon"}) is None
+    ops, shown = _render_and_store(W, PROCURVE, {port: {"en": False, "name": "Telefon"}})
+    assert ops == [(f"{IF_ADMIN}.{port}", "i", "2"), (f"{IF_ALIAS}.{port}", "x", "54656C65666F6E")]
+    assert shown == [f"Port {port}: an → aus", f'Port {port}: Name "{old_name}" → "Telefon"']
 
 
 def test_a_port_without_an_ifindex_is_refused():
@@ -835,7 +853,9 @@ def _must_refuse(driver, cfg: dict, raw: dict, desired: dict) -> bool:
             return True
         # R45: on cisco_vmps a port with a vmVlan row needs no bridge port, unless the request has a Q-BRIDGE field (t, pvid)
         switchport = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"] and not {"t", "pvid"} & set(d)
-        if p in raw["unmanaged"] or p in members or (p not in raw["port2bp"] and not switchport) or p not in raw["ifindex"]:
+        # R41: an unmanaged port is refused for its VLAN fields only
+        if (p in raw["unmanaged"] and {"u", "t", "pvid"} & set(d)) or p in members or (p not in raw["port2bp"] and not switchport) \
+                or p not in raw["ifindex"]:
             return True
         if "name" in d and _bad_name(d["name"]):
             return True
@@ -878,29 +898,31 @@ def _random_desired(rng: random.Random, cfg: dict, raw: dict, driver) -> dict:
     missing = next(str(v) for v in range(1, 4095) if str(v) not in cfg["vlans"])    # a VLAN ID, but no VLAN of this switch
     members = {m for ms in cfg["trunks"].values() for m in ms}
     switchport = {p for p in raw["vmvlan"] if driver.vlan_strategy == "cisco_vmps"}    # R45: no bridge port needed (clean: no t / pvid)
-    writable = [p for p in cfg["ports"] if p not in raw["unmanaged"] and p not in members and (p in raw["port2bp"] or p in switchport)]
+    # an unmanaged port is writable for en / name (R41): a clean request leaves its VLANs alone
+    writable = [p for p in cfg["ports"] if p not in members and (p in raw["port2bp"] or p in switchport)]
     clean = bool(writable) and rng.random() < 0.7
     qbridge = driver.vlan_strategy == "qbridge"
     pool = writable if clean else list(cfg["ports"])
     for p in rng.sample(pool, rng.randint(1, min(4, len(pool)))):
         st, d = cfg["ports"][p], {}
         access = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"]
-        if clean and qbridge and rng.random() < 0.15:
+        vlans = not (clean and p in raw["unmanaged"])
+        if vlans and clean and qbridge and rng.random() < 0.15:
             # a revert to no untagged VLAN, as for a port that was tagged-only: at least one tagged VLAN, maybe the old untagged one,
             # mostly with the PVID the planner recorded (R21)
             d["u"], d["t"] = None, sorted(rng.sample(vids, rng.randint(1, len(vids))), key=int)
             if rng.random() < 0.6:
                 d["pvid"] = rng.choice(vids)
-        elif rng.random() < 0.6 and (not clean or qbridge or access):
+        elif vlans and rng.random() < 0.6 and (not clean or qbridge or access):
             d["u"] = rng.choice(vids) if clean else rng.choice([*vids, *vids, None, NO_SUCH_VLAN])
             if clean and qbridge and rng.random() < 0.2:
                 d["pvid"] = d["u"]
-        if "t" not in d and rng.random() < 0.5 and (not clean or qbridge):
+        if vlans and "t" not in d and rng.random() < 0.5 and (not clean or qbridge):
             u = d.get("u", st["u"])
             choices = [v for v in vids if v != u] if clean or rng.random() < 0.85 else [*vids, NO_SUCH_VLAN]
             least = 1 if clean and u is None else 0
             d["t"] = sorted(rng.sample(choices, rng.randint(min(least, len(choices)), len(choices))), key=int)
-        if clean and qbridge and "pvid" not in d and rng.random() < 0.08:    # a PVID repair
+        if vlans and clean and qbridge and "pvid" not in d and rng.random() < 0.08:    # a PVID repair
             u = d.get("u", st["u"])
             d["pvid"] = u if u is not None else rng.choice(vids)
         if not clean and rng.random() < 0.08:
@@ -965,7 +987,7 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
     reaching what matters."""
     rng = random.Random(8)
     seen: dict[str, int] = dict.fromkeys(("rendered", "refused", "drifted", "shared PortList", "trunk VLANs", "u -> None",
-                                          "tagged -> untagged", "vmVlan", "explicit pvid", "no bridge port"), 0)
+                                          "tagged -> untagged", "vmVlan", "explicit pvid", "no bridge port", "unmanaged"), 0)
     for case in range(1500):
         W, driver, selection = _random_switch(rng)
         cfg, raw = _read(W, selection)
@@ -997,6 +1019,7 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             ("vmVlan", any(oid.startswith(VMVLAN + ".") for oid, _, _ in ops)),
             ("explicit pvid", any(k == "pvid" for _, k in changed)),
             ("no bridge port", any(p not in raw["port2bp"] for p, _ in changed)),    # R45: a cisco vmVlan port, written all the same
+            ("unmanaged", any(p in raw["unmanaged"] for p, _ in changed)),           # R41: on / off or name of an unmanaged port
         ):
             seen[key] += hit
         own = {raw["port2bp"][p] for p, d in desired.items() if d and p in raw["port2bp"]}
@@ -1008,4 +1031,4 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             seen["drifted"] += 1
     assert min(seen["rendered"], seen["drifted"]) > 800 and seen["refused"] > 400, seen
     assert min(seen[k] for k in ("shared PortList", "trunk VLANs", "u -> None", "tagged -> untagged", "vmVlan", "explicit pvid")) > 50, seen
-    assert seen["no bridge port"] > 10, seen
+    assert seen["no bridge port"] > 10 and seen["unmanaged"] > 5, seen

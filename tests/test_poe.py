@@ -570,9 +570,6 @@ def test_poe_with_every_other_field():
     pytest.param(agent(edit_walks(W_POE, poeAdmin={"1.2": None, "2.1": "1", "2.2": "1"}, poeStatus={"1.2": None, "2.1": "2", "2.2": "2"})),
                  "procurve", PROCURVE, "2", True, unmappable("2.1, 2.2"), id="unmapped-entries"),
     pytest.param(agent({**W_POE, "ifType": IFTYPE_SAMPLE}), "mikrotik", MIKROTIK, "1", False, MIKROTIK_NO_POE, id="mikrotik"),
-    pytest.param(agent(edit_walks(W_POE, pvid={"3": "1"})), "procurve", PROCURVE, "1", False,
-                 "PVID 1 weicht vom ungetaggten VLAN 20 ab (Fehlkonfiguration oder dynamisch per 802.1X/RADIUS zugewiesen) – per SNMP nicht "
-                 "verwaltbar", id="unmanaged"),
 ])
 def test_poe_refused(W, selection, driver, port, value, reason):
     """Every PoE refusal comes from snmp_block_reason: render_ops raises it for the port, nothing rendered."""
@@ -1039,6 +1036,34 @@ async def test_poe_round_trip_with_revert(world):
     assert world.sets[-1] == (HOST, RW_CRED, [(f"{POE_ADMIN}.1.1", "i", "1")])
     assert world.W == store(after_forward, [(f"{POE_ADMIN}.1.1", "i", "1")])
     assert poe_of(read(world.W, text_hex=True)[0]) == {**POE_EXPECTED, "3": True}
+    assert world.ssh == []
+
+
+# Ports the write path reads as unmanaged (their VLAN slot is ambiguous), with PoE:
+#   R12: port 2 (bridge port 1, untagged 99) with PVID 1, as a RADIUS-assigned VLAN may show up (R16); PoE entry 1.2, on
+#   R9:  port 3 (bridge port 2) untagged in VLAN 1 and 20, a hybrid / general port; PoE entry 1.3, off
+R12_POE = agent(edit_walks(W_POE, pvid={"1": "1"}))
+R9_POE = agent(edit_walks(W_POE, vlanEgress={"1": "4A" + " 00" * 7}, vlanUntagged={"1": "4A" + " 00" * 7, "20": "60" + " 00" * 7}))
+
+
+@pytest.mark.parametrize("W, port, entry, on", [(R12_POE, "2", "1.2", True), (R9_POE, "3", "1.3", False)], ids=["R12", "R9"])
+async def test_poe_on_an_unmanaged_port_round_trip(world, W, port, entry, on):
+    """R41: PoE never reads the VLAN slot, so it is switched on an unmanaged port too, the main PoE use case on a NAC port whose VLAN
+    RADIUS assigned: planned, written, verified (the port is still unmanaged afterwards, which counts only for a VLAN change), and the
+    revert restores exactly PoE. VLAN changes on the port stay refused with the unmanaged reason."""
+    row = await world.switch("procurve", W)
+    assert port in read(W, text_hex=True)[1]["unmanaged"]
+    cid, plan = await apply(world, row, {"ports": [port], "change": {"poe": not on}})
+    assert (plan["mechanism"], plan["ops"], plan["before"]) == ("snmp", [(f"{POE_ADMIN}.{entry}", "i", "2" if on else "1")], {port: {"poe": on}})
+    ch = await run(cid)
+    assert (ch["status"], ch["saved"], ch["error"]) == ("ok", 1, None)
+    assert poe_of(read(world.W, text_hex=True)[0])[port] is (not on)
+    rid, plan = await apply(world, row, {"mode": "revert", "of": cid})
+    assert (plan["desired"], plan["ops"]) == ({port: {"poe": on}}, [(f"{POE_ADMIN}.{entry}", "i", "1" if on else "2")])
+    assert (await run(rid))["status"] == "ok"
+    assert world.W == W
+    plan, _, _, _ = await make_plan(row, {"ports": [port], "change": {"poe": not on, "untagged": "30"}})
+    assert (plan["blocked"], plan["ops"]) == ([{"port": port, "reason": read(W, text_hex=True)[1]["unmanaged"][port]}], [])
     assert world.ssh == []
 
 
