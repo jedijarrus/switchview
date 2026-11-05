@@ -46,7 +46,7 @@
     [{ label: "Abbrechen", onClick: () => { closeModal(); res(false); } }, { label, cls: danger ? "danger" : "primary", onClick: () => { closeModal(); res(true); } }]));
 
   /* ── Login ── */
-  let authCfg = null, msalApp = null;
+  let authCfg = null, msalApp = null, ME = null; // ME: the signed-in user (/api/auth/me), set by start()
   function showLogin(msg) { $("#app").hidden = true; $("#login").hidden = false; const e = $("#login-error"); e.hidden = !msg; e.textContent = msg || ""; }
   async function initLogin() {
     authCfg = await api("GET", "/api/auth/config");
@@ -84,8 +84,8 @@
   }
   $(".tabs").addEventListener("click", e => { const b = e.target.closest("[data-view]"); if (b) go(b.dataset.view); });
   async function start() {
-    const me = await api("GET", "/api/auth/me");
-    $("#user-name").textContent = me.name; $("#login").hidden = true; $("#app").hidden = false;
+    ME = await api("GET", "/api/auth/me");
+    $("#user-name").textContent = ME.name; $("#login").hidden = true; $("#app").hidden = false;
     const h = decodeURIComponent((location.hash || "").slice(1));
     if (h.startsWith("switch=")) go("switches", h.slice(7)); else go(h || "overview");
   }
@@ -873,7 +873,7 @@
   /* ── Protokoll ── */
   async function renderAudit() {
     const v = $("#view"); const rows = await api("GET", "/api/audit").catch(() => []);
-    const lbl = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", backup: "Sicherung", settings_update: "Einstellungen geändert",
+    const lbl = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", backup: "Sicherung", settings_update: "Einstellungen geändert",
       change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
       device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">letzte 100</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge</span></div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody>` +
@@ -906,7 +906,10 @@
         <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
-      <div><button class="btn primary" type="button" id="s-save">Speichern</button></div></div></section>`;
+      <div><button class="btn primary" type="button" id="s-save">Speichern</button></div></div></section>
+      <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
+        <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
+        <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>`;
     // A new address deletes the secret bound to it unless it is entered anew in the same save (F2, main.DESTINATION_SECRETS)
     [["s-url", s.opnsense_url, s.opnsense_key_set || s.opnsense_secret_set], ["s-rs", s.radius_server, s.radius_key_set], ["s-pfu", s.pf_url, s.pf_pass_set]].forEach(([id, was, set]) => {
       const sync = () => syncNote(id, id + "-note", !!set && destTxt($("#" + id).value) !== destTxt(was));
@@ -916,6 +919,13 @@
       e.target.disabled = true; const pw = id => { const x = $("#" + id).value; return x === "" ? null : x; };
       try { const r = await api("PUT", "/api/settings", { poll_minutes: +$("#s-poll").value || 15, opnsense_url: $("#s-url").value.trim(), opnsense_key: pw("s-key"), opnsense_secret: pw("s-secret"), opnsense_verify_tls: $("#s-tls").checked,
         radius_server: $("#s-rs").value.trim(), radius_key: pw("s-rk"), pf_url: $("#s-pfu").value.trim(), pf_user: $("#s-pfuser").value.trim(), pf_pass: pw("s-pfpass"), pf_verify_tls: $("#s-pftls").checked }); toast(savedTxt(r.cleared)); renderSettings(); }
+      catch (err) { toast(err.message); e.target.disabled = false; }
+    });
+    // Log out everywhere: every session of this user ends on the server (main.logout_all), this one too, so the login follows
+    $("#s-logout-all").addEventListener("click", async e => {
+      if (!(await confirmModal("Alle Sitzungen beenden", `Jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten endet, auch diese. Danach meldest du dich neu an.`, "Alle beenden", true))) return;
+      e.target.disabled = true;
+      try { const r = await api("POST", "/api/auth/logout-all"); toast(r.ended === 1 ? "1 Sitzung beendet" : `${r.ended} Sitzungen beendet`); showLogin(); }
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });

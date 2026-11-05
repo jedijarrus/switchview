@@ -30,7 +30,7 @@ import snmp
 import snmpwrite
 import sshcli
 import throttle
-from config import settings
+from config import Settings, settings
 from crypto import encrypt
 from db import audit, db, get_setting, init_db, read_settings, write_settings
 
@@ -55,10 +55,27 @@ async def _schedule():
     scheduler.add_job(pf.expire_and_sync, "cron", hour=3, minute=15, id="pf_sync", replace_existing=True, max_instances=1, coalesce=True)
 
 
+def check_startup_config(s: Settings) -> list[str]:
+    """Stops a start that cannot run safely (RuntimeError): a SECRET_KEY under 16 characters, a COOKIE_SECURE other than auto or
+    always. Returns the warnings for the log: a SECRET_KEY under 32 characters or with fewer than 8 different characters is weak but
+    only warned about (E16: changing it means entering every stored credential anew, a stop would shut out running installations).
+    No message contains the key."""
+    if len(s.secret_key) < 16:
+        raise RuntimeError("SECRET_KEY fehlt oder ist zu kurz")
+    if s.cookie_secure not in ("auto", "always"):
+        raise RuntimeError("COOKIE_SECURE muss auto oder always sein")
+    messages = []
+    if len(s.secret_key) < 32 or len(set(s.secret_key)) < 8:
+        messages.append("SECRET_KEY ist schwach (kürzer als 32 Zeichen oder weniger als 8 verschiedene Zeichen). Ein neuer Schlüssel "
+                        "(z. B. openssl rand -hex 32) macht die gespeicherten Zugangsdaten unlesbar: danach alle Zugangsdaten der Switches, "
+                        "von PacketFence, OPNsense und RADIUS neu eingeben.")
+    return messages
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if len(settings.secret_key) < 16:
-        raise RuntimeError("SECRET_KEY fehlt oder ist zu kurz")
+    for warning in check_startup_config(settings):
+        log.warning(warning)
     await init_db()
     async with db() as conn:  # nach Neustart haengen gebliebene Aenderungen markieren
         await conn.execute("UPDATE changes SET status = 'unclear', error = 'Abgebrochen durch Neustart von SwitchView', "
@@ -109,8 +126,8 @@ _LOGIN = throttle.LoginThrottle()
 
 
 def _set_cookie(resp: Response, request: Request, name: str, value: str, max_age: int):
-    """The one place that sets a cookie of SwitchView: httponly, SameSite=Lax, path /, Secure for https."""
-    resp.set_cookie(name, value, httponly=True, samesite="lax", secure=auth.is_https(request), max_age=max_age, path="/")
+    """The one place that sets a cookie of SwitchView: httponly, SameSite=Lax, path /, Secure as COOKIE_SECURE says (auth.cookie_secure)."""
+    resp.set_cookie(name, value, httponly=True, samesite="lax", secure=auth.cookie_secure(request), max_age=max_age, path="/")
 
 
 @app.get("/api/auth/config")
@@ -175,6 +192,16 @@ async def logout(request: Request, response: Response):
         await auth.drop_session(token)
     response.delete_cookie(auth.COOKIE, path="/")
     return {"ok": True}
+
+
+@app.post("/api/auth/logout-all")
+async def logout_all(response: Response, user=Depends(auth.current_user)):
+    """Ends every session of the signed-in user on every device, this one too: the lever when a session must end now (A3). Through
+    current_user, so it needs the CSRF header like every other write."""
+    ended = await auth.drop_user_sessions(user["username"])
+    response.delete_cookie(auth.COOKIE, path="/")
+    await audit(user["username"], "logout_all", "", f"Sitzungen beendet: {ended}")
+    return {"ok": True, "ended": ended}
 
 
 # ── Switches verwalten ───────────────────────────────────────────────────────

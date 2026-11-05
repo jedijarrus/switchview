@@ -69,6 +69,9 @@ Known limitations and required device checks (German): [docs/snmp-multivendor.md
 
 **Login**
 - Microsoft Entra ID (MSAL popup, ID token verified via JWKS, optional app roles/groups) or a local emergency account
+- Sessions are stored hashed (SHA-256 of the session token), so a copy of the database holds no usable session cookie; sessions
+  from before this change are rehashed at start, nobody is logged out
+- Log out everywhere: Settings → "Sitzungen" ends every session of your account on every device, the current one included
 
 ## Quick start
 
@@ -87,6 +90,11 @@ shows the proxy as its client (for a proxy on the Docker host usually the gatewa
 uvicorn trusts proxy headers only from 127.0.0.1, which inside the container is nobody else: SwitchView works the same, but the log
 shows the proxy's address for every client.
 
+`COOKIE_SECURE` decides when the session and device cookies carry the `Secure` flag. `auto` (the default) sets it when the request
+came over HTTPS, by its own scheme or by `X-Forwarded-Proto: https`; either signal can only add the flag, a forged
+`X-Forwarded-Proto: http` never removes it. If SwitchView is reachable over HTTPS only, set `COOKIE_SECURE=always`. Any other value
+stops the start.
+
 The emergency login (`ADMIN_USER` / `ADMIN_PASSWORD`) is throttled: after 10 failed attempts within 60 seconds from browsers
 without a device cookie, it refuses such browsers (HTTP 429) until those failures are older than 60 seconds. A browser in which the
 emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out. Entra SSO is
@@ -95,6 +103,8 @@ never throttled.
 Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, the login throttle (`main._LOGIN`), per-switch SSH/poll locks and running changes live in process memory.
 
 Then add switches in the UI (management IP, driver, SNMP credentials, for ProCurve an optional SSH manager account, optional SNMP write access). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again.
+A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different characters gets a
+warning in the log at every start. Changing the key later means entering every stored credential anew.
 
 ## Requirements
 

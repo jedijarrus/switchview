@@ -18,6 +18,9 @@ class Settings:
     entra_allowed_roles: list[str] = field(default_factory=lambda: _list("ENTRA_ALLOWED_ROLES"))
     entra_allowed_groups: list[str] = field(default_factory=lambda: _list("ENTRA_ALLOWED_GROUPS"))
     session_hours: int = int(os.getenv("SESSION_HOURS", "12") or 12)
+    # Secure flag of the session and device cookies (auth.cookie_secure): "auto" (when the request came over https) or "always".
+    # Trimmed and in lower case; unset or empty means auto. main.check_startup_config refuses any other value.
+    cookie_secure: str = field(default_factory=lambda: os.getenv("COOKIE_SECURE", "").strip().lower() or "auto")
 
     @property
     def db_path(self) -> str:

@@ -10,18 +10,22 @@ import pytest
 # import, into a frozen dataclass, and pytest imports this file before any test module. Both are forced, not defaulted, so that a
 # shell or container exporting the real ones (DATA_DIR=/data, the production SECRET_KEY) never reaches a test: crypto encrypts with
 # a test-only key, and a db() that no test pointed at its own tmp_path opens a throwaway database, never /data/switchview.db.
+# COOKIE_SECURE is forced to its default for the same reason (Settings reads it whenever one is made): a shell exporting
+# COOKIE_SECURE=always would put the Secure flag on every cookie, and a TestClient on http://testserver never sends those back.
 TEST_SECRET_KEY = "switchview-tests-only-secret-key"
 TEST_DATA_DIR = tempfile.mkdtemp(prefix="switchview-tests-")
 atexit.register(shutil.rmtree, TEST_DATA_DIR, True)
 os.environ["SECRET_KEY"] = TEST_SECRET_KEY
 os.environ["DATA_DIR"] = TEST_DATA_DIR
+os.environ["COOKIE_SECURE"] = "auto"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_environment():
     """Fails the run if config was imported before the variables above were set: then they would not have taken effect."""
     import config
-    assert (config.settings.secret_key, config.settings.data_dir) == (TEST_SECRET_KEY, TEST_DATA_DIR)
+    s = config.settings
+    assert (s.secret_key, s.data_dir, s.cookie_secure) == (TEST_SECRET_KEY, TEST_DATA_DIR, "auto")
 
 # A `show running-config` of a modular ProCurve (24-port module in slot A), 15.x layout with global port-access lines.
 # What it contains, because tests/test_cfgparse.py asserts on it by hand:

@@ -116,21 +116,40 @@ def device_id(cookie: str | None, username: str) -> str | None:
     return nonce if hmac.compare_digest(_device_mac(nonce, username).encode(), _utf8(mac)) else None
 
 
+def token_hash(token: str) -> str:
+    """What the sessions table stores in place of a session token: its SHA-256 as 64 hex digits (F4). A copy of the database then
+    holds no value a browser could send as the cookie. db.hash_legacy_session_tokens computes the same for the rows of before."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 async def create_session(username: str, display: str, method: str) -> str:
+    """Starts a session and returns its token for the cookie; the database keeps only token_hash(token)."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     async with db() as conn:
         await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(),))
         await conn.execute("INSERT INTO sessions(token, username, display_name, method, created_at, expires_at) VALUES (?,?,?,?,?,?)",
-                           (token, username, display, method, now.isoformat(), (now + timedelta(hours=settings.session_hours)).isoformat()))
+                           (token_hash(token), username, display, method, now.isoformat(),
+                            (now + timedelta(hours=settings.session_hours)).isoformat()))
         await conn.commit()
     return token
 
 
 async def drop_session(token: str):
     async with db() as conn:
-        await conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        await conn.execute("DELETE FROM sessions WHERE token = ?", (token_hash(token),))
         await conn.commit()
+
+
+async def drop_user_sessions(username: str) -> int:
+    """Ends every session of username, on every device ("log out everywhere"), and returns how many of them were still valid.
+    Expired sessions of anyone are deleted first, as create_session does, so they are not counted."""
+    async with db() as conn:
+        await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+        cur = await conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        ended = cur.rowcount
+        await conn.commit()
+    return ended
 
 
 async def current_user(request: Request) -> dict:
@@ -138,7 +157,8 @@ async def current_user(request: Request) -> dict:
     if not token:
         raise HTTPException(401, "Nicht angemeldet")
     async with db() as conn:
-        async with conn.execute("SELECT username, display_name, method, expires_at FROM sessions WHERE token = ?", (token,)) as cur:
+        async with conn.execute("SELECT username, display_name, method, expires_at FROM sessions WHERE token = ?",
+                                (token_hash(token),)) as cur:
             row = await cur.fetchone()
     if not row or row["expires_at"] < datetime.now(timezone.utc).isoformat():
         raise HTTPException(401, "Sitzung abgelaufen")
@@ -147,5 +167,12 @@ async def current_user(request: Request) -> dict:
     return {"username": row["username"], "name": row["display_name"] or row["username"], "method": row["method"]}
 
 
-def is_https(request: Request) -> bool:
-    return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+def cookie_secure(request: Request) -> bool:
+    """Whether SwitchView's cookies get the Secure flag. COOKIE_SECURE=always: every time. auto: when the request came over https,
+    by its own scheme or by the first value of X-Forwarded-Proto. Either signal can only add the flag: a forged
+    "X-Forwarded-Proto: http" on an https request never takes it away. A forged "https" on a plain-http request only makes that
+    client's browser drop its own cookies."""
+    if settings.cookie_secure == "always":
+        return True
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
