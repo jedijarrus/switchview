@@ -53,7 +53,7 @@ CFG_KEYS = ["hostname", "primary_vlan", "mgmt_vlan", "auth_active", "eap_radius"
             "voice_vlans", "radius", "ports"]
 PORT_KEYS = {"u", "t", "name", "en", "x", "m", "cl", "al", "xuv", "muv", "poe"}
 RAW_KEYS = {"egress", "untagged", "pvid", "admin", "alias", "poe", "poe_unmapped", "port2bp", "bp2port", "ifindex", "unmanaged", "vmvlan"}
-POE_BASES = {WALK_BASES[k] for k in ("poeAdmin", "poeStatus")}    # every driver with snmp_poe (all but mikrotik) walks them, Task 12
+POE_BASES = {WALK_BASES[k] for k in ("poeAdmin", "poeStatus")}    # walked only for a change that touches PoE (R34, tests/test_poe.py)
 
 def _variant(**edits) -> dict:
     return edit_walks(W_SAMPLE, **edits)
@@ -446,9 +446,9 @@ async def _switch_row(**cols):
 
 
 async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
-    """Nine walks (the PortLists and, since R18, the free text ifAlias / vlanName in hex) plus the two PoE columns (Task 12), all
-    strict, at the switch's host, all with the READ identity, never the RW one; the result is build_cfg of what the agent answered
-    (the text, decoded), with the polled sys_name as hostname."""
+    """Nine walks (the PortLists and, since R18, the free text ifAlias / vlanName in hex), all strict, at the switch's host, all
+    with the READ identity, never the RW one; the result is build_cfg of what the agent answered (the text, decoded), with the
+    polled sys_name as hostname. No PoE walk: the PoE tables are read only for a change that touches PoE (R34)."""
     monkeypatch.setattr(crypto, "_fernet", Fernet(Fernet.generate_key()))
     row = await _switch_row(name="SW-EK-01", host=HOST, sys_name="SW-EK-01", driver="procurve", snmp_version="2c",
                             snmp_community=crypto.encrypt("ro-s3cret"), snmp_write=1, snmp_rw_community=crypto.encrypt("rw-s3cret"))
@@ -458,9 +458,8 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
     want_cfg, want_raw = snmpwrite.build_cfg(W_SAMPLE)
     assert cfg == {**want_cfg, "hostname": "SW-EK-01"}
     assert raw == want_raw
-    assert len(agent) == len(BASES) + len(POE_BASES)
-    assert {c["oid"]: c["hex"] for c in agent} == {base: key in HEX_WALKS | FREE_TEXT for key, base in BASES.items()} | dict.fromkeys(
-        POE_BASES, False)
+    assert len(agent) == len(BASES)
+    assert {c["oid"]: c["hex"] for c in agent} == {base: key in HEX_WALKS | FREE_TEXT for key, base in BASES.items()}
     for c in agent:
         assert c["strict"] is True    # a walk cut short must be an error, not a shorter table
         assert c["host"] == HOST
@@ -472,16 +471,14 @@ async def test_read_cfg_walks_live_with_the_read_identity(monkeypatch, agent):
 @pytest.mark.parametrize("name", list(DRIVERS))
 async def test_read_cfg_walks_vmvlan_only_for_cisco_vmps(agent, name):
     """Every driver reads the nine Q-BRIDGE / IF-MIB walks. Every driver but procurve also walks ifType (it selects its ports by it,
-    see tests/test_port_discovery.py), and a cisco_vmps driver its vmVlan OID; both strict, not hex. Every driver with snmp_poe also
-    walks its PoE tables, strict, not hex (cisco with its two entity tables, tests/test_poe.py); this switch has no PoE. The result is
-    build_cfg for that driver on what the agent answered, with the vmVlan rows under their base: ports 1 and 6 are access ports in VLAN
-    99 and in none, untagged. On this ProCurve-shaped switch the ifType rule selects the same ports as the ProCurve rule."""
+    see tests/test_port_discovery.py), and a cisco_vmps driver its vmVlan OID; both strict, not hex. No driver walks PoE for a change
+    that does not touch it (R34; with_poe in tests/test_poe.py). The result is build_cfg for that driver on what the agent answered,
+    with the vmVlan rows under their base: ports 1 and 6 are access ports in VLAN 99 and in none, untagged. On this ProCurve-shaped
+    switch the ifType rule selects the same ports as the ProCurve rule."""
     driver = DRIVERS[name]
     cfg, raw = await snmpwrite.read_cfg(ROW, driver)
 
     walked = {base: key in HEX_WALKS | FREE_TEXT for key, base in BASES.items()}
-    walked |= dict.fromkeys(poller.poe_walks(driver).values(), False)
-    assert len(walked) == len(BASES) + {"mikrotik": 0, "cisco": 4}.get(name, 2)    # mikrotik has no snmp_poe (R31)
     W, base = dict(W_SAMPLE), None
     if name != "procurve":
         walked[IF_TYPE] = False
@@ -526,12 +523,11 @@ async def test_read_cfg_does_not_touch_the_database_or_take_a_lock(monkeypatch, 
     assert list(poller._locks) == [ROW["id"]]
 
 
-@pytest.mark.parametrize("driver, failing", [("procurve", key) for key in BASES] + [("cisco", "ifType"), ("cisco", "vmVlan")]
-                         + [("procurve", "poeAdmin"), ("procurve", "poeStatus"), ("cisco", "poeEntPhy"), ("cisco", "entAlias")])
+@pytest.mark.parametrize("driver, failing", [("procurve", key) for key in BASES] + [("cisco", "ifType"), ("cisco", "vmVlan")])
 async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, failing):
     """Stricter than the display poller (which skips a failed walk): any failed walk raises that very error, and only once every
     other walk has finished, so nothing is still talking to the switch when read_cfg returns. For cisco the ifType and vmVlan walks
-    too, and the PoE walks (Task 12) of both."""
+    too. (The PoE walks of a change that touches PoE: tests/test_poe.py.)"""
     err = snmp.SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
     finished = []
 
@@ -546,7 +542,7 @@ async def test_read_cfg_fails_closed_when_one_walk_fails(monkeypatch, driver, fa
     with pytest.raises(snmp.SnmpError) as caught:
         await snmpwrite.read_cfg(ROW, DRIVERS[driver])
     assert caught.value is err
-    walked = [*BASES.values()] + ([IF_TYPE, VMVLAN] if driver == "cisco" else []) + list(poller.poe_walks(DRIVERS[driver]).values())
+    walked = [*BASES.values()] + ([IF_TYPE, VMVLAN] if driver == "cisco" else [])
     assert sorted(finished) == sorted(base for base in walked if base != WALK_BASES[failing])
 
 
@@ -591,8 +587,8 @@ def _as_printed(key: str, rows) -> str:
 @pytest.fixture
 def net_snmp(monkeypatch):
     """snmpbulkwalk answers with W_SAMPLE as text, picked by the OID at the end of its argv. `net_snmp[oid] = (stdout, exit code)`
-    changes one walk; a non-zero exit comes with a timeout message on stderr. The sample switch has no PoE: its PoE walks find no row
-    under the OID and print what net-snmp prints then (the GET on the OID itself), exit 0."""
+    changes one walk; a non-zero exit comes with a timeout message on stderr. The sample switch has no PoE: its PoE walks (only for a
+    change that touches PoE, R34) find no row under the OID and print what net-snmp prints then (the GET on the OID itself), exit 0."""
     answers = {BASES[k]: (_as_printed(k, rows), 0) for k, rows in W_SAMPLE.items()}
     answers |= {base: (f".{base} No Such Object available on this agent at this OID\n", 0) for base in POE_BASES}
 
@@ -611,19 +607,22 @@ async def test_read_cfg_end_to_end_through_the_real_walk(net_snmp):
 
 
 async def test_read_cfg_end_to_end_reads_poe(net_snmp):
-    """PoE through the real walk / _run / _parse (Task 12): the two columns as net-snmp prints them (-Oe: the TruthValue and the
-    status as numbers), ports 1-6 by their ifIndex (group 1); and a PoE walk cut short (exit 2) fails the whole read."""
+    """PoE through the real walk / _run / _parse (Task 12), read for a change that touches PoE (with_poe, R34): the two columns as
+    net-snmp prints them (-Oe: the TruthValue and the status as numbers), ports 1-6 by their ifIndex (group 1); a PoE walk cut short
+    (exit 2) fails that read, while a read without PoE never walks it and goes through."""
     poe_admin, poe_status = WALK_BASES["poeAdmin"], WALK_BASES["poeStatus"]
     net_snmp[poe_admin] = ("".join(f".{poe_admin}.1.{i} {'2' if i == 3 else '1'}\n" for i in range(1, 7)), 0)
     net_snmp[poe_status] = ("".join(f".{poe_status}.1.{i} {'3' if i == 1 else '2'}\n" for i in range(1, 7)), 0)
-    cfg, raw = await snmpwrite.read_cfg(ROW, DRIVER)
+    cfg, raw = await snmpwrite.read_cfg(ROW, DRIVER, with_poe=True)
     assert {n: st["poe"] for n, st in cfg["ports"].items()} == {"1": True, "2": True, "3": False, "4": True, "5": True, "6": True,
                                                                  "Trk1": None}
     assert raw["poe"]["1"] == {"group": 1, "index": 1, "admin": 1, "status": 3} and raw["poe_unmapped"] == []
     text, _ = net_snmp[poe_status]
     net_snmp[poe_status] = ("".join(text.splitlines(keepends=True)[:3]), 2)
     with pytest.raises(snmp.SnmpError, match=f"^Timeout: No Response from {HOST}$"):
-        await snmpwrite.read_cfg(ROW, DRIVER)
+        await snmpwrite.read_cfg(ROW, DRIVER, with_poe=True)
+    cfg, raw = await snmpwrite.read_cfg(ROW, DRIVER)
+    assert raw["poe"] == {} and {st["poe"] for st in cfg["ports"].values()} == {None}
 
 
 async def test_read_cfg_end_to_end_refuses_a_walk_cut_short(net_snmp):

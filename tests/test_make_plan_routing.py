@@ -41,7 +41,7 @@ import snmp
 import snmpwrite
 import sshcli
 from drivers import Driver
-from switchfix import CATALYST_VMVLAN, VMVLAN, W_CATALYST, W_POE, W_SAMPLE, agent, edit_walks
+from switchfix import CATALYST_VMVLAN, POE_WALKS, VMVLAN, W_CATALYST, W_POE, W_SAMPLE, agent, edit_walks
 
 USER = {"username": "tester", "name": "Tester", "method": "local"}
 
@@ -141,14 +141,16 @@ def inv_of(cfg: dict) -> dict:
 
 class FakeSwitch:
     """The switch behind both mechanisms. ssh_up / snmp_error decide whether a read works; calls records, in order, every SSH read
-    ("ssh", switch id), SNMP read ("snmp", driver name, change lock held?) and plan_ports run ("plan", mechanism); created and ran
-    what /apply handed to create_change and run_change."""
+    ("ssh", switch id), SNMP read ("snmp", driver name, change lock held?) and plan_ports run ("plan", mechanism); poe_reads the
+    with_poe of every SNMP read (R34: without it, like read_cfg, no PoE rows); created and ran what /apply handed to create_change and
+    run_change."""
 
     def __init__(self):
         self.ssh_up = True
         self.snmp_error: Exception | None = None
         self.views = dict(VIEWS)
         self.calls: list[tuple] = []
+        self.poe_reads: list[bool] = []
         self.created: list[dict] = []
         self.ran: list[int] = []
         self.cfg: dict | None = None    # what the last read returned: the inventory is built from it
@@ -160,11 +162,13 @@ class FakeSwitch:
         self.cfg = cfgparse.parse_config(SSH_CONFIG)
         return self.cfg
 
-    async def read_cfg(self, row, driver) -> tuple[dict, dict]:
+    async def read_cfg(self, row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
         self.calls.append(("snmp", driver.name, sshcli.lock(row["id"]).locked()))
+        self.poe_reads.append(with_poe)
         if self.snmp_error:
             raise self.snmp_error
         W, selection = self.views.get(driver.name, QBRIDGE_VIEW)
+        W = {k: rows for k, rows in W.items() if with_poe or k not in POE_WALKS}
         cfg, raw = snmpwrite.build_cfg(W, selection, vmvlan_base=VMVLAN if "vmVlan" in W else None, text_hex=True)
         cfg["hostname"] = row["sys_name"] or ""
         self.cfg = cfg
@@ -843,7 +847,8 @@ def test_drivers_list(api):
     by_name = {d["name"]: d["caps"] for d in got}
     assert by_name["procurve"] == ["backup", "cli", "nac", "snmp_admin", "snmp_autosave", "snmp_name", "snmp_poe", "snmp_vlan"]
     assert by_name["cisco"] == ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
-    assert by_name["mikrotik"] == ["snmp_admin", "snmp_name", "snmp_vlan"]     # R31: no PoE
+    for name in set(by_name) - {"procurve", "cisco"}:    # R31 (mikrotik), R35 (everyone else): no PoE
+        assert by_name[name] == ["snmp_admin", "snmp_name", "snmp_vlan"], name
 
 
 def test_drivers_list_needs_a_session(api):
@@ -869,13 +874,23 @@ def test_poe_preview_and_apply_go_snmp_on_a_procurve_with_ssh(api, fake):
     assert r.status_code == 200, r.text
     assert (fake.created[-1]["mechanism"], fake.created[-1]["ops"]) == ("snmp", [("1.3.6.1.2.1.105.1.1.1.3.1.1", "i", "2")])
     assert ("ssh", sid) not in fake.calls
+    assert fake.poe_reads == [True, True]    # R34: preview and apply read PoE for a PoE change
+
+
+def test_snmp_reads_without_poe_for_a_change_without_poe(api, fake):
+    """R34: a VLAN change over SNMP (no SSH credentials) on the same PoE switch reads without the PoE tables."""
+    fake.views["procurve"] = (agent(W_POE), "procurve")
+    got = preview(api, switch(api, "procurve", ssh=False), {"ports": ["2"], "change": {"untagged": "20"}})
+    assert (got["mechanism"], got["commands"], fake.poe_reads) == ("snmp", ["Port 2: VLAN ungetaggt 99 → 20"], [False])
 
 
 @pytest.mark.parametrize("driver, kw, detail", [
     ("procurve", {"snmp_write": False}, f"PoE erfordert SNMP-Schreibzugriff ({WRITE_DISABLED})"),
     ("procurve", {"ssh": False, "creds": NO_CREDS}, f"PoE erfordert SNMP-Schreibzugriff ({NO_WRITE_CREDS})"),
     ("mikrotik", {}, "PoE erfordert SNMP-Schreibzugriff (Treiber mikrotik kann PoE nicht per SNMP schreiben)"),
-], ids=["procurve-snmp-off", "procurve-no-identity", "mikrotik"])
+    ("generic", {}, "PoE erfordert SNMP-Schreibzugriff (Treiber generic kann PoE nicht per SNMP schreiben)"),      # R35
+    ("arista", {}, "PoE erfordert SNMP-Schreibzugriff (Treiber arista kann PoE nicht per SNMP schreiben)"),        # R35
+], ids=["procurve-snmp-off", "procurve-no-identity", "mikrotik", "generic", "arista"])
 def test_poe_without_an_snmp_way_is_422(api, fake, driver, kw, detail):
     refused(plan(api, switch(api, driver, **kw), POE_OFF), 422, detail)
     assert fake.calls == []          # neither an SSH nor an SNMP read

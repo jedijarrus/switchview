@@ -745,13 +745,14 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
     return "snmp", None, None
 
 
-async def _read_snmp(row, driver: drivers.Driver, ssh_error: str | None = None) -> tuple[dict, dict]:
+async def _read_snmp(row, driver: drivers.Driver, ssh_error: str | None = None, *, with_poe: bool = False) -> tuple[dict, dict]:
     """Der Live-Read per SNMP (snmpwrite.read_cfg) im Change-Lock des Switches, wie der SSH-Weg seine Konfiguration im selben Lock liest:
-    nie mitten in eine laufende Aenderung hinein. read_cfg faellt geschlossen aus, das wird 502 mit dem Grund; springt SNMP fuer einen
-    gescheiterten SSH-Read ein (ssh_error), nennt die Meldung beide Fehler."""
+    nie mitten in eine laufende Aenderung hinein. with_poe (R34): auch die PoE-Tabellen, fuer eine Aenderung, die PoE beruehrt
+    (changes.touches_poe der Anfrage, wie run_change es rechnet). read_cfg faellt geschlossen aus, das wird 502 mit dem Grund; springt
+    SNMP fuer einen gescheiterten SSH-Read ein (ssh_error), nennt die Meldung beide Fehler."""
     try:
         async with sshcli.lock(row["id"]):
-            return await snmpwrite.read_cfg(row, driver)
+            return await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
     except (snmp.SnmpError, OSError) as e:
         if ssh_error:
             raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {ssh_error} (per SNMP auch nicht: {e})")
@@ -791,11 +792,11 @@ async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str |
     """Eine neue Port-Aenderung per SNMP (_choose_mechanism hat schon abgelehnt, was dort nicht geht): gegen einen Live-Read geplant,
     jeder Port muss in ihm stehen. ssh_error: SNMP springt fuer diesen gescheiterten SSH-Read ein, das sagt eine Warnung vorne."""
     _check_request(body, SNMP_PORT_RE)
-    cfg, raw = await _read_snmp(row, driver, ssh_error)
+    req = {"ports": body.ports, "set": body.change.model_dump(), "expert": body.expert}
+    cfg, raw = await _read_snmp(row, driver, ssh_error, with_poe=changes.touches_poe(req))
     missing = [p for p in body.ports if p not in cfg["ports"]]
     if missing:
         raise HTTPException(422, f"Port gibt es auf diesem Switch nicht: {', '.join(missing)}")
-    req = {"ports": body.ports, "set": body.change.model_dump(), "expert": body.expert}
     try:
         plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, mechanism="snmp", driver=driver,
                                   raw=raw)
@@ -867,7 +868,7 @@ async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict
         reason = _snmp_unwritable(row, driver, set())
         if reason:
             raise HTTPException(409, f"Änderung #{ch['id']} lief per SNMP und lässt sich nur per SNMP zurücknehmen: {reason}")
-        cfg, raw = await _read_snmp(row, driver)
+        cfg, raw = await _read_snmp(row, driver, with_poe=changes.touches_poe(req))    # R34: before mit poe liest PoE mit
         way = {"mechanism": "snmp", "driver": driver, "raw": raw}    # die Schluesselwoerter von plan_ports fuer diesen Weg
     else:
         _refuse_ssh_way(row, driver, ch, "zurücknehmen")

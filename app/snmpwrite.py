@@ -40,8 +40,9 @@ import snmp
 
 # Die Walks von read_cfg: Schluessel aus poller.O, die beiden PortLists als Hex wie im Poller (poller.HEX). Fuer pvid, egress, untagged,
 # ifadmin und ifalias hat jeder Treiber dieselben OIDs wie poller.O (tests/test_drivers.py), gelesen wird also, was geschrieben wird.
-# Dazu "ifType" fuer jeden Treiber, dessen Ports select_ports danach waehlt (poller.by_iftype: alle ausser procurve), und die PoE-Walks
-# des Treibers (poller.poe_walks, OIDs aus driver.oids, ohne die Leistung: die braucht nur die Anzeige).
+# Dazu "ifType" fuer jeden Treiber, dessen Ports select_ports danach waehlt (poller.by_iftype: alle ausser procurve), und fuer eine
+# Aenderung, die PoE beruehrt (R34), die PoE-Walks des Treibers (poller.poe_walks, OIDs aus driver.oids, ohne die Leistung: die braucht
+# nur die Anzeige).
 WALKS = ("ifName", "ifAlias", "ifAdmin", "bp2if", "vlanName", "vlanEgress", "vlanUntagged", "pvid", "ifStack")
 # Freitext, den read_cfg als Hex walkt (R18). Ohne MIBs gibt net-snmp einen OCTET STRING mit einem Byte, das es nicht fuer druckbar
 # haelt (etwa jedes Byte eines Umlauts in UTF-8), als nacktes Hex aus, alle 16 Bytes umbrochen; ein strikter Text-Walk lehnt das ab
@@ -223,17 +224,19 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     return cfg, raw
 
 
-async def read_cfg(row, driver) -> tuple[dict, dict]:
+async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
     """Den Switch `row` (switches-Zeile) jetzt per SNMP lesen: (cfg, raw) wie build_cfg, mit cfg["hostname"] = sys_name der Zeile.
 
     Liest mit der LESE-Identitaet (poller.creds_of(row)), alle Walks parallel und strikt (snmp.walk(strict=True)): ein Walk, der
     mittendrin abbricht, oder eine fremde Zeile hinter einem Wert ist ein Fehler, keine kuerzere oder falsche Tabelle. Waehlt der
     Treiber seine Ports nach ifType (poller.by_iftype, alle ausser procurve), kommt ifType als weiterer Walk dazu; ProCurve braucht
-    ihn nicht. Bei driver.vlan_strategy "cisco_vmps" kommt driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg), bei einem
-    Treiber mit snmp_poe seine PoE-Walks (poller.poe_walks, ohne die Leistung), auch fuer eine Aenderung, die PoE nicht beruehrt: cfg
-    beschreibt immer den ganzen Port. Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex, damit Umlaute lesbar sind;
-    build_cfg bekommt driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den
-    Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
+    ihn nicht. Bei driver.vlan_strategy "cisco_vmps" kommt driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg). Die PoE-Walks
+    des Treibers (poller.poe_walks, ohne die Leistung) nur mit with_poe, also nur fuer eine Aenderung, die PoE beruehrt
+    (changes.touches_poe, R34): eine PoE-MIB, die scheitert oder gesperrt ist, haelt so keine VLAN-, Namens- oder An/Aus-Aenderung auf.
+    Ohne with_poe hat jeder Port poe None und raw["poe"] ist leer; beide Reads einer Aenderung (vorher, Zuruecklesen) brauchen
+    denselben Wert. Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex, damit Umlaute lesbar sind; build_cfg bekommt
+    driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den Change-Lock: den haelt
+    der Aufrufer (asyncio.Lock ist nicht reentrant).
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
@@ -246,7 +249,8 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
         walks["ifType"] = (poller.O["ifType"], False)
     if vm_base:
         walks["vmVlan"] = (vm_base, False)
-    walks |= {k: (base, False) for k, base in poller.poe_walks(driver).items()}
+    if with_poe:
+        walks |= {k: (base, False) for k, base in poller.poe_walks(driver).items()}
     results = await asyncio.gather(*(snmp.walk(host, cred, oid, hex_values=hx, strict=True) for oid, hx in walks.values()),
                                    return_exceptions=True)
     for r in results:

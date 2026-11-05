@@ -291,15 +291,15 @@ def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physica
     von select_ports ohne trunk_ports: PoE hat nur ein physischer Port). Die PoE-Eintraege sind die Indexe der Admin- und der
     Status-Spalte. Wie ihr <pethPsePortGroupIndex>.<pethPsePortIndex> zum ifIndex steht, legt RFC 3621 nicht fest; das sagt
     driver.poe_index:
-      ifindex       Gruppe 1 und pethPsePortIndex = ifIndex. Ein Eintrag einer anderen Gruppe (ein weiteres Stack-Mitglied, ein Modul)
-                    gehoert zu keinem Port. Zeigt ein Eintrag der Gruppe 1 auf keinen physischen Port (kein Interface, eins, das kein
-                    Port ist, ein Trunk), gilt die Annahme fuer diesen Switch nicht, etwa weil er Ports durchzaehlt, statt den ifIndex zu
-                    nehmen: dann gehoert KEIN Eintrag zu einem Port, auch keiner, der zufaellig passte.
+      ifindex       (nur ProCurve, R35) Gruppe 1 und pethPsePortIndex = ifIndex. Ein Eintrag einer anderen Gruppe (ein weiteres
+                    Stack-Mitglied, ein Modul) gehoert zu keinem Port. Zeigt ein Eintrag der Gruppe 1 auf keinen physischen Port (kein
+                    Interface, eins, das kein Port ist, ein Trunk), gilt die Annahme fuer diesen Switch nicht, etwa weil er Ports
+                    durchzaehlt, statt den ifIndex zu nehmen: dann gehoert KEIN Eintrag zu einem Port, auch keiner, der zufaellig passte.
       cisco_entity  cpeExtPsePortEntPhyIndex des Eintrags (entPhysicalIndex seines Ports, 0 = keiner) und dessen
                     entAliasMappingIdentifier-Zeilen (ENTITY-MIB): zeigen sie, bei jedem logischen Index, auf genau ein ifIndex.N und
                     ist N ein physischer Port, gehoert der Eintrag zu ihm. Eine Zeile, die auf etwas anderes zeigt (keine ifTable-Zeile,
                     0.0), zaehlt nicht.
-      jede andere   kein Eintrag gehoert zu einem Port.
+      none, jede andere  kein Eintrag gehoert zu einem Port.
     Zeigen zwei Eintraege auf denselben Port, gehoert keiner von beiden zu ihm.
 
     Ergebnis: ({ifIndex: {"group", "index", "admin", "status", "power"}}, [PoE-Indexe "<Gruppe>.<Port>" ohne Port, nach Gruppe und Port]).

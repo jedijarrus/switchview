@@ -38,8 +38,8 @@ import snmp
 import snmpwrite
 import sshcli
 from drivers import Driver
-from switchfix import (CATALYST_VMVLAN, HOST, IF_ALIAS, IFTYPE_SAMPLE, POE_WALKS, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN, W_CATALYST,
-                       W_SAMPLE, WALK_BASES, agent, edit_walks, store)
+from switchfix import (CATALYST_VMVLAN, HOST, IF_ALIAS, IFTYPE_SAMPLE, PVID, VLAN_EGRESS, VLAN_UNTAGGED, VMVLAN, W_CATALYST, W_SAMPLE,
+                       WALK_BASES, agent, edit_walks, store)
 
 USER = "tester"
 FW = "WB.16.99.0001"
@@ -82,8 +82,8 @@ READ_STEPS = [(f"Lese {HOST} per SNMP", "info"), ("Zustand vorher gelesen", "inf
 #   generic   the Catalyst over Q-BRIDGE: Gi1/0/2 (bridge port 2) untagged 1 + tagged 20, PVID 1.
 VIEWS = {"procurve": agent(W_SAMPLE), "cisco": agent({**W_CATALYST, "vmVlan": CATALYST_VMVLAN}), "generic": agent(W_CATALYST)}
 SAMPLE_BY_IFTYPE = agent({**W_SAMPLE, "ifType": IFTYPE_SAMPLE})    # the sample switch for a driver that selects its ports by ifType
-# read_cfg: nine walks, + ifType when by ifType, + vmVlan on cisco, + the PoE walks (Task 12): two, on cisco four (its entity tables)
-WALKS_PER_READ = {"procurve": 11, "cisco": 15, "generic": 12}
+# read_cfg: nine walks, + ifType when by ifType, + vmVlan on cisco; no PoE walk, none of these changes touches PoE (R34)
+WALKS_PER_READ = {"procurve": 9, "cisco": 11, "generic": 10}
 BY_OID = {base: key for key, base in WALK_BASES.items()}
 
 PC_PROBE = {"ports": ["2"], "change": {"untagged": "20"}}
@@ -156,9 +156,9 @@ def inv_of(cfg: dict) -> dict:
 class Agent:
     """The switch behind SNMP: snmp.walk answers from its rows W (switchfix.agent format), snmp.set_vars goes through switchfix.store.
     Records every walk (OID, cred), every SET (host, cred, varbinds) and whether the switch's change lock was held at each of them.
-    A switch whose rows W have no PoE walk answers it with no rows (it has no PoE). Knobs: set_mode "apply" (default), "ignore"
-    (answers, takes nothing), "lost" (takes it, the answer never comes: SnmpError), "timeout" (takes nothing, no answer); drop: OIDs,
-    or base OIDs, whose varbinds it silently ignores (a partly applied SET);
+    A walk of anything its rows do not have fails the test, a PoE walk too (these changes do not touch PoE, R34). Knobs: set_mode
+    "apply" (default), "ignore" (answers, takes nothing), "lost" (takes it, the answer never comes: SnmpError), "timeout" (takes
+    nothing, no answer); drop: OIDs, or base OIDs, whose varbinds it silently ignores (a partly applied SET);
     after_set: W -> W, what else changes on the switch right after the SET; read_error / readback_error: what every walk raises
     before / after the first SET; on_set: a coroutine function awaited as the SET arrives; set_raises: what the SET raises then,
     before taking anything."""
@@ -181,8 +181,8 @@ class Agent:
         error = self.readback_error if self.sets else self.read_error
         if error:
             raise error
-        assert BY_OID[oid] in self.W or BY_OID[oid] in POE_WALKS, f"walk of {BY_OID[oid]}, which this switch does not answer"
-        return list(self.W.get(BY_OID[oid], []))
+        assert BY_OID[oid] in self.W, f"walk of {BY_OID[oid]}, which this switch does not answer"
+        return list(self.W[BY_OID[oid]])
 
     async def set_vars(self, host, cred, varbinds, timeout=20):
         self.sets.append((host, cred, list(varbinds)))

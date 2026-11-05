@@ -9,7 +9,8 @@ caps (Faehigkeiten):
   snmp_admin  Port auf / ab (ifAdminStatus)
   snmp_name   Portname (ifAlias)
   snmp_poe    PoE ein / aus (pethPsePortAdminEnable) und Status; ob ein Port PoE hat, zeigt erst der Read, und nur ein Port, dem
-              poller.poe_ports einen PoE-Eintrag sicher zuordnet, hat welches (poe_index). Per SNMP bei jedem Treiber, auch ProCurve (R30)
+              poller.poe_ports einen PoE-Eintrag sicher zuordnet, hat welches (poe_index). Immer per SNMP, auch bei ProCurve (R30).
+              Nur ProCurve und Cisco (R35): nur fuer sie ist belegt, welcher PoE-Eintrag zu welchem Port gehoert
   snmp_autosave  der Switch speichert jeden SNMP-Set selbst dauerhaft (implizites write memory); nur ProCurve. Ohne sie steht eine
               SNMP-Aenderung nur in der laufenden Konfiguration, bis jemand am Switch speichert (R26)
   nac         802.1X / MAC-Auth / RADIUS; nur ueber die CLI, also nur ProCurve
@@ -19,9 +20,11 @@ vlan_strategy (wie ein Access-Port sein VLAN bekommt):
   cisco_vmps  Access-Ports ueber vmVlan (CISCO-VLAN-MEMBERSHIP-MIB); Trunk-Mitglieder weiter ueber dot1q
 poe_index (wie ein PoE-Eintrag, Index <pethPsePortGroupIndex>.<pethPsePortIndex>, zu seinem Port findet; RFC 3621 legt das nicht fest,
 poller.poe_ports wendet es an; was nicht sicher passt, gehoert zu keinem Port):
-  ifindex       Gruppe 1 und pethPsePortIndex = ifIndex eines physischen Ports (Vorgabe). Belegt fuer ProCurve / AOS-S ohne Stack (HP
-                nimmt den ifIndex als PoE-Port-Index); fuer die anderen Hersteller eine Annahme, die poe_ports am Switch prueft: zeigt ein
-                Eintrag der Gruppe 1 auf keinen physischen Port, gilt sie dort nicht, und kein Eintrag wird zugeordnet
+  none          kein Eintrag gehoert zu einem Port (Vorgabe: ein Treiber ohne belegte Zuordnung schaltet nie PoE)
+  ifindex       Gruppe 1 und pethPsePortIndex = ifIndex eines physischen Ports; nur ProCurve / AOS-S (R35: HP nimmt den ifIndex als
+                PoE-Port-Index). Zeigt ein Eintrag der Gruppe 1 auf keinen physischen Port, gilt das fuer den Switch nicht, und kein
+                Eintrag wird zugeordnet. Bei einem anderen Hersteller koennte ein versetzter Index trotzdem stets auf irgendeinen
+                physischen Port zeigen: falsch zugeordnet, und das Pruefen faende es nicht (es liest mit derselben Zuordnung zurueck)
   cisco_entity  CISCO-POWER-ETHERNET-EXT-MIB cpeExtPsePortEntPhyIndex (entPhysicalIndex des PoE-Ports) und ENTITY-MIB
                 entAliasMappingIdentifier (entPhysicalIndex -> ifIndex.N); klassisches IOS zaehlt PoE-Eintraege nach Portnummer im
                 Stack-Mitglied, seine ifIndexe beginnen bei 10101
@@ -37,7 +40,7 @@ class Driver:
     vlan_strategy: str
     oids: dict[str, str]
     notes: str
-    poe_index: str = "ifindex"
+    poe_index: str = "none"
 
 
 # Standard-Profil: Basis-OIDs ohne Instanz-Index (der Aufrufer haengt ".<index>" an), ohne fuehrenden Punkt wie in poller.O.
@@ -77,7 +80,10 @@ _CISCO_POE_POWER = "1.3.6.1.4.1.9.9.402.1.2.1.9"
 _CISCO_POE_ENTPHY = "1.3.6.1.4.1.9.9.402.1.2.1.11"
 _ENT_ALIAS = "1.3.6.1.2.1.47.1.3.2.1.2"
 
-_SNMP_CAPS = frozenset({"snmp_vlan", "snmp_admin", "snmp_name", "snmp_poe"})
+_SNMP_CAPS = frozenset({"snmp_vlan", "snmp_admin", "snmp_name"})
+# PoE nur, wo die Zuordnung PoE-Eintrag -> Port belegt ist (R35): ProCurve (poe_index ifindex) und Cisco (cisco_entity). Bei MikroTik
+# ist nicht einmal belegt, dass es PoE ueber POWER-ETHERNET-MIB zeigt (R31), fuer alle anderen fehlt eine belegte Zuordnung.
+_POE = frozenset({"snmp_poe"})
 _CLI_CAPS = frozenset({"cli", "nac", "backup"})
 # Wie dauerhaft ein SNMP-Set ist, haengt am Geraet (R26): ProCurve / AOS-S speichert ihn selbst, fuer alle anderen ist das nicht
 # bestaetigt, sie bekommen die Faehigkeit nicht.
@@ -85,21 +91,22 @@ _AUTOSAVE = frozenset({"snmp_autosave"})
 
 _UNGEPRUEFT = (
     "Standard-Profil (Q-BRIDGE, IF-MIB, POWER-ETHERNET-MIB); SET-Unterstuetzung und herstellerspezifische Abweichungen "
-    "(Index-Offsets, PoE-MIB-Variante) sind noch nicht gegen ein Geraet bestaetigt. PoE nur, wo der PoE-Index der ifIndex des Ports "
-    "ist (Gruppe 1); passt das am Switch nicht, hat kein Port PoE."
+    "(Index-Offsets) sind noch nicht gegen ein Geraet bestaetigt. Kein PoE (R35): welcher PoE-Eintrag zu welchem Port gehoert, ist "
+    "fuer diesen Hersteller nicht belegt."
 )
 
 # Jede Zeile bekommt ihr eigenes oids-dict (dict(...)), damit sich Treiber nie ein veraenderbares Profil teilen.
 DRIVERS: dict[str, Driver] = {d.name: d for d in (
     Driver(
-        "procurve", _SNMP_CAPS | _CLI_CAPS | _AUTOSAVE, "qbridge", {**_STANDARD_OIDS, "poe_power": _HP_POE_POWER},
+        "procurve", _SNMP_CAPS | _POE | _CLI_CAPS | _AUTOSAVE, "qbridge", {**_STANDARD_OIDS, "poe_power": _HP_POE_POWER},
         "HPE ProCurve / AOS-S. Standardweg ist die SSH-CLI (gestuft, Backup, NAC), SNMP nur als Fallback; PoE immer per SNMP (R30). Die "
         "PVID darf nicht in der Tagged-Liste stehen; ein SNMP-Set loest implizit write-mem aus (kein Staging). PoE-Index = ifIndex, "
         "Gruppe 1: ein weiteres Stack-Mitglied (Gruppe 2 ...) hat kein PoE.",
+        poe_index="ifindex",
     ),
     Driver("aruba_cx", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "Aruba AOS-CX. " + _UNGEPRUEFT),
     Driver(
-        "cisco", _SNMP_CAPS, "cisco_vmps",
+        "cisco", _SNMP_CAPS | _POE, "cisco_vmps",
         {**_STANDARD_OIDS, "vmvlan": _VMVLAN, "poe_power": _CISCO_POE_POWER, "poe_entphy": _CISCO_POE_ENTPHY, "ent_alias": _ENT_ALIAS},
         "Cisco IOS (klassisch). Access-VLAN ueber vmVlan statt ueber Q-BRIDGE-Untagged; Trunk-Mitglieder weiter ueber dot1q. PoE-Port "
         "ueber cpeExtPsePortEntPhyIndex und ENTITY-MIB (entAliasMappingIdentifier).",
@@ -107,7 +114,8 @@ DRIVERS: dict[str, Driver] = {d.name: d for d in (
     ),
     Driver(
         "cisco_sb", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
-        "Cisco Small Business (SG/CBS), kein klassisches IOS. Angenommen: Q-BRIDGE statt vmVlan; nicht gegen ein Geraet bestaetigt.",
+        "Cisco Small Business (SG/CBS), kein klassisches IOS. Angenommen: Q-BRIDGE statt vmVlan; nicht gegen ein Geraet bestaetigt. "
+        "Kein PoE (R35): seine PoE-MIB (CISCOSB-POE-MIB) und die Zuordnung zum Port sind nicht belegt.",
     ),
     Driver("comware", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "HPE/H3C Comware. " + _UNGEPRUEFT),
     Driver("juniper", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "Juniper Junos (EX/QFX). " + _UNGEPRUEFT),
@@ -116,13 +124,14 @@ DRIVERS: dict[str, Driver] = {d.name: d for d in (
     Driver("netgear", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "Netgear Smart/Managed Switches. " + _UNGEPRUEFT),
     # R31: dass RouterOS PoE ueber POWER-ETHERNET-MIB zeigt, ist nicht belegt; ohne snmp_poe weder PoE-Walk noch PoE-SET
     Driver(
-        "mikrotik", _SNMP_CAPS - {"snmp_poe"}, "qbridge", dict(_STANDARD_OIDS),
+        "mikrotik", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
         "MikroTik RouterOS. Standard-Profil (Q-BRIDGE, IF-MIB); SET-Unterstuetzung und herstellerspezifische Abweichungen sind noch nicht "
         "gegen ein Geraet bestaetigt. Kein PoE: dass RouterOS es ueber POWER-ETHERNET-MIB zeigt, ist nicht belegt (R31).",
     ),
     Driver(
         "generic", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
-        "Reine Standard-MIBs (Q-BRIDGE, IF-MIB, POWER-ETHERNET-MIB) ohne Herstellerannahmen; Fallback fuer unbekannte Treibernamen.",
+        "Reine Standard-MIBs (Q-BRIDGE, IF-MIB) ohne Herstellerannahmen; Fallback fuer unbekannte Treibernamen. Kein PoE (R35): "
+        "POWER-ETHERNET-MIB sagt nicht, welcher PoE-Eintrag zu welchem Port gehoert.",
     ),
 )}
 

@@ -265,6 +265,15 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             "warnings": list(dict.fromkeys(warnings)), "expert": expert, "mechanism": "ssh"}
 
 
+def touches_poe(req: dict) -> bool:
+    """Beruehrt die Port-Aenderung `req` (die Anfrage, die create_change speichert) PoE (R34)? Ja, wenn ihr set ein poe hat
+    (vorwaerts) oder ihr desired (ein Revert: before einer Aenderung) bei einem Port das Feld poe. Nur dann liest snmpwrite.read_cfg
+    die PoE-Tabellen. Die eine Stelle dafuer: die Vorschau (main) und beide Reads von run_change rechnen es aus derselben Anfrage."""
+    if (req.get("set") or {}).get("poe") is not None:
+        return True
+    return any(isinstance(d, dict) and "poe" in d for d in (req.get("desired") or {}).values())
+
+
 def _snmp_differs(raw: dict, p: str, cur: dict, k: str, v) -> bool:
     """Revert per SNMP (desired = before einer Aenderung): ist Feld k von Port p (cur = port_state) nicht schon v? Die PVID kennt cfg
     nicht, sie steht in raw (R21). Was der SNMP-Weg nicht lesen kann (alles ausser snmpwrite.FIELD_CAPS, etwa 802.1X / MAC-Anmeldung:
@@ -661,7 +670,8 @@ async def _run_snmp(cid: int, ch, row):
          Lock noch einmal, mit der Switch-Zeile von dann (R33): SNMP-Schreiben kann inzwischen aus sein, die Zugangsdaten weg. Ab da
          gilt diese Zeile (Zugangsdaten, Treiber).
       2. Live lesen: snmpwrite.read_cfg selbst, nie main._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
-         reentrant). Scheitert es: failed.
+         reentrant), die PoE-Tabellen nur, wenn die Aenderung PoE beruehrt (touches_poe, R34; das Zuruecklesen genauso). Scheitert es:
+         failed.
       3. Gegen diesen Read neu planen (die Anfrage der Aenderung): gesperrt oder shown anders als in der Vorschau -> aborted, ebenso ein
          Plan ohne Varbinds ("Nichts zu ändern": nie ok ohne Zuruecklesen und Pruefen); nichts geschrieben. before kommt aus diesem
          Read (mit der PVID, R21) und steht in der Zeile, bevor das SET hinausgeht.
@@ -701,8 +711,9 @@ async def _run_snmp(cid: int, ch, row):
             autosave = drivers.can(driver, "snmp_autosave")
             kept = SNMP_KEPT[autosave]
             await _step(cid, steps, f"Lese {row['host']} per SNMP")
+            with_poe = touches_poe(req)    # R34: fuer beide Reads dieser Aenderung derselbe Wert
             try:
-                cfg, raw = await snmpwrite.read_cfg(row, driver)
+                cfg, raw = await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
             except (snmp.SnmpError, OSError) as e:
                 status, error = "failed", f"Zustand per SNMP nicht lesbar: {e}"
                 await _step(cid, steps, error, "error")
@@ -732,7 +743,7 @@ async def _run_snmp(cid: int, ch, row):
                 output = str(e)
                 await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
             try:
-                cfg_after, raw_after = await snmpwrite.read_cfg(row, driver)
+                cfg_after, raw_after = await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
             except (snmp.SnmpError, OSError) as e:
                 status, error = "unclear", f"Zurücklesen per SNMP fehlgeschlagen: {e}"
                 await _step(cid, steps, f"{error}. {kept}", "error")

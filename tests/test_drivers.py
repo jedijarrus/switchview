@@ -23,14 +23,17 @@ from drivers import DRIVERS, Driver, can, driver_for
 # The drivers the registry has to offer (spec 1), in the order a driver dropdown would show them.
 NAMES = ["procurve", "aruba_cx", "cisco", "cisco_sb", "comware", "juniper", "arista", "dell", "netgear", "mikrotik", "generic"]
 
-SNMP_CAPS = {"snmp_vlan", "snmp_admin", "snmp_name", "snmp_poe"}
-# R31: RouterOS is not known to expose PoE through POWER-ETHERNET-MIB; unverified, so mikrotik has no PoE (fail closed).
-NO_POE = {"mikrotik"}
+SNMP_CAPS = {"snmp_vlan", "snmp_admin", "snmp_name"}
+# PoE only where the mapping of a PoE entry to its port is sourced (R35): ProCurve (index = ifIndex) and Cisco (ENTITY-MIB). Every other
+# driver has none: mikrotik is not known to expose PoE through POWER-ETHERNET-MIB at all (R31), and for the rest an offset numbering
+# could map every entry to SOME physical port, the wrong one, and the read-back would confirm it (it reads through the same mapping).
+POE_CAPS = {"snmp_poe"}
+POE_DRIVERS = {"procurve", "cisco"}
 CLI_CAPS = {"cli", "nac", "backup"}    # only reachable through the SSH CLI, so only the ProCurve driver may have them
 # R26: whether an SNMP set persists depends on the device. ProCurve / AOS-S saves it by itself (implicit write memory); for no other
 # driver is that confirmed, so only ProCurve has it.
 AUTOSAVE_CAPS = {"snmp_autosave"}
-ALL_CAPS = SNMP_CAPS | CLI_CAPS | AUTOSAVE_CAPS
+ALL_CAPS = SNMP_CAPS | POE_CAPS | CLI_CAPS | AUTOSAVE_CAPS
 STRATEGIES = {"qbridge", "cisco_vmps"}
 
 # Base OIDs: no instance index (callers append ".<index>"), no leading dot (snmp._parse and poller.O work without one).
@@ -65,8 +68,8 @@ EXTRA_OIDS = {
     "procurve": {"poe_power": HP_POE_POWER},
     "cisco": {"vmvlan": VMVLAN, "poe_power": CISCO_POE_POWER, "poe_entphy": CISCO_POE_ENTPHY, "ent_alias": ENT_ALIAS},
 }
-# How a PoE entry finds its port (poller.poe_ports): through ENTITY-MIB on cisco, by ifIndex everywhere else
-POE_INDEX = {"cisco": "cisco_entity"}
+# How a PoE entry finds its port (poller.poe_ports): by ifIndex on procurve, through ENTITY-MIB on cisco, not at all elsewhere
+POE_INDEX = {"procurve": "ifindex", "cisco": "cisco_entity"}
 
 
 def _sqlite_rows(sql: str, *rows: tuple) -> list[sqlite3.Row]:
@@ -90,7 +93,7 @@ def test_registry_has_the_planned_drivers():
 
 def test_driver_shape():
     assert [f.name for f in dataclasses.fields(Driver)] == ["name", "caps", "vlan_strategy", "oids", "notes", "poe_index"]
-    assert Driver(name="x", caps=frozenset(), vlan_strategy="qbridge", oids={}, notes="n").poe_index == "ifindex"    # the default
+    assert Driver(name="x", caps=frozenset(), vlan_strategy="qbridge", oids={}, notes="n").poe_index == "none"    # the default maps nothing
     for key, driver in DRIVERS.items():
         assert isinstance(driver.caps, frozenset), key
         assert isinstance(driver.notes, str) and driver.notes.strip(), key
@@ -117,10 +120,10 @@ def test_cisco_is_snmp_only():
 
 @pytest.mark.parametrize("name", NAMES)
 def test_capability_table(name):
-    # all eight capabilities asked through can(), not only read from .caps: ProCurve has all, everyone else the four snmp_* write ones
-    # (no snmp_autosave: R26), mikrotik without snmp_poe (R31)
+    # all eight capabilities asked through can(), not only read from .caps: ProCurve has all, everyone else the three snmp_* write ones
+    # (no snmp_autosave: R26), cisco with snmp_poe as well (R35)
     driver = DRIVERS[name]
-    expected = ALL_CAPS if name == "procurve" else SNMP_CAPS - {"snmp_poe"} if name in NO_POE else SNMP_CAPS
+    expected = ALL_CAPS if name == "procurve" else SNMP_CAPS | POE_CAPS if name in POE_DRIVERS else SNMP_CAPS
     assert {op for op in ALL_CAPS if can(driver, op)} == expected
     assert driver.caps == expected
 
@@ -189,10 +192,12 @@ def test_oid_profile_is_pinned(name):
 
 @pytest.mark.parametrize("name", NAMES)
 def test_poe_index_per_driver(name):
-    # RFC 3621 does not relate <group>.<port> to an ifIndex: cisco maps through ENTITY-MIB (classic IOS numbers the PoE entries by the
-    # port number on the stack member, its ifIndexes start at 10101), every other driver by the default "group 1, index = ifIndex"
-    assert DRIVERS[name].poe_index == POE_INDEX.get(name, "ifindex")
-    assert {d.poe_index for d in DRIVERS.values()} <= {"ifindex", "cisco_entity"}
+    # RFC 3621 does not relate <group>.<port> to an ifIndex: procurve by "group 1, index = ifIndex" (HP uses the ifIndex as the PoE port
+    # index), cisco through ENTITY-MIB (classic IOS numbers the PoE entries by the port number on the stack member, its ifIndexes start
+    # at 10101), every other driver "none" (R35) - and only the two drivers with a mapping have the cap
+    assert DRIVERS[name].poe_index == POE_INDEX.get(name, "none")
+    assert can(DRIVERS[name], "snmp_poe") is (DRIVERS[name].poe_index != "none")
+    assert {d.poe_index for d in DRIVERS.values()} <= {"ifindex", "cisco_entity", "none"}
 
 
 def test_oids_are_plain_numeric_bases():

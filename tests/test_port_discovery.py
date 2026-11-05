@@ -533,10 +533,9 @@ def test_build_cfg_agrees_with_poller_non_procurve_on_random_switches():
 # ── read_cfg: ifType only where it selects ────────────────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("name", list(DRIVERS))
 async def test_read_cfg_walks_iftype_strictly_only_for_drivers_that_select_by_it(monkeypatch, name):
-    """procurve: the walks of Task 7 and no ifType walk, so port discovery gives the ProCurve write path no new way to fail (the PoE
-    walks of Task 12 come on top for every driver with snmp_poe, see tests/test_poe.py). Every other driver walks ifType, strictly like
-    every walk of read_cfg and as text (not hex), and gets its ports from it: on the Catalyst Po1 and the Gigabit ports from 10101 on,
-    with Po1 as a trunk."""
+    """procurve: the walks of Task 7 and no ifType walk, so the ProCurve write path has no new way to fail. Every other driver walks
+    ifType, strictly like every walk of read_cfg and as text (not hex), and gets its ports from it: on the Catalyst Po1 and the
+    Gigabit ports from 10101 on, with Po1 as a trunk. (PoE walks only for a change that touches PoE, R34: tests/test_poe.py.)"""
     calls = []
 
     async def fake_walk(host, cred, oid, hex_values=False, timeout=60, strict=False):
@@ -551,14 +550,13 @@ async def test_read_cfg_walks_iftype_strictly_only_for_drivers_that_select_by_it
     assert len(calls) == len({oid for oid, _, _ in calls})    # no walk twice
     hexed = {oid for oid, hx, _ in calls if hx}
     assert hexed == {VLAN_EGRESS, VLAN_UNTAGGED, IF_ALIAS, VLAN_NAME}    # the PortLists and, since R18, the free text
-    poe = len(poller.poe_walks(driver))    # 2, cisco 4 (with its entity tables), mikrotik 0 (R31)
     if name == "procurve":
         assert IF_TYPE not in {oid for oid, _, _ in calls}
-        assert len(calls) == len(BASES) + poe
+        assert len(calls) == len(BASES)
         assert list(cfg["ports"]) == ["Vl1", "Vl10"]    # what the ProCurve rule makes of a Catalyst: unchanged, and not our case
     else:
         assert [c for c in calls if c[0] == IF_TYPE] == [(IF_TYPE, False, True)]
-        assert len(calls) == len(BASES) + 1 + (driver.vlan_strategy == "cisco_vmps") + poe
+        assert len(calls) == len(BASES) + 1 + (driver.vlan_strategy == "cisco_vmps")
         assert list(cfg["ports"]) == list(CATALYST_PORTS)
         assert cfg["trunks"] == {"Po1": ["Gi1/0/3", "Gi1/0/4"]}
 
@@ -616,9 +614,9 @@ CATALYST_STORED = [(name, trunk, members) for _, name, trunk, members in CATALYS
                                           ("procurve", "procurve"), ("", "procurve")])
 async def test_poll_switch_hands_the_rows_driver_to_build(app_db, monkeypatch, stored, used):
     """The display poll of the Catalyst: every walk of poller.O (ifType included) leniently as always, plus the PoE walks of the
-    row's driver (Task 12; this Catalyst has no PoE), and _build gets the driver of the switches row, an empty one meaning procurve.
-    With a non-ProCurve driver its ports land in the ports table; read as procurve, the very same answers give only the two SVIs, as
-    before this change."""
+    row's driver (Task 12, only procurve and cisco have any, R35; this Catalyst has no PoE), and _build gets the driver of the switches
+    row, an empty one meaning procurve. With a non-ProCurve driver its ports land in the ports table; read as procurve, the very same
+    answers give only the two SVIs, as before this change."""
     sid = await _add_switch(app_db, stored)
     calls = _agent(monkeypatch, CATALYST_RECORDING)
     seen, build = [], poller._build

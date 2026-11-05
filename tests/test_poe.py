@@ -7,19 +7,20 @@ ifIndex. So what these tests pin hardest is poller.poe_ports, the one mapping fr
 (poller._build) and the write path (snmpwrite.build_cfg / read_cfg). It fails closed: an entry it cannot map with certainty belongs to
 no port, and a port without a mapped entry has no PoE: no state on display, and every PoE write is refused with the reason
 (snmpwrite.snmp_block_reason).
-  * driver.poe_index "ifindex" (the default; ProCurve / AOS-S use the ifIndex as the PoE port index): group 1 and pethPsePortIndex =
-    the ifIndex of a physical port. An entry of another group (a stack member, a module) belongs to no port. If an entry of group 1
-    points at no physical port (no interface, a VLAN interface, a trunk), the assumption does not hold on this switch (port numbers
-    instead of ifIndexes, say) and NO entry is mapped.
+  * driver.poe_index "ifindex" (procurve only, R35; HP uses the ifIndex as the PoE port index): group 1 and pethPsePortIndex = the
+    ifIndex of a physical port. An entry of another group (a stack member, a module) belongs to no port. If an entry of group 1 points
+    at no physical port (no interface, a VLAN interface, a trunk), the assumption does not hold on this switch (port numbers instead of
+    ifIndexes, say) and NO entry is mapped.
   * "cisco_entity" (driver cisco): CISCO-POWER-ETHERNET-EXT-MIB cpeExtPsePortEntPhyIndex names the entry's port entity, ENTITY-MIB
     entAliasMappingIdentifier maps that to ifIndex.N. Missing, zero, not an ifIndex, several ifIndexes, no physical port: no port.
   * two entries on one port: neither counts.
-  * mikrotik has no snmp_poe (R31): no PoE walk, no PoE state, PoE writes refused.
+  * every other driver has no snmp_poe: mikrotik (R31) and all the rest (R35: without a sourced mapping, an offset numbering could map
+    every entry to SOME physical port, the wrong one, and the read-back would confirm it). No PoE walk, no PoE state, PoE refused.
 Around it: the display poll (lenient, ports.poe_admin / poe_status / poe_power, mW from hpicfPoePethPsePortPower or
-cpeExtPsePortPwrConsumption), the strict live read (an absent PoE table is no PoE, a present but inconsistent one fails closed),
-render_ops (pethPsePortAdminEnable.<group>.<port> i 1 / 2), planning (PortChange.poe, needed_ops, the SSH branch never plans PoE),
-routing R30 (PoE goes over SNMP for every driver, ProCurve included, or 422 with the reason), run_change verifying PoE on read-back and
-a revert that restores it.
+cpeExtPsePortPwrConsumption), the strict live read, only for a change that touches PoE (R34: read_cfg(with_poe=True); an absent PoE
+table is no PoE, a present but inconsistent one fails closed, while a change without PoE never walks it), render_ops
+(pethPsePortAdminEnable.<group>.<port> i 1 / 2), planning (PortChange.poe, needed_ops, the SSH branch never plans PoE), routing R30 (PoE
+goes over SNMP, ProCurve included, or 422 with the reason), run_change verifying PoE on read-back and a revert that restores it.
 
 No network, no switch: snmp.walk / snmp.set_vars answer from the simulated agent of tests/switchfix.py (store refuses what a switch
 would refuse), the SSH side is a trap that must never be touched on these paths. Expected lines, varbinds and reasons are written out
@@ -53,6 +54,7 @@ from switchfix import (BASES, CATALYST_VMVLAN, CISCO_POE_ENTPHY, CISCO_POE_POWER
                        WALK_BASES, agent, edit_walks, random_multivendor_switch, random_procurve_switch, store, walk_rows)
 
 PROCURVE, CISCO, GENERIC, MIKROTIK = DRIVERS["procurve"], DRIVERS["cisco"], DRIVERS["generic"], DRIVERS["mikrotik"]
+NO_POE_DRIVERS = [name for name in DRIVERS if name not in ("procurve", "cisco")]    # R31 (mikrotik), R35 (the rest)
 FW = "WB.16.99.0001"
 PAD = "00" * 7
 
@@ -113,19 +115,16 @@ def display(W: dict, driver: str = "procurve") -> list[tuple]:
 
 # ── The mapping: poller.poe_ports ────────────────────────────────────────────────────────────────────────────────────────────────
 def test_poe_walks_per_driver():
-    """What the poller and read_cfg walk for PoE, from the driver's OIDs (R4): the two RFC 3621 columns for every driver with
-    snmp_poe, the entity mapping for cisco, the power column (display only) where a vendor MIB has one; nothing for mikrotik (R31)."""
+    """What the poller and read_cfg walk for PoE, from the driver's OIDs (R4): the two RFC 3621 columns for the two drivers with
+    snmp_poe, the entity mapping for cisco, the power column (display only); nothing for every other driver (R31, R35)."""
     std = {"poeAdmin": POE_ADMIN, "poeStatus": POE_STATUS}
     entity = {"poeEntPhy": CISCO_POE_ENTPHY, "entAlias": ENT_ALIAS}
     assert poller.poe_walks(PROCURVE) == std
     assert poller.poe_walks(PROCURVE, power=True) == {**std, "poePower": HP_POE_POWER}
     assert poller.poe_walks(CISCO) == {**std, **entity}
     assert poller.poe_walks(CISCO, power=True) == {**std, **entity, "poePower": CISCO_POE_POWER}
-    for name, driver in DRIVERS.items():
-        if name in ("procurve", "cisco", "mikrotik"):
-            continue
-        assert poller.poe_walks(driver) == poller.poe_walks(driver, power=True) == std, name    # no power OID sourced for them
-    assert poller.poe_walks(MIKROTIK) == poller.poe_walks(MIKROTIK, power=True) == {}
+    for name in NO_POE_DRIVERS:
+        assert poller.poe_walks(DRIVERS[name]) == poller.poe_walks(DRIVERS[name], power=True) == {}, name
 
 
 def test_default_mapping_group_1_index_is_the_ifindex():
@@ -175,12 +174,14 @@ def test_an_index_that_is_no_physical_port_voids_the_default(index):
     assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "1", {"poe": False}) == unmappable("1.1, 1.2, 1.3, 1.4, 1.5, ...")
 
 
-def test_catalyst_numbering_is_unmappable_by_default():
+def test_catalyst_numbering_is_unmappable_by_the_default():
     """Classic IOS numbers PoE entries by the port number on the stack member (1.1-1.4) while the ports have ifIndex 10101-10104;
-    1.1 even is an ifIndex, of Vl1. With the default mapping (here: generic) nothing is mapped, never Vl1 or a wrong port."""
+    1.1 even is an ifIndex, of Vl1. The default mapping (ProCurve's "ifindex") maps none of them, never Vl1 or a wrong port; a generic
+    driver does not even read them (R35)."""
+    cols = {k: poller._tbl(rows, WALK_BASES[k]) for k, rows in W_CATALYST_POE.items() if k in POE_WALKS}
+    assert poller.poe_ports(PROCURVE, cols, ["10101", "10102", "10103", "10104"], strict=True) == ({}, ["1.1", "1.2", "1.3", "1.4"])
     cfg, raw = read(W_CATALYST_POE, "generic")
-    assert raw["poe"] == {} and set(poe_of(cfg).values()) == {None}
-    assert raw["poe_unmapped"] == ["1.1", "1.2", "1.3", "1.4"]
+    assert (raw["poe"], raw["poe_unmapped"]) == ({}, []) and set(poe_of(cfg).values()) == {None}
     assert {p[1:] for p in display(W_CATALYST_POE, "generic")} == {(None, None, None)}
 
 
@@ -247,16 +248,20 @@ def test_the_mapping_ignores_tables_of_another_strategy():
     W = {**W_CATALYST, "vmVlan": CATALYST_VMVLAN, "poeAdmin": walk_rows(POE_ADMIN, by_ifindex),
          "poeStatus": walk_rows(POE_STATUS, dict.fromkeys(by_ifindex, "2"))}
     assert read(W, "cisco")[1]["poe"] == {}
-    assert list(read(W, "generic")[1]["poe"]) == ["Gi1/0/1", "Gi1/0/2"]    # by ifIndex: the default holds here
+    cols = {"poeAdmin": by_ifindex, "poeStatus": dict.fromkeys(by_ifindex, "2")}
+    assert list(poller.poe_ports(PROCURVE, cols, ["10101", "10102", "10103", "10104"])[0]) == ["10101", "10102"]    # the default would
 
 
-def test_mikrotik_has_no_poe():
-    """R31: no PoE walks, so neither the display nor the write path sees PoE on a mikrotik, whatever its agent would answer."""
+@pytest.mark.parametrize("name", NO_POE_DRIVERS)
+def test_a_driver_without_snmp_poe_has_no_poe(name):
+    """R31 / R35: no PoE walks, so neither the display nor the write path sees PoE on such a switch, whatever its agent would answer
+    (here the sample's entries, which ProCurve's mapping would take); a PoE write is refused up front with the driver's name."""
     W = {**W_POE, "ifType": IFTYPE_SAMPLE}
-    cfg, raw = read(W, "mikrotik")
+    cfg, raw = read(W, name)
     assert raw["poe"] == {} and raw["poe_unmapped"] == [] and set(poe_of(cfg).values()) == {None}
-    assert {p[1:] for p in display({**W, "poePower": HP_POWER_SAMPLE}, "mikrotik")} == {(None, None, None)}
-    assert snmpwrite.snmp_block_reason(MIKROTIK, cfg, raw, "1", {"poe": False}) == MIKROTIK_NO_POE
+    assert {p[1:] for p in display({**W, "poePower": HP_POWER_SAMPLE}, name)} == {(None, None, None)}
+    assert snmpwrite.snmp_block_reason(DRIVERS[name], cfg, raw, "1", {"poe": False}) == f"Treiber {name} kann PoE nicht per SNMP schreiben"
+    assert main._snmp_unwritable({"snmp_write": 1}, DRIVERS[name], {"snmp_poe"}) == f"Treiber {name} kann PoE nicht per SNMP schreiben"
 
 
 def test_an_unknown_mapping_strategy_maps_nothing():
@@ -286,22 +291,23 @@ def _random_poe(rng: random.Random, ifindexes: list[str]) -> tuple[dict, dict]:
 
 
 def test_poe_mapping_properties_on_random_switches():
-    """800 random switches (ProCurve and other vendors) with random PoE tables, every driver with PoE. Whatever the tables say:
+    """800 random switches (ProCurve, and other vendors read as cisco) with random PoE tables, through both mappings (procurve's
+    "ifindex" and cisco's "cisco_entity": the function does not care for the vendor, only for the tables). Whatever they say:
       * a mapped entry belongs to a PHYSICAL port (never a trunk, a VLAN interface, nothing), no port has two entries, no entry two ports;
       * mapped and unmapped entries are disjoint and together all entries;
       * ifindex maps only group 1 with index = the port's ifIndex, and either every entry of group 1 or none;
       * cisco_entity maps only along cpeExtPsePortEntPhyIndex -> exactly one ifIndex.N of that entity (never entity 0);
-      * the display (lenient) and the write path (strict, when it does not refuse the read) see the same PoE on every port."""
+      * for the switch's own driver the display (lenient) and the write path (strict, when it does not refuse the read) see the same
+        PoE on every port."""
     rng = random.Random(1212)
-    seen = {"mapped": 0, "voided": 0, "refused": 0}
+    seen = {"mapped": 0, "voided": 0, "entity": 0, "refused": 0}
     for case in range(800):
         if rng.random() < 0.5:
             W, _ = random_procurve_switch(rng)
             selection = "procurve"
         else:
             W, _ = random_multivendor_switch(rng)
-            selection = rng.choice(["generic", "cisco", "cisco", "arista", "juniper"])
-        driver = DRIVERS[selection]
+            selection = "cisco"
         ifname = poller._tbl(W["ifName"], WALK_BASES["ifName"])
         ports, _, members = poller.select_ports(ifname, poller._tbl(W.get("ifType", []), IF_TYPE),
                                                 poller._tbl(W["ifStack"], WALK_BASES["ifStack"]), selection)
@@ -309,23 +315,26 @@ def test_poe_mapping_properties_on_random_switches():
         # half the time a clean switch whose PoE indexes are physical ports' ifIndexes, else any interface (or none) of the switch
         rows, cols = _random_poe(rng, physical if rng.random() < 0.5 else [i for i in ifname if i.isdigit()])
         W = {**W, **rows}
-        found, unmapped = poller.poe_ports(driver, cols, physical)
         entries = set(cols["poeAdmin"])
-        assert set(found) <= set(physical), case
-        mapped = {f"{e['group']}.{e['index']}": ifi for ifi, e in found.items()}
-        assert len(mapped) == len(found) and not set(mapped) & set(unmapped) and set(mapped) | set(unmapped) == entries, case
-        if driver.poe_index == "ifindex":
-            assert all(k == f"1.{ifi}" for k, ifi in mapped.items()), case
-            group1 = {k for k in entries if k.startswith("1.")}
-            assert set(mapped) in (group1, set()), case
-            seen["voided"] += bool(group1) and not mapped
-        else:
-            alias = cols["entAlias"]
-            for k, ifi in mapped.items():
-                e = cols.get("poeEntPhy", {}).get(k)
-                assert e not in (None, "0"), case
-                assert {v.rpartition(".")[2] for a, v in alias.items() if a.partition(".")[0] == e} == {ifi}, case
-        seen["mapped"] += len(mapped)
+        for driver in (PROCURVE, CISCO):
+            found, unmapped = poller.poe_ports(driver, cols, physical)
+            assert set(found) <= set(physical), case
+            mapped = {f"{e['group']}.{e['index']}": ifi for ifi, e in found.items()}
+            assert len(mapped) == len(found) and not set(mapped) & set(unmapped) and set(mapped) | set(unmapped) == entries, case
+            if driver.poe_index == "ifindex":
+                assert all(k == f"1.{ifi}" for k, ifi in mapped.items()), case
+                group1 = {k for k in entries if k.startswith("1.")}
+                assert set(mapped) in (group1, set()), case
+                seen["voided"] += bool(group1) and not mapped
+                seen["mapped"] += len(mapped)
+            else:
+                alias = cols["entAlias"]
+                for k, ifi in mapped.items():
+                    e = cols.get("poeEntPhy", {}).get(k)
+                    assert e not in (None, "0"), case
+                    assert {v.rpartition(".")[2] for a, v in alias.items() if a.partition(".")[0] == e} == {ifi}, case
+                seen["entity"] += len(mapped)
+        found, unmapped = poller.poe_ports(DRIVERS[selection], cols, physical)
         display_poe = {p["name"]: p["poe_admin"] for p in poller._build({k: W.get(k, []) for k in poller.O} | rows, selection)["ports"]}
         try:
             cfg, raw = snmpwrite.build_cfg(W, selection)
@@ -334,7 +343,7 @@ def test_poe_mapping_properties_on_random_switches():
             continue
         assert {n: (None if st["poe"] is None else 1 if st["poe"] else 2) for n, st in cfg["ports"].items()} == display_poe, case
         assert raw["poe_unmapped"] == unmapped, case
-    assert seen["mapped"] > 300 and seen["voided"] > 20 and seen["refused"] > 5, seen
+    assert seen["mapped"] > 300 and seen["voided"] > 20 and seen["entity"] > 50 and seen["refused"] > 5, seen
 
 
 def test_display_mapping_is_lenient():
@@ -416,32 +425,42 @@ ROW = {"id": 7, "name": "SW-EK-01", "host": HOST, "sys_name": "SW-EK-01", "drive
 
 @pytest.mark.parametrize("name, W, poe", [
     ("procurve", W_POE, [POE_ADMIN, POE_STATUS]),
-    ("generic", {**W_POE, "ifType": IFTYPE_SAMPLE}, [POE_ADMIN, POE_STATUS]),
     ("cisco", {**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}, [POE_ADMIN, POE_STATUS, CISCO_POE_ENTPHY, ENT_ALIAS]),
-    ("mikrotik", {**W_POE, "ifType": IFTYPE_SAMPLE}, []),
+    ("generic", {**W_POE, "ifType": IFTYPE_SAMPLE}, []),       # R35
+    ("mikrotik", {**W_POE, "ifType": IFTYPE_SAMPLE}, []),      # R31
 ])
-async def test_read_cfg_walks_poe_strictly(monkeypatch, name, W, poe):
-    """read_cfg walks the PoE tables of the driver (never the power: display only), strictly and as text, with every other walk; the
-    result is build_cfg of what the agent answered."""
+@pytest.mark.parametrize("with_poe", [True, False])
+async def test_read_cfg_walks_poe_strictly(monkeypatch, name, W, poe, with_poe):
+    """read_cfg(with_poe=True), the read of a change that touches PoE, walks the PoE tables of the driver (never the power: display
+    only), strictly and as text, next to every other walk; without with_poe (R34) no driver walks any PoE table, and no port has PoE.
+    The result is build_cfg of what the agent answered."""
     fake = FakeAgent(agent(W))
     monkeypatch.setattr(snmp, "walk", fake.walk)
-    cfg, raw = await snmpwrite.read_cfg({**ROW, "driver": name}, DRIVERS[name])
+    cfg, raw = await snmpwrite.read_cfg({**ROW, "driver": name}, DRIVERS[name], with_poe=with_poe)
     walked = [oid for oid, _, _ in fake.calls]
     poe_ish = {POE_ADMIN, POE_STATUS, CISCO_POE_ENTPHY, ENT_ALIAS, HP_POE_POWER, CISCO_POE_POWER}
+    poe = poe if with_poe else []
     assert sorted(oid for oid in walked if oid in poe_ish) == sorted(poe)
     assert all(strict for _, _, strict in fake.calls) and not any(hx for oid, hx, _ in fake.calls if oid in poe)
     assert len(walked) == len(set(walked))
     selection = {k: rows for k, rows in agent(W).items() if k not in POE_WALKS or WALK_BASES[k] in poe}
     assert (cfg, raw) == ({**read(selection, name, text_hex=True)[0], "hostname": "SW-EK-01"}, read(selection, name, text_hex=True)[1])
+    if not with_poe:
+        assert raw["poe"] == {} and set(poe_of(cfg).values()) == {None}
 
 
-@pytest.mark.parametrize("failing", [POE_ADMIN, POE_STATUS])
-async def test_read_cfg_fails_closed_when_a_poe_walk_fails(monkeypatch, failing):
-    """A PoE walk cut short (snmp.walk strict raises) fails the read like any other walk: no cfg without PoE state, even for a change
-    that is not about PoE (the write path never works from partial data)."""
-    monkeypatch.setattr(snmp, "walk", FakeAgent(agent(W_POE), failing).walk)
+@pytest.mark.parametrize("driver, W, failing", [
+    ("procurve", W_POE, POE_ADMIN), ("procurve", W_POE, POE_STATUS),
+    ("cisco", {**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}, CISCO_POE_ENTPHY), ("cisco", {**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}, ENT_ALIAS),
+])
+async def test_read_cfg_fails_closed_when_a_poe_walk_fails(monkeypatch, driver, W, failing):
+    """For a change that touches PoE, a PoE walk cut short (snmp.walk strict raises) fails the read like any other walk: no cfg
+    without PoE state. A read without PoE (R34) does not walk it and goes through."""
+    monkeypatch.setattr(snmp, "walk", FakeAgent(agent(W), failing).walk)
     with pytest.raises(snmp.SnmpError, match="Zeitüberschreitung"):
-        await snmpwrite.read_cfg(ROW, PROCURVE)
+        await snmpwrite.read_cfg({**ROW, "driver": driver}, DRIVERS[driver], with_poe=True)
+    cfg, raw = await snmpwrite.read_cfg({**ROW, "driver": driver}, DRIVERS[driver])
+    assert raw["poe"] == {} and cfg["ports"]
 
 
 # ── render_ops: pethPsePortAdminEnable ───────────────────────────────────────────────────────────────────────────────────────────
@@ -673,19 +692,24 @@ BY_OID = {base: key for key, base in WALK_BASES.items()}
 
 class World:
     """One test's switch: snmp.walk answers from W (agent format), snmp.set_vars goes through switchfix.store (set_mode "ignore": the
-    switch answers but takes nothing; after_set: what else changes right after the SET). Records walks, SETs and every SSH-side call."""
+    switch answers but takes nothing; after_set: what else changes right after the SET; failing: base OIDs whose walk times out, a
+    PoE MIB that fails, say). Records walks, SETs, the with_poe of every snmpwrite.read_cfg (reads) and every SSH-side call."""
 
     def __init__(self):
         self.W: dict = {}
         self.selection = "procurve"
         self.walks: list = []
         self.sets: list = []
+        self.reads: list[bool] = []
         self.ssh: list = []
+        self.failing: set[str] = set()
         self.set_mode, self.after_set = "apply", None
 
     async def walk(self, host, cred, oid, hex_values=False, timeout=60, strict=False):
         assert (host, strict) == (HOST, True), (host, strict)
         self.walks.append((oid, cred))
+        if oid in self.failing:
+            raise snmp.SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
         key = BY_OID[oid]
         assert key in self.W or key in POE_WALKS, f"walk of {key}, which this switch does not answer"
         return list(self.W.get(key, []))
@@ -730,8 +754,8 @@ async def switch_row(sid: int):
 
 @pytest.fixture
 async def world(tmp_path, monkeypatch) -> World:
-    """A fresh database under tmp_path; SNMP answered by the World's switch; changes.fresh_cfg (the SSH read of a preview) recorded;
-    re-polls never run; fresh locks; every SSH entry point a trap that records and raises."""
+    """A fresh database under tmp_path; SNMP answered by the World's switch, snmpwrite.read_cfg spied on (its with_poe); changes.fresh_cfg
+    (the SSH read of a preview) recorded; re-polls never run; fresh locks; every SSH entry point a trap that records and raises."""
     monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
     await db.init_db()
     w = World()
@@ -747,8 +771,15 @@ async def world(tmp_path, monkeypatch) -> World:
             raise AssertionError(f"{name} on a PoE path")
         return raise_
 
+    real_read = snmpwrite.read_cfg
+
+    async def read_cfg(row, driver, *, with_poe=False):
+        w.reads.append(with_poe)
+        return await real_read(row, driver, with_poe=with_poe)
+
     monkeypatch.setattr(snmp, "walk", w.walk)
     monkeypatch.setattr(snmp, "set_vars", w.set_vars)
+    monkeypatch.setattr(snmpwrite, "read_cfg", read_cfg)
     monkeypatch.setattr(changes, "fresh_cfg", w.fresh_cfg)
     monkeypatch.setattr(changes, "inventory", w.inventory)
     monkeypatch.setattr(changes, "_repoll", repoll)
@@ -801,11 +832,12 @@ async def test_requests_without_poe_still_prefer_ssh(world):
     ("procurve", {"rw": False, "snmp_write": True}, None),            # the read community writes (it must be allowed to): no refusal
     ("cisco", {"snmp_write": False}, WRITE_DISABLED),
     ("mikrotik", {}, MIKROTIK_NO_POE),
-], ids=["procurve-snmp-off", "procurve-read-community", "cisco-snmp-off", "mikrotik"])
+    ("generic", {}, "Treiber generic kann PoE nicht per SNMP schreiben"),      # R35
+], ids=["procurve-snmp-off", "procurve-read-community", "cisco-snmp-off", "mikrotik", "generic"])
 async def test_poe_without_snmp_write_access_is_422(world, driver, kw, reason):
     """No way to write PoE over SNMP: 422 with the reason, before any read; never an SSH attempt."""
     W = {"procurve": POE_SW, "cisco": agent({**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}),
-         "mikrotik": agent({**W_POE, "ifType": IFTYPE_SAMPLE})}[driver]
+         "mikrotik": agent({**W_POE, "ifType": IFTYPE_SAMPLE}), "generic": agent({**W_POE, "ifType": IFTYPE_SAMPLE})}[driver]
     row = await world.switch(driver, W, **kw)
     payload = {"ports": ["Gi1/0/2" if driver == "cisco" else "1"], "change": {"poe": True}}
     if reason is None:
@@ -935,6 +967,81 @@ async def test_poe_change_on_the_catalyst(world):
     assert world.sets == [(HOST, RW_CRED, [(f"{POE_ADMIN}.1.2", "i", "1")])]
 
 
+# ── R34: the PoE tables are read only for a change that touches PoE ───────────────────────────────────────────────────────────
+VLAN2 = {"ports": ["2"], "change": {"untagged": "20"}}
+POE_OIDS = {POE_ADMIN, POE_STATUS, CISCO_POE_ENTPHY, ENT_ALIAS}
+
+
+@pytest.mark.parametrize("req, want", [
+    ({"ports": ["1"], "set": {"poe": False}}, True),
+    ({"ports": ["1"], "set": {"poe": True, "untagged": "20"}}, True),
+    ({"ports": ["1"], "set": {"poe": None, "untagged": "20"}}, False),
+    ({"ports": ["1"], "set": {}}, False),
+    ({"desired": {"1": {"poe": True}}}, True),                                     # the revert of a PoE change
+    ({"desired": {"2": {"u": "20"}, "1": {"poe": False, "name": "x"}}}, True),
+    ({"desired": {"2": {"u": "20", "pvid": "20"}}}, False),                        # the revert of a VLAN change
+    ({"of": 3}, False), ({}, False),
+])
+def test_touches_poe(req, want):
+    """The one flag (changes.touches_poe) the preview and both reads of a run compute from the same request."""
+    assert changes.touches_poe(req) is want
+
+
+async def test_a_vlan_change_never_walks_poe(world):
+    """A VLAN change over SNMP (a ProCurve without SSH access) on a PoE switch whose PoE MIB fails: preview, read before and read-back
+    never walk a PoE table, and the change plans, applies and verifies. Before R34 one failing PoE walk blocked every SNMP write."""
+    row = await world.switch("procurve", POE_SW, ssh=False)
+    world.failing = set(POE_OIDS)
+    cid, plan = await apply(world, row, VLAN2)
+    assert (plan["mechanism"], plan["shown"]) == ("snmp", ["Port 2: VLAN ungetaggt 99 → 20"])
+    ch = await run(cid)
+    assert (ch["status"], ch["saved"], ch["error"]) == ("ok", 1, None)
+    assert world.reads == [False, False, False]                          # preview, read before, read back
+    assert not {oid for oid, _ in world.walks} & POE_OIDS and len(world.sets) == 1
+    rid, plan = await apply(world, row, {"mode": "revert", "of": cid})    # its revert does not touch PoE either
+    assert (await run(rid))["status"] == "ok"
+    assert world.reads == [False] * 6 and not {oid for oid, _ in world.walks} & POE_OIDS
+
+
+async def test_a_poe_change_with_a_failing_poe_mib_fails_closed(world):
+    """The same failing PoE MIB and a PoE change: the preview reads PoE, the walk fails -> 502, nothing planned; and a run whose live
+    read fails the same way ends failed, without a SET."""
+    row = await world.switch("procurve", POE_SW)
+    world.failing = {POE_STATUS}
+    assert await refused_with(row, OFF1) == (502, "Konfiguration des Switches per SNMP nicht lesbar: Zeitüberschreitung bei der SNMP-Abfrage")
+    world.failing = set()
+    cid, _ = await apply(world, row, OFF1)
+    world.failing = {POE_ADMIN}
+    ch = await run(cid)
+    assert (ch["status"], ch["error"]) == ("failed", "Zustand per SNMP nicht lesbar: Zeitüberschreitung bei der SNMP-Abfrage")
+    assert world.sets == [] and world.ssh == []
+
+
+async def test_both_reads_of_a_poe_change_and_of_its_revert_read_poe(world):
+    """A PoE change reads PoE in its preview and in both reads of its run (the flag comes from the stored request); its revert, planned
+    from `before` (which holds poe), reads PoE by itself, again in the preview and in both reads. Each of those reads walks both PoE
+    columns."""
+    row = await world.switch("procurve", POE_SW)
+    cid, _ = await apply(world, row, OFF1)
+    assert (await run(cid))["status"] == "ok"
+    rid, plan = await apply(world, row, {"mode": "revert", "of": cid})
+    assert plan["shown"] == ["Port 1: PoE aus → an"]
+    assert (await run(rid))["status"] == "ok"
+    assert world.reads == [True] * 6
+    assert sorted(oid for oid, _ in world.walks if oid in POE_OIDS) == sorted([POE_ADMIN, POE_STATUS] * 6)
+
+
+async def test_the_read_back_of_a_poe_change_reads_poe_even_when_the_change_has_more(world):
+    """PoE and a VLAN in one change: one flag for the whole change, both reads with PoE; the read-back verifies both fields."""
+    row = await world.switch("procurve", POE_SW)
+    cid, plan = await apply(world, row, {"ports": ["1"], "change": {"poe": False, "untagged": "99"}})
+    assert plan["shown"] == ["Port 1: VLAN ungetaggt 20 → 99", "Port 1: PoE an → aus"]
+    world.set_mode = "ignore"
+    ch = await run(cid)
+    assert ch["status"] == "unclear" and "Port 1: poe ist True, erwartet False" in ch["error"] and "Port 1: u ist '20'" in ch["error"]
+    assert world.reads == [True, True, True]
+
+
 # ── The display poll and the map ─────────────────────────────────────────────────────────────────────────────────────────────────
 class PollAgent:
     """snmp.walk of the display poller: answers from a recording by base OID (nothing for any other walk) and records the OIDs; the walks
@@ -1026,9 +1133,11 @@ async def test_poll_cisco_poe_through_the_entity_tables(world, monkeypatch):
     assert {POE_ADMIN, POE_STATUS, CISCO_POE_ENTPHY, ENT_ALIAS, CISCO_POE_POWER} <= set(poll.oids)
 
 
-async def test_poll_mikrotik_walks_no_poe(world, monkeypatch):
+@pytest.mark.parametrize("name", ["mikrotik", "generic", "arista"])
+async def test_poll_of_a_driver_without_snmp_poe_walks_no_poe(world, monkeypatch, name):
+    """R31 / R35: the display poller walks no PoE table for such a switch and shows no PoE state, whatever its agent would answer."""
     W = {**W_POE, "ifType": IFTYPE_SAMPLE}
-    row = await world.switch("mikrotik", W)
+    row = await world.switch(name, W)
     poll = PollAgent(recording(W) | {HP_POE_POWER: HP_POWER_SAMPLE})
     monkeypatch.setattr(snmp, "walk", poll.walk)
     await poller.poll_switch(row["id"])
