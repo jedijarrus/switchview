@@ -16,7 +16,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from netmiko.exceptions import ConfigInvalidException
 
@@ -381,6 +381,11 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
       - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]) oder als nicht verwaltbar fuehrt
         (raw_after["unmanaged"]), weicht ab: cfg haelt fuer ihn nur Platzhalter (port_state fuellte Vorgaben ein, u ist None), an denen
         ein Ziel wie "kein ungetaggtes VLAN" oder "Name leer" sonst unbemerkt vorbeikaeme.
+      - Ebenso einer, der im Read-back ein anderes Interface ist als in raw (M4): ein anderer ifIndex, oder bei Q-BRIDGE fuer eine
+        VLAN-Aenderung (die ueber den Bridge-Port geht, PortList-Bits und dot1qPvid) ein anderer Bridge-Port. Dann wurden Interfaces
+        zwischen Lesen und Zuruecklesen umnummeriert, das SET kann ein anderes Interface getroffen haben, und was der Read-back unter
+        dem Namen zeigt, sagt nichts darueber. Den Bridge-Port eines Ports, dessen SET ihn nicht nutzt (vmVlan, An/Aus, Name, PoE),
+        prueft es nicht: ein Cisco-Access-Port ist im Default-Kontext oft gar keiner (R45).
       - Aendert sich u oder t, zaehlt die GANZE VLAN-Zugehoerigkeit (R32): u und t, wie cfg sie zeigt, mit desired darueber. Ein
         VLAN-Wechsel sind mehrere Varbinds (Egress und Untagged des alten und des neuen VLANs, die PVID); kaeme einer nicht an, stuende
         der Port sonst etwa noch getaggt im alten VLAN. Wechselt u zu einem VLAN und zeigt der Read-back es (sonst meldet verify_ports
@@ -399,6 +404,10 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
         d = desired[p]
         if p not in raw_after["ifindex"]:
             bad.append(f"Port {p}: beim Zurücklesen nicht gefunden")
+            continue
+        via_bp = driver.vlan_strategy == "qbridge" and bool(snmpwrite.VLAN_FIELDS & set(d))    # ging das SET ueber den Bridge-Port?
+        if raw_after["ifindex"][p] != raw["ifindex"].get(p) or (via_bp and raw_after["port2bp"].get(p) != raw["port2bp"].get(p)):
+            bad.append(f"Port {p}: Interface-Nummer hat sich geändert")
             continue
         if p in raw_after["unmanaged"]:
             bad.append(f"Port {p}: nach der Änderung {raw_after['unmanaged'][p]}")
@@ -503,13 +512,24 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
 # fresh_cfg liest fuer sie wirklich, statt bis zu max_age_s lang aus dem Cache: so merkt die Vorschau, dass SSH weg ist, und kann auf
 # SNMP ausweichen, statt eine SSH-Aenderung zu planen, die beim Ausfuehren scheitert. Die Zeile in switch_cfg bleibt (die Karte zeigt
 # daraus NAC-Zustand und RADIUS-Bereitschaft); ein erfolgreicher Read (store_cfg) hebt die Marke auf. Im Prozess gehalten wie die Locks
-# (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch.
+# (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch. Nur der SNMP-SET muss den Neustart
+# ueberstehen (sonst zeigte eine SSH-Vorschau den Stand von vor ihm): er altert dazu taken_at (age_cfg).
 _cfg_stale: set[int] = set()
+CFG_MAX_AGE_S = 600    # so lange nimmt fresh_cfg einen SSH-Read aus switch_cfg
 
 
 def invalidate_cfg(sid: int):
     """Den zwischengespeicherten SSH-Read von Switch sid verwerfen (R27): der naechste fresh_cfg liest wirklich."""
     _cfg_stale.add(sid)
+
+
+async def age_cfg(sid: int):
+    """taken_at des SSH-Reads von Switch sid ueber das Fenster von fresh_cfg hinaus altern lassen, parsed bleibt (M3): wie invalidate_cfg,
+    aber in der DB, also auch nach einem Neustart. Nie juenger als vorher."""
+    aged = (datetime.now(timezone.utc) - timedelta(seconds=CFG_MAX_AGE_S + 1)).strftime("%Y-%m-%d %H:%M:%S")
+    async with db() as conn:
+        await conn.execute("UPDATE switch_cfg SET taken_at = MIN(taken_at, ?) WHERE switch_id = ?", (aged, sid))
+        await conn.commit()
 
 
 async def store_cfg(sid: int, content: str) -> dict:
@@ -529,7 +549,7 @@ async def cached_cfg(sid: int) -> tuple[dict | None, str | None]:
     return (json.loads(row["parsed"]), row["taken_at"]) if row else (None, None)
 
 
-async def fresh_cfg(sid: int, max_age_s: int = 600) -> dict:
+async def fresh_cfg(sid: int, max_age_s: int = CFG_MAX_AGE_S) -> dict:
     """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und nicht verworfen (R27, invalidate_cfg), sonst
     per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen."""
     cfg, at = (None, None) if sid in _cfg_stale else await cached_cfg(sid)
@@ -696,7 +716,8 @@ async def _run_snmp(cid: int, ch, row):
          Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
     Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed; ein
     abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". Nie SSH, keine Sicherung, kein
-    switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg)."""
+    switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg, und age_cfg fuer die
+    Zeit nach einem Neustart)."""
     sid = ch["switch_id"]
     if ch["kind"] != "ports":  # Speichern und RADIUS-Vorbereitung gibt es nur per SSH (main lehnt sie vorher ab)
         return await _refuse(cid, ch, "Per SNMP gibt es nur Port-Änderungen: nichts ausgeführt")
@@ -750,6 +771,7 @@ async def _run_snmp(cid: int, ch, row):
             await _upd(cid, before=json.dumps(plan["before"]))
             n = len(plan["ops"])
             await _step(cid, steps, f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
+            await age_cfg(sid)    # vor sent: scheitert das Schreiben in die DB, ist nichts gesendet
             sent = True
             invalidate_cfg(sid)
             try:

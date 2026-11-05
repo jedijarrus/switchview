@@ -270,6 +270,8 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
 # 802.1X / MAC-Anmeldung (x, m, cl, al, xuv, muv) gehen nur ueber die CLI. pvid (R21) ist die PVID ausdruecklich, fuer einen Revert,
 # der sie wiederherstellt; cfg kennt sie nicht, sie steht nur in raw["pvid"]. poe (an / aus) geht bei jedem Treiber nur hier (R30).
 FIELD_CAPS = {"u": "snmp_vlan", "pvid": "snmp_vlan", "t": "snmp_vlan", "en": "snmp_admin", "name": "snmp_name", "poe": "snmp_poe"}
+# Die VLAN-Felder (u, t, pvid): nur sie haengen an der VLAN-Zugehoerigkeit, die cfg mit einem einzigen u beschreibt
+VLAN_FIELDS = frozenset(k for k, cap in FIELD_CAPS.items() if cap == "snmp_vlan")
 _CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portnamen", "snmp_poe": "PoE"}
 POE_DELIVERING = 3    # pethPsePortDetectionStatus deliveringPower(3): der Port versorgt gerade ein Geraet (changes.plan_ports warnt)
 ALIAS_MAX = 64  # ifAlias ist DisplayString SIZE (0..64): hoechstens 64 Bytes, geschrieben werden die UTF-8-Bytes des Namens

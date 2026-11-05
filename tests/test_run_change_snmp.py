@@ -602,6 +602,47 @@ async def test_snmp_written_port_missing_afterwards_unclear(env):
     assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 1: beim Zurücklesen nicht gefunden")
 
 
+def move_bridge_port(W: dict, old: int, new: int) -> dict:
+    """W with bridge port `old` renumbered to `new`: its bp2if and PVID rows and its bit in every PortList move along (8-byte lists)."""
+    def moved(value: str) -> str:
+        bits = bytearray(bytes.fromhex(value.replace(" ", "")))
+        if bits[(old - 1) // 8] & (0x80 >> (old - 1) % 8):
+            bits[(old - 1) // 8] &= 0xFF ^ (0x80 >> (old - 1) % 8)
+            bits[(new - 1) // 8] |= 0x80 >> (new - 1) % 8
+        return " ".join(f"{b:02X}" for b in bits)
+    bp2if, pvid = dict(edit_walks(W)["bp2if"]), dict(W["pvid"])
+    return edit_walks(W, bp2if={str(old): None, str(new): bp2if[f"{WALK_BASES['bp2if']}.{old}"]},
+                      pvid={str(old): None, str(new): pvid[f"{PVID}.{old}"]},
+                      vlanEgress={v.rpartition(".")[2]: moved(x) for v, x in W["vlanEgress"]},
+                      vlanUntagged={v.rpartition(".")[2]: moved(x) for v, x in W["vlanUntagged"]})
+
+
+async def test_snmp_verify_finds_a_port_on_another_ifindex_unclear(env):
+    """M4: right after the SET the switch renumbers its interfaces (a module swap, say): port 2 now sits on ifIndex 7. The read-back
+    finds it by name, switched off as wanted, but the SET went to ifAdminStatus.2, which may now be another interface: unclear."""
+    sid = await env.switch("procurve")
+    cid, plan = await apply(sid, {"ports": ["2"], "change": {"status": "off"}})
+    assert plan["ops"] == [("1.3.6.1.2.1.2.2.1.7.2", "i", "2")]
+    env.agent.after_set = lambda W: edit_walks(W, ifName={"2": None, "7": "2"}, ifAlias={"2": None, "7": ""}, ifAdmin={"2": None, "7": "2"},
+                                               bp2if={"1": "7"}, ifStack={"0.2": None, "2.0": None, "0.7": "1", "7.0": "1"})
+    ch = await run(env, cid)
+    assert read(env.agent.W, "procurve")[0]["ports"]["2"]["en"] is False
+    assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 2: Interface-Nummer hat sich geändert")
+
+
+async def test_snmp_verify_finds_a_port_on_another_bridge_port_unclear(env):
+    """M4: port 2 moves 99 -> 20 through its bridge port 1, and right after the SET the switch renumbers that bridge port to 8, bits and
+    PVID included. The read-back shows port 2 untagged in 20 with PVID 20 and its Egress bit, all as wanted, but the bits were written
+    for bridge port 1: unclear."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.after_set = lambda W: move_bridge_port(W, 1, 8)
+    ch = await run(env, cid)
+    cfg, raw = read(env.agent.W, "procurve")
+    assert (cfg["ports"]["2"]["u"], raw["pvid"]["2"], raw["port2bp"]["2"]) == ("20", "20", 8)
+    assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port 2: Interface-Nummer hat sich geändert")
+
+
 # R32: a VLAN move is several varbinds (Egress and Untagged of the old and the new VLAN, the PVID); the verify checks the port's whole
 # VLAN membership, not only the field the request named. Port 2 (bridge port 1) moves 99 -> 20; its varbinds: Egress 20 (E2), Egress 99
 # (02), Untagged 20 (A0), Untagged 99 (00), PVID 20.
@@ -1015,6 +1056,35 @@ async def test_snmp_set_invalidates_the_cached_ssh_config(env, outcome, stale):
         assert await changes.fresh_cfg(sid) == cfgparse.parse_config(SSH_CONFIG) and env.ssh == []
 
 
+@pytest.mark.parametrize("outcome, aged", [("ok", True), ("unclear", True), ("aborted", False)])
+async def test_snmp_set_ages_the_cached_ssh_config_past_a_restart(env, outcome, aged):
+    """M3: the R27 mark lives in the process only. Once an SNMP SET went out, switch_cfg.taken_at is also aged past fresh_cfg's window
+    (parsed stays: the map shows NAC state and RADIUS readiness from it), so after a restart, which loses the mark, the next SSH preview
+    still reads for real instead of serving the entry from before the SET. A run that wrote nothing leaves the entry young."""
+    sid = await env.switch("procurve")
+    await put_cfg(sid)
+    [(young,)] = await sql("SELECT taken_at FROM switch_cfg WHERE switch_id = ?", (sid,))
+    cid, _ = await apply(sid, PC_PROBE)
+    if outcome == "unclear":
+        env.agent.set_mode = "ignore"
+    elif outcome == "aborted":
+        env.agent.W = edit_walks(env.agent.W, pvid={"1": "1"})
+    assert (await run(env, cid))["status"] == outcome
+    changes._cfg_stale.clear()                          # a restart: the in-process mark is gone
+    [(taken_at, parsed)] = await sql("SELECT taken_at, parsed FROM switch_cfg WHERE switch_id = ?", (sid,))
+    assert json.loads(parsed) == cfgparse.parse_config(SSH_CONFIG)
+    age = datetime.now(timezone.utc) - datetime.strptime(taken_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    assert (age.total_seconds() > 600) is aged and (taken_at == young) is not aged
+    env.allow_ssh()
+    env.ssh_fails = "connect"
+    if aged:
+        with pytest.raises(RuntimeError, match=SSH_DOWN):
+            await changes.fresh_cfg(sid)
+        assert env.ssh == [("backup_config", sid)]
+    else:
+        assert await changes.fresh_cfg(sid) == cfgparse.parse_config(SSH_CONFIG) and env.ssh == []
+
+
 # ── snmpwrite.apply_ops ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 def write_row(**cols) -> dict:
     """A switches row as far as apply_ops / poller.creds_of look at it: read community READ, RW community RW, SNMP writing on."""
@@ -1115,8 +1185,40 @@ CISCO = drivers.DRIVERS["cisco"]
                  ["Port Gi1/0/2: beim Zurücklesen nicht gefunden", "Port Gi1/0/10: beim Zurücklesen nicht gefunden"], id="natural-order"),
 ])
 def test_verify_snmp(drv, pre, desired, ports, extra, bad):
+    """The read the change was planned from (cfg, raw) has the same interfaces (ifIndex, bridge port) as the read-back."""
     cfg_after, raw_after = readback(ports, **extra)
-    cfg, raw = readback(pre)
+    cfg = readback(pre)[0]
+    raw = {"ifindex": dict(raw_after["ifindex"]), "port2bp": dict(raw_after["port2bp"]), "poe": {}}
+    assert changes.verify_snmp(drv, cfg, cfg_after, raw_after, desired, raw=raw) == bad
+
+
+RENUMBERED = "Interface-Nummer hat sich geändert"
+
+
+# M4: drv, desired, ifIndex and bridge port of the port before (the read the SET was rendered from) and after (the read-back), mismatches
+@pytest.mark.parametrize("drv, desired, before, after, bad", [
+    pytest.param(GENERIC, {"2": {"en": False}}, (2, 1), (7, 1), [f"Port 2: {RENUMBERED}"], id="ifindex"),
+    pytest.param(GENERIC, {"2": {"name": "x"}}, (2, None), (7, None), [f"Port 2: {RENUMBERED}"], id="ifindex-without-bridge-port"),
+    pytest.param(GENERIC, {"2": {"u": "20"}}, (2, 1), (2, 9), [f"Port 2: {RENUMBERED}"], id="bridge-port-of-a-vlan-write"),
+    pytest.param(GENERIC, {"2": {"t": ["30"]}}, (2, 1), (2, None), [f"Port 2: {RENUMBERED}"], id="bridge-port-gone-after-a-vlan-write"),
+    pytest.param(GENERIC, {"2": {"pvid": "20"}}, (2, 1), (2, 9), [f"Port 2: {RENUMBERED}"], id="bridge-port-of-a-pvid-write"),
+    # the SET did not go through the bridge port: its number is no identity of what was written
+    pytest.param(GENERIC, {"2": {"en": False, "name": "x"}}, (2, 1), (2, 9), [], id="bridge-port-not-used-by-en-and-name"),
+    pytest.param(CISCO, {"Gi1/0/2": {"u": "20"}}, (10102, 2), (10102, None), [], id="cisco-vmvlan-uses-no-bridge-port"),
+    pytest.param(GENERIC, {"2": {"u": "20"}}, (2, 1), (2, 1), [], id="unchanged"),
+])
+def test_verify_snmp_checks_the_identity_of_each_written_port(drv, desired, before, after, bad):
+    """A written port must be the same interface in the read-back as in the read the SET was rendered from: the same ifIndex, and for a
+    write through its bridge port (Q-BRIDGE VLAN bits and PVID) the same bridge port. Otherwise interfaces were renumbered between read
+    and read-back (a module swap, say), and the SET may have hit another interface while the read-back finds the port by its name:
+    unclear, and nothing else is judged for that port (it would be judged on another interface)."""
+    (port, want), = desired.items()
+    st = {"u": want.get("u"), "t": want.get("t", []), "name": want.get("name", ""), "en": want.get("en", True)}
+    cfg_after = {"ports": {port: {**cfgparse._empty_port(), **st}}}
+    raw_after = {"ifindex": {port: after[0]}, "port2bp": {port: after[1]} if after[1] else {}, "pvid": {port: want.get("pvid", want.get("u"))},
+                 "unmanaged": {}, "vmvlan": {port: want["u"]} if drv is CISCO else {}, "egress": {}}
+    raw = {"ifindex": {port: before[0]}, "port2bp": {port: before[1]} if before[1] else {}, "poe": {}}
+    cfg = {"ports": {port: {**cfgparse._empty_port(), "u": "1"}}}
     assert changes.verify_snmp(drv, cfg, cfg_after, raw_after, desired, raw=raw) == bad
 
 
