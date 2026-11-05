@@ -9,6 +9,8 @@ import re
 
 AUTH_PROTOS = {"SHA", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "MD5"}
 PRIV_PROTOS = {"AES", "AES-192", "AES-256", "DES"}
+# snmpset: 5 s je Versuch, eine Wiederholung (siehe set_vars)
+SET_TIMING = ("-t", "5", "-r", "1")
 
 
 class SnmpError(Exception):
@@ -154,8 +156,10 @@ async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], 
     Werte mit Leerzeichen oder leere Werte brauchen kein Quoting. Fehler kommen als SnmpError aus _run; ein SnmpError heisst nicht
     "nicht gesetzt": nach einem Timeout ist offen, ob der Switch den Wert schon uebernommen hat (darum Read-back-Verify beim Aufrufer).
     Ein host mit "-" vorne: SnmpError, ohne Aufruf (_host).
+    Eigenes Timing (SET_TIMING) statt der net-snmp-Vorgabe -t 1 -r 5: ein ProCurve schreibt bei jedem SET den Flash und antwortet
+    langsamer als 1 s, er bekaeme sonst bis zu sechs gleiche SETs. Das Lesen behaelt sein -t 3 -r 1.
     """
-    cmd = ["snmpset", *_auth_args(cred), "-On", _host(host)]
+    cmd = ["snmpset", *_auth_args(cred), *SET_TIMING, "-On", _host(host)]
     for oid, typ, val in varbinds:
         cmd += [oid, typ, val]
     return await _run(cmd, timeout)

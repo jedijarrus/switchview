@@ -28,6 +28,9 @@ V3 = {
     "snmp_priv_proto": "AES", "snmp_priv_pass": "privpass1",
 }
 RESPONSE = ".1.3.6.1.2.1.2.2.1.7.5 = INTEGER: 2\n"    # what snmpset echoes after a successful SET (the fake _run returns it)
+# The SET's own timing (M5): 5 s per try and one retry. net-snmp's defaults (-t 1 -r 5) would send up to six identical SETs to a
+# ProCurve that writes its flash on every SET and answers slower than a second. Reads keep theirs (-t 3 -r 1).
+SET_TIMING = ["-t", "5", "-r", "1"]
 
 IF_ADMIN_3 = "1.3.6.1.2.1.2.2.1.7.3"           # ifAdminStatus of ifIndex 3 (1 = up, 2 = down), type i
 IF_ADMIN_5 = "1.3.6.1.2.1.2.2.1.7.5"
@@ -41,7 +44,7 @@ def run_calls(monkeypatch):
     """Replace snmp._run by a recorder. Every call is appended as (cmd, timeout); the fake answers with RESPONSE."""
     calls = []
 
-    async def fake_run(cmd, timeout):
+    async def fake_run(cmd, timeout, strict=False):    # strict: walk passes it on
         calls.append((cmd, timeout))
         return RESPONSE
 
@@ -56,7 +59,7 @@ async def test_set_vars_argv(run_calls):
     assert out == RESPONSE    # whatever snmpset printed comes back unchanged
     assert len(run_calls) == 1
     argv, timeout = run_calls[0]
-    assert argv == ["snmpset", "-v2c", "-c", RW, "-On", HOST, IF_ADMIN_5, "i", "2"]
+    assert argv == ["snmpset", "-v2c", "-c", RW, *SET_TIMING, "-On", HOST, IF_ADMIN_5, "i", "2"]
     assert timeout == 20      # the documented default
     # The host is positional, laid out like walk and get: right after the last option (-On, which takes no separate argument,
     # so the host cannot be taken for the argument of a flag), no "--" separator, and only oid/type/value triples behind it.
@@ -64,6 +67,21 @@ async def test_set_vars_argv(run_calls):
     assert argv[host_at - 1] == "-On"
     assert "--" not in argv
     assert argv[host_at + 1:] == [IF_ADMIN_5, "i", "2"]
+
+
+async def test_set_vars_sets_its_own_timeout_and_one_retry(run_calls):
+    """M5: snmpset gets an explicit -t 5 -r 1 (once, before the host), not net-snmp's -t 1 -r 5; walk and get keep -t 3 -r 1."""
+    await snmp.set_vars(HOST, V2C, [(IF_ADMIN_5, "i", "2")])
+    await snmp.get(HOST, V2C, [IF_ADMIN_5])
+    await snmp.walk(HOST, V2C, "1.3.6.1.2.1.2.2.1.7")
+
+    (set_argv, _), (get_argv, _), (walk_argv, _) = run_calls
+    host_at = set_argv.index(HOST)
+    assert set_argv[host_at - 5:host_at] == [*SET_TIMING, "-On"]
+    assert set_argv.count("-t") == set_argv.count("-r") == 1
+    assert get_argv == ["snmpget", "-v2c", "-c", RW, "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", HOST, IF_ADMIN_5]
+    assert walk_argv == ["snmpbulkwalk", "-v2c", "-c", RW, "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25", HOST,
+                         "1.3.6.1.2.1.2.2.1.7"]
 
 
 async def test_set_vars_appends_the_varbinds_in_order(run_calls):
@@ -81,7 +99,7 @@ async def test_set_vars_appends_the_varbinds_in_order(run_calls):
     assert len(run_calls) == 1
     argv, _ = run_calls[0]
     assert argv == [
-        "snmpset", "-v2c", "-c", RW, "-On", HOST,
+        "snmpset", "-v2c", "-c", RW, *SET_TIMING, "-On", HOST,
         EGRESS_20, "x", "0080",
         PVID_3, "u", "20",
         IF_ALIAS_3, "s", "Platz 107",
@@ -98,7 +116,7 @@ async def test_set_vars_v3_argv(run_calls):
     argv, _ = run_calls[0]
     assert argv == [
         "snmpset", "-v3", "-u", "svrw", "-l", "authPriv", "-a", "SHA", "-A", "authpass1", "-x", "AES", "-X", "privpass1",
-        "-On", HOST, IF_ADMIN_5, "i", "1",
+        *SET_TIMING, "-On", HOST, IF_ADMIN_5, "i", "1",
     ]
 
 
@@ -208,7 +226,7 @@ async def test_set_vars_through_the_real_run_starts_snmpset_without_a_shell(monk
 
     out = await snmp.set_vars(HOST, V2C, [(IF_ALIAS_3, "s", "Platz 107")])
 
-    assert started == [("snmpset", "-v2c", "-c", RW, "-On", HOST, IF_ALIAS_3, "s", "Platz 107")]
+    assert started == [("snmpset", "-v2c", "-c", RW, *SET_TIMING, "-On", HOST, IF_ALIAS_3, "s", "Platz 107")]
     assert out == echo
 
 
