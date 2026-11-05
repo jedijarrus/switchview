@@ -455,6 +455,37 @@ def test_audit_records_driver_and_snmp_write(api, tmp_path):
     assert "s3cret" not in json.dumps(rows)
 
 
+def test_audit_records_the_writing_identity(api, tmp_path):
+    """M8: what decides the identity SNMP SETs go out with (poller.write_identity) is audited like driver and snmp_write: the RW v3 user
+    and its protocols, and snmp_version / snmp_user (the read identity, which writes when no RW user is set), each as "old → new" when
+    sent and changed, an empty value as "–". These fields hold no secret; the passwords stay names only. Clearing the RW user is
+    recorded, so a silent switch of the writing identity to the read identity shows."""
+    sid = create(api)
+    rw = {"snmp_rw_user": "svwrite", "snmp_rw_auth_proto": "SHA-256", "snmp_rw_priv_proto": "AES-256"}
+    steps = [
+        body(snmp_version="3", snmp_user="svread"),
+        body(snmp_version="3", snmp_user="svread", **rw, snmp_rw_auth_pass="rw-auth-s3cret", snmp_rw_priv_pass="rw-priv-s3cret"),
+        body(snmp_version="3", snmp_user="svread", **rw),                                     # sent, unchanged
+        body(snmp_version="3", snmp_user="svread", snmp_rw_auth_proto="SHA", snmp_rw_priv_proto=None),
+        body(snmp_version="3", snmp_user="svread", snmp_rw_user=None),                        # the read identity writes from now on
+        body(snmp_version="3", snmp_user="svread2", snmp_auth_pass="ro-auth-s3cret"),
+        body(),                                                                               # back to v2c
+    ]
+    for step in steps:
+        assert api.put(f"/api/switches/{sid}", json=step).status_code == 200
+
+    assert [d for _, _, d in audits(tmp_path)][1:] == [
+        "snmp_version: 2c → 3, snmp_user: – → svread",
+        "snmp_rw_auth_pass, snmp_rw_priv_pass, snmp_rw_user: – → svwrite, snmp_rw_auth_proto: – → SHA-256, snmp_rw_priv_proto: – → AES-256",
+        "",
+        "snmp_rw_auth_proto: SHA-256 → SHA, snmp_rw_priv_proto: AES-256 → –",
+        "snmp_rw_user: svwrite → –",
+        "snmp_auth_pass, snmp_user: svread → svread2",
+        "snmp_version: 3 → 2c, snmp_user: svread2 → –",
+    ]
+    assert "s3cret" not in json.dumps(audits(tmp_path))
+
+
 # ── 422 never echoes a secret ─────────────────────────────────────────────────
 MARK = "Zq7-secret-mark"
 

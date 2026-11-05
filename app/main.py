@@ -292,14 +292,23 @@ def _on_off(value) -> str:
     return "an" if value else "aus"
 
 
+# Felder ohne Geheimnis, die entscheiden, mit welcher Identitaet SNMP-SETs hinausgehen (poller.write_identity): der RW-Benutzer und seine
+# Verfahren, ohne RW-Benutzer die Lese-Identitaet (snmp_version, snmp_user). Das Audit haelt ihre Aenderung mit Wert fest.
+IDENTITY_FIELDS = ("snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto", "snmp_version", "snmp_user")
+
+
 def _update_detail(fields: dict, old) -> str:
-    """Audit-Detail eines PUT: die geaenderten Geheimnisse beim Namen (nie mit Wert), dann Treiber und SNMP-Schreiben als "alt → neu",
-    wenn sie mitkamen und sich aendern. SNMP-Schreiben einzuschalten ist eine Rechte-Aenderung."""
+    """Audit-Detail eines PUT: die geaenderten Geheimnisse beim Namen (nie mit Wert), dann Treiber, SNMP-Schreiben und die Felder der
+    Schreib-Identitaet (IDENTITY_FIELDS) als "alt → neu" (leer: "–"), wenn sie mitkamen und sich aendern. SNMP-Schreiben einzuschalten
+    ist eine Rechte-Aenderung, und wer ohne RW-Benutzer schreibt, haengt an der Lese-Identitaet."""
     parts = [k for k in fields if k in SECRET_FIELDS]
     if "driver" in fields and fields["driver"] != old["driver"]:
         parts.append(f"driver: {old['driver']} → {fields['driver']}")
     if "snmp_write" in fields and bool(fields["snmp_write"]) != bool(old["snmp_write"]):
         parts.append(f"snmp_write: {_on_off(old['snmp_write'])} → {_on_off(fields['snmp_write'])}")
+    for k in IDENTITY_FIELDS:
+        if k in fields and (fields[k] or None) != (old[k] or None):
+            parts.append(f"{k}: {old[k] or '–'} → {fields[k] or '–'}")
     return ", ".join(parts)
 
 
@@ -368,8 +377,8 @@ async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user
             fields[k] = encrypt(v) if v != "" else None
     sets = ", ".join(f"{k} = ?" for k in fields)
     async with db() as conn:
-        async with conn.execute("SELECT driver, snmp_write FROM switches WHERE id = ?", (sid,)) as cur:
-            old = await cur.fetchone()    # fuer das Audit: Treiber und SNMP-Schreiben vorher
+        async with conn.execute(f"SELECT driver, snmp_write, {', '.join(IDENTITY_FIELDS)} FROM switches WHERE id = ?", (sid,)) as cur:
+            old = await cur.fetchone()    # fuer das Audit: Treiber, SNMP-Schreiben und Schreib-Identitaet vorher
         if not old:
             raise HTTPException(404, "Switch nicht gefunden")
         cur = await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
