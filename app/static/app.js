@@ -9,6 +9,16 @@
   const speedTxt = s => !s ? "–" : s >= 1000 ? (s / 1000).toString().replace(".", ",") + " Gbit" : s + " Mbit";
   const fmtTime = iso => { if (!iso) return "–"; const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z"); return isNaN(d) ? iso : d.toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }); };
   const isNum = n => /^\d+$/.test(n);
+  // Treiber-Fähigkeiten (caps vom Server: cli, nac, backup, snmp_vlan, snmp_admin, snmp_name, snmp_poe, snmp_autosave)
+  const has = (s, cap) => !!s && (s.caps || []).includes(cap);
+  // Kann SwitchView an diesem Switch schreiben: per SSH-CLI (Treiber mit CLI und SSH-Zugang) oder per SNMP (SNMP-Schreiben an)
+  const writable = s => (s.ssh && has(s, "cli")) || !!s.snmp_write;
+  // PoE eines Ports (netmap: {on, status, mw}); status = pethPsePortDetectionStatus (RFC 3621)
+  const POE_ST = { 1: "abgeschaltet", 2: "kein Gerät erkannt", 3: "liefert Strom", 4: "Fehler", 5: "Test", 6: "Fehler" };
+  const onTxt = on => on === true ? "an" : on === false ? "aus" : "unbekannt";
+  const poeTxt = q => [onTxt(q.on), POE_ST[q.status] && !(q.status === 1 && q.on === false) ? POE_ST[q.status] : "",
+    typeof q.mw === "number" && (q.mw > 0 || q.status === 3) ? (q.mw / 1000).toLocaleString("de-DE", { maximumFractionDigits: 1 }) + " W" : ""].filter(Boolean).join(" · ");
+  const sentence = t => t && !/[.!?]$/.test(t) ? t + "." : t;
 
   /* ── API, Toast, Modal ── */
   async function api(method, url, body) {
@@ -24,7 +34,7 @@
   let modalLastFocus = null;
   function modal(title, bodyHtml, buttons = []) {
     modalLastFocus = document.activeElement;
-    $("#m-title").textContent = title; $("#m-body").innerHTML = bodyHtml;
+    $("#m-title").textContent = title; $("#m-body").innerHTML = bodyHtml; $("#m-body").onclick = null; // Klick-Handler gehört zum jeweiligen Dialog
     const foot = $("#m-foot"); foot.innerHTML = "";
     buttons.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
     $("#modal").hidden = false;
@@ -209,11 +219,15 @@
     if (swVlan && !vset.includes(swVlan)) swVlan = null;
     const links = MAP.links.filter(l => l.a === s.k || l.b === s.k);
     const cnt = st => ph.filter(p => p.st === st).length;
-    const banner = !s.ssh ? `<div class="banner">Ohne SSH-Zugang kann SwitchView hier nur lesen. Für Änderungen: <button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button></div>`
-      : !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
+    // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
+    // geht (Sicherung, Konfiguration lesen, RADIUS), zeigt die Ansicht nur bei einem Treiber, der es kann.
+    const cli = has(s, "cli"), canW = writable(s), edit = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
+    const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${edit}</div>`
+      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports abschalten. RADIUS, Bekannte Geräte und Protected (auch das Wiedereinschalten) brauchen SSH. ${edit}</div>`
+      : cli && !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
     v.innerHTML = `<div class="md">${side}<div style="display:grid;gap:16px;min-width:0">
-      <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
-        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button><button class="btn small" type="button" data-a="backup">Konfiguration sichern</button><button class="btn small" type="button" data-a="test">Verbindung testen</button><button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button></div></div>
+      <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
+        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${edit}</div></div>
       ${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
       ${banner}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span><span class="fact"><b>${cnt("radius")}</b> RADIUS</span><span class="fact"><b>${cnt("known")}</b> Bekannte Geräte</span><span class="fact"><b>${cnt("protected")}</b> Protected</span><span class="fact"><b>${cnt("off")}</b> Aus</span><span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
@@ -229,9 +243,9 @@
           <div class="right toolrow"><div class="seg" role="group" aria-label="Ports filtern" id="pf">${[["all", "Alle"], ["up", "Aktiv"], ["free", "Frei"], ["nac", "RADIUS/Bekannt"], ["uplink", "Uplinks"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${swPortFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="pt" placeholder="Port, Gerät, Beschreibung" aria-label="Ports durchsuchen" value="${esc(swText)}"></div></div>
         <div class="selbar" id="selbar" hidden><span><b id="selcount">0</b> Ports ausgewählt</span><button class="btn small primary" type="button" id="sel-edit">Bearbeiten</button><button class="btn small ghost" type="button" id="sel-clear">Auswahl aufheben</button></div>
-        <div class="tbl-wrap"><table><thead><tr><th class="ck">${s.ssh ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
+        <div class="tbl-wrap"><table><thead><tr><th class="ck">${canW ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
       ${radiusCard(s)}
-      ${s.ssh ? `<section class="card"><div class="card-h"><h2>Änderungen</h2><span class="sub">an diesem Switch, neueste zuerst</span></div><div id="sw-changes"><div class="empty">Lade …</div></div></section>` : ""}
+      ${canW ? `<section class="card"><div class="card-h"><h2>Änderungen</h2><span class="sub">an diesem Switch, neueste zuerst</span></div><div id="sw-changes"><div class="empty">Lade …</div></div></section>` : ""}
       <section class="card"><div class="card-h"><h2>Verbindungen</h2><span class="sub">${links.length} zu anderen Switches</span></div>${linksTable(links, s.k)}</section>
     </div></div>`;
     bindSide();
@@ -250,7 +264,7 @@
       const t = e.target.closest("[data-p]"); if (t && !t.closest(".side")) openPort(s, t.dataset.p, t);
     };
     $(".dhead .actions").addEventListener("click", e => switchAction(e, s));
-    if (s.ssh) renderChangesInto($("#sw-changes"), s.id, 10);
+    if (canW) renderChangesInto($("#sw-changes"), s.id, 10);
   }
   function syncPicked() {
     const bar = $("#selbar"); if (!bar) return;
@@ -258,7 +272,7 @@
     document.querySelectorAll("#plate .port").forEach(el => el.classList.toggle("picked", picked.has(el.dataset.p)));
   }
   function radiusCard(s) {
-    if (!s.ssh) return "";
+    if (!s.ssh || !has(s, "nac")) return "";
     const r = s.ready, rs = !!(MAP && s.cfgAt);
     const li = (ok, t) => `<li class="${ok ? "ok" : "miss"}"><span class="st-dot ${ok ? "" : "down"}"></span>${t}</li>`;
     const miss = r && !(r.host && r.coa && r.tw && r.eap && r.active && r.park);
@@ -307,7 +321,7 @@
       return true;
     });
     const dev = p => p.l.length ? p.l.map(x => `${esc(x[0])} <span class="mono muted">${esc(x[1])}</span>`).join(", ") : p.tr && !p.n.startsWith("Trk") ? `<span class="muted">über ${esc(p.tr)}</span>` : p.mc > 3 ? `<span class="muted">${p.mc} Geräte</span>` : p.d.map(d => esc(d[3] || d[2] || d[4] || d[0])).join(", ") || `<span class="muted">–</span>`;
-    const ck = p => s.ssh && !p.tr ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
+    const ck = p => writable(s) && !p.tr ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
     $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(p.st)}${isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : ""}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="muted">Keine Ports für diesen Filter.</td></tr>`;
     if ($("#pick-all")) $("#pick-all").checked = false;
@@ -332,45 +346,67 @@
   function editPorts(s, ports, prev) {
     ports = ports.filter(n => portIdx[n]).sort((a, b) => (isNum(a) ? +a : 999) - (isNum(b) ? +b : 999));
     if (!ports.length) return;
-    const ps = ports.map(n => portIdx[n]), f = prev || { status: "", untagged: "", add: [], rem: [], name: "", nameClear: false, limit: "", guest: "-", expert: false };
+    const ps = ports.map(n => portIdx[n]), f = prev || { status: "", untagged: "", add: [], rem: [], name: "", nameEdited: false, nameClear: false, limit: "", guest: "-", poe: "", expert: false };
     const vl = (s.vl && s.vl.length ? s.vl : Object.keys(MAP.vlans)), tagUnion = [...new Set(ps.flatMap(p => p.t))].sort((a, b) => a - b);
     const curSt = [...new Set(ps.map(p => p.st))], anyProt = ps.some(p => isUplink(p) || p.n.startsWith("Trk"));
-    const opts = [["", "Unverändert", curSt.length === 1 && ST[curSt[0]] ? "jetzt: " + ST[curSt[0]][0] : "gemischt"],
+    // 802.1X / MAC-Anmeldung (RADIUS, Bekannte Geräte, Geräte pro Port, Gast-VLAN) gibt es nur über die SSH-CLI; Protected auf einem
+    // Treiber mit NAC auch (es heißt dort Anmeldung aus). Ohne CLI-Treiber oder ohne SSH-Zugang gesperrt, mit dem Grund im Formular.
+    const nacCap = has(s, "cli") && has(s, "nac"), nac = nacCap && s.ssh, protOk = nac || !has(s, "nac");
+    const nacWhy = nac ? "" : nacCap
+      ? "Ohne SSH-Zugang gehen RADIUS, Bekannte Geräte und Protected (auch das Wiedereinschalten eines Ports), Geräte pro Port und Gast-VLAN nicht: per SNMP gibt es keine 802.1X-/MAC-Anmeldung."
+      : `Treiber ${s.driver} schreibt per SNMP: RADIUS, Bekannte Geräte, Geräte pro Port und Gast-VLAN gehen nur über die SSH-CLI (ProCurve).`;
+    const stOff = { radius: !nac, known: !nac, protected: !protOk };
+    const opts = [["", "Unverändert", curSt.length > 1 ? "gemischt" : ST[curSt[0]] ? "jetzt: " + ST[curSt[0]][0] : "jetzt: unbekannt"],
       ["radius", "RADIUS", "Zertifikat (802.1X), sonst bekannte Geräte"], ["known", "Bekannte Geräte", "nur Geräte aus der Geräte-DB, per MAC"],
       ["protected", "Protected", "festes VLAN, egal wer steckt"], ["off", "Aus", "Port abgeschaltet"]];
+    // PoE nur bei einem Treiber mit snmp_poe und nur, wenn jeder gewählte Port einen zugeordneten PoE-Eintrag hat (netmap: poe)
+    const poeCap = has(s, "snmp_poe"), noPoe = ps.filter(p => !p.poe), poeAll = poeCap && !noPoe.length;
+    const poeNow = [...new Set(ps.map(p => p.poe && p.poe.on))];
+    const poeHtml = poeAll ? `<div class="grid2"><label class="field"><span>PoE</span><select id="f-poe" ${s.snmp_write ? "" : "disabled"}><option value="">unverändert</option><option value="on" ${f.poe === "on" ? "selected" : ""}>an</option><option value="off" ${f.poe === "off" ? "selected" : ""}>aus</option></select>
+        <span class="hint">jetzt: ${esc(ps.length === 1 ? poeTxt(ps[0].poe) : poeNow.length === 1 ? onTxt(poeNow[0]) : "gemischt")}</span></label></div>
+      ${!s.snmp_write ? `<p class="note gate">PoE schaltet SwitchView nur per SNMP: dafür im Zugang „SNMP darf schreiben“ einschalten.</p>`
+        : has(s, "cli") ? `<p class="note" style="margin:0">PoE geht immer per SNMP, auch wenn SSH geht. Zusammen mit RADIUS, Bekannte Geräte, Protected, Geräte pro Port oder Gast-VLAN geht es nicht: bitte getrennt ändern.</p>` : ""}`
+      : poeCap && noPoe.length < ps.length ? `<p class="note gate">PoE nur, wenn jeder gewählte Port PoE hat (ohne PoE: ${esc(noPoe.map(p => p.n).join(", "))}).</p>` : "";
     const chipBtns = (ids, sel, attr) => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
     const lims = LIMITS.filter(n => n <= (s.limitMax || 2));
     const body = `<p class="note" style="margin:0">${ports.length === 1 ? "Port" : ports.length + " Ports"}: <span class="mono">${esc(ports.join(", "))}</span></p>
-      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div></fieldset>
+      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""} ${stOff[k] ? "disabled" : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div>
+        ${nacWhy ? `<p class="note gate">${esc(nacWhy)}</p>` : ""}</fieldset>
       <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-u-hint"></span></label>
         <label class="field"><span>Beschreibung</span><input id="f-name" value="${esc(f.name)}" maxlength="64" placeholder="unverändert" autocomplete="off"><span class="hint">ohne Leerzeichen, z. B. Drucker-EK</span></label></div>
       <label class="check"><input type="checkbox" id="f-nclear" ${f.nameClear ? "checked" : ""}> Beschreibung entfernen</label>
+      ${poeHtml}
       <details class="adv"><summary>Getaggte VLANs, Geräte pro Port, Gast-VLAN</summary><div style="display:grid;gap:12px;margin-top:10px">
         <div class="field"><span>Getaggt hinzufügen</span>${chipBtns(vl, f.add, "ta")}</div>
         <div class="field"><span>Getaggt entfernen</span>${chipBtns(tagUnion, f.rem, "tr")}</div>
-        <div class="grid2"><label class="field"><span>Geräte pro Port</span><select id="f-lim"><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint">gilt für RADIUS und Bekannte Geräte</span></label>
-          <label class="field"><span>Gast-VLAN für Unbekannte</span><select id="f-guest"><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint">statt Sperre, wenn die Anmeldung scheitert</span></label></div>
+        <div class="grid2"><label class="field"><span>Geräte pro Port</span><select id="f-lim" ${nac ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></label>
+          <label class="field"><span>Gast-VLAN für Unbekannte</span><select id="f-guest" ${nac ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></label></div>
       </div></details>
       ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>` : ""}`;
     const collect = () => {
       f.status = (document.querySelector('input[name="f-st"]:checked') || {}).value || "";
       f.untagged = $("#f-u").value; f.name = $("#f-name").value.trim().replace(/\s+/g, "_"); f.nameClear = $("#f-nclear").checked;
       f.add = [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta); f.rem = [...document.querySelectorAll("[data-tr][aria-pressed=true]")].map(b => b.dataset.tr);
-      f.limit = $("#f-lim").value; f.guest = $("#f-guest").value; f.expert = !!($("#f-expert") && $("#f-expert").checked);
+      f.limit = nac ? $("#f-lim").value : ""; f.guest = nac ? $("#f-guest").value : "-"; f.poe = poeAll && s.snmp_write ? $("#f-poe").value : "";
+      f.expert = !!($("#f-expert") && $("#f-expert").checked);
       const c = {};
-      if (f.status) c.status = f.status;
+      if (f.status && !stOff[f.status]) c.status = f.status;
       if (f.untagged) c.untagged = f.untagged;
       if (f.add.length) c.tagged_add = f.add;
       if (f.rem.length) c.tagged_remove = f.rem;
-      if (f.nameClear) c.name = ""; else if (f.name) c.name = f.name;
+      // name nur, wenn jemand ihn hier eingetippt hat: das Feld zeigt nie die Beschreibung von der Anzeige (die ist dort unter Umständen
+      // maskiert oder als Hex), sonst schriebe ein Absenden genau diese Form auf den Switch
+      if (f.nameClear) c.name = ""; else if (f.nameEdited && f.name) c.name = f.name;
       if (f.limit) c.limit = +f.limit;
       if (f.guest !== "-") c.guest = f.guest;
+      if (f.poe) c.poe = f.poe === "on";
       return { mode: "ports", ports, change: c, expert: f.expert };
     };
     modal(ports.length === 1 ? `Port ${ports[0]} bearbeiten` : `${ports.length} Ports bearbeiten`, body, [
       { label: "Abbrechen", onClick: closeModal },
       { label: "Vorschau", cls: "primary", onClick: () => { const payload = collect(); if (!Object.keys(payload.change).length) { toast("Nichts ausgewählt, was sich ändern soll"); return; } previewChange(s, payload, () => editPorts(s, ports, f)); } }]);
-    $("#m-body").addEventListener("click", e => { const b = e.target.closest("[data-ta],[data-tr]"); if (b) b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); });
+    $("#m-body").onclick = e => { const b = e.target.closest("[data-ta],[data-tr]"); if (b) b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); };
+    $("#f-name").addEventListener("input", () => { f.nameEdited = true; });
     const hint = () => { const st = (document.querySelector('input[name="f-st"]:checked') || {}).value; $("#f-u-hint").textContent = st === "radius" || st === "known" ? "gilt, wenn PacketFence kein VLAN vorgibt" : st === "protected" ? "jedes Gerät landet in diesem VLAN" : ""; };
     document.querySelectorAll('input[name="f-st"]').forEach(r => r.addEventListener("change", hint)); hint();
   }
@@ -378,47 +414,71 @@
   async function previewChange(s, payload, back) {
     const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
     modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
-    let r;
-    try { r = await api("POST", `/api/switches/${s.id}/plan`, payload); }
+    let r, caps;
+    try { [r, caps] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveCaps(s)]); }
     catch (e) { modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
-    const can = !r.blocked.length && (r.commands.length || r.kind === "save");
+    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp";
+    // Per SNMP gibt es kein Staging: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das selbst tut
+    // (snmp_autosave, R26); sonst bleibt das Speichern am Switch.
+    const way = !can || !snmp ? "" : caps.includes("snmp_autosave") ? `<div class="banner"><b>Wird per SNMP sofort angewendet und automatisch gespeichert.</b></div>`
+      : `<div class="banner warn"><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b></div>`;
+    const poeNote = snmp && caps.includes("cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
     const body = `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>
       ${r.blocked.length ? `<div class="error"><b>Nicht möglich:</b><ul class="blist">${r.blocked.map(b => `<li>${b.port === "*" ? "" : "Port " + esc(b.port) + ": "}${esc(b.reason)}</li>`).join("")}</ul></div>` : ""}
+      ${way}
       ${r.warnings.length ? `<div class="banner warn"><ul class="blist">${r.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
-      ${r.commands.length ? `<div><p class="eyebrow">Befehle am Switch</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
-      ${can ? `<p class="note" style="margin:0">Danach liest SwitchView die Konfiguration zurück und prüft sie. Erst wenn alles passt, wird gespeichert (write memory).</p>` : ""}`;
+      ${r.commands.length ? `<div><p class="eyebrow">${snmp ? "Änderungen per SNMP" : "Befehle am Switch"}</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
+      ${can ? `<p class="note" style="margin:0">${snmp ? "Danach liest SwitchView den Zustand per SNMP zurück und prüft ihn." + poeNote : "Danach liest SwitchView die Konfiguration zurück und prüft sie. Erst wenn alles passt, wird gespeichert (write memory)."}</p>` : ""}`;
     const btns = [];
     if (back) btns.push({ label: "Zurück", onClick: back });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     if (can) btns.push({ label: r.kind === "save" ? "Speichern" : "Ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
-      try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, token: r.token }); runProgress(s, res.id); }
+      // genau der Schreibweg dieser Vorschau (nie eine eigene Wahl): geht er nicht mehr, lehnt der Server ab statt still den anderen zu nehmen
+      try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, mechanism: r.mechanism, token: r.token }); runProgress(s, res.id, caps); }
       catch (e) { toast(e.message); b.disabled = false; }
     } });
     modal(title, body, btns);
   }
+  // Die Treiber-Fähigkeiten, wie der Server sie jetzt kennt (der Netzplan im Browser kann älter sein), für die Hinweise zum Speichern
+  async function liveCaps(s) {
+    try { const row = (await api("GET", "/api/switches")).find(x => x.id === s.id); if (row && row.caps) return row.caps; } catch (e) { /* dann der Netzplan */ }
+    return s.caps || [];
+  }
 
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };
-  const chPill = c => `<span class="pill ${CH[c.status] ? CH[c.status][1] : "neutral"}">${CH[c.status] ? CH[c.status][0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
+  const chPill = c => `<span class="pill ${CH[c.status] ? CH[c.status][1] : "neutral"}">${CH[c.status] ? CH[c.status][0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
   const stepsHtml = c => `<ul class="steps">${(c.steps || []).map(x => `<li class="${esc(x[2])}"><span class="t">${esc(fmtTime(x[0]).split(", ").pop())}</span><span>${esc(x[1])}</span></li>`).join("")}</ul>`;
-  async function runProgress(s, id) {
+  // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. Bei "unklar" hängt es am Weg: per SSH speichert erst write memory nach der
+  // Prüfung; per SNMP wirkt, was der Switch übernommen hat, schon, gespeichert ist es nur bei einem Treiber mit snmp_autosave.
+  function resultHead(c, caps) {
+    const snmp = c.mechanism === "snmp";
+    const kept = snmp ? (caps.includes("snmp_autosave") ? "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst)."
+      : "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert – am Switch speichern.")
+      : c.saved ? "Die Änderung ist gespeichert." : "Der Switch läuft mit der Änderung, sie ist aber nicht gespeichert.";
+    return { ok: c.saved ? `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>` : `<div class="banner warn"><b>Erledigt, aber nicht dauerhaft gespeichert – am Switch speichern.</b></div>`,
+      unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(sentence(c.error || ""))} ${esc(kept)}</span></div>`,
+      failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(c.error || "")}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(c.error || "")}</span></div>` }[c.status] || "";
+  }
+  async function runProgress(s, id, caps) {
+    caps = caps || s.caps || [];
     modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
     for (;;) {
       if (!$("#prog")) return;
       let c; try { c = await api("GET", `/api/changes/${id}`); } catch (e) { $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
       const done = ["ok", "unclear", "failed", "aborted"].includes(c.status);
-      const head = { ok: `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>`, unclear: `<div class="banner warn"><b>Unklar:</b> ${esc(c.error || "")} Der Switch läuft mit der Änderung, sie ist aber nicht gespeichert.</div>`,
-        failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(c.error || "")}</div>`, aborted: `<div class="banner"><b>Abgebrochen:</b> ${esc(c.error || "")}</div>` }[c.status] || "";
+      const head = resultHead(c, caps);
       if (!$("#prog")) return;
       $("#prog").innerHTML = `<p style="margin:0 0 10px"><b>${esc(c.summary)}</b></p>${head}<div style="margin-top:10px">${stepsHtml(c)}</div>${done && c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`;
       if (done) {
         const btns = [];
         if (["unclear", "failed"].includes(c.status) && c.kind === "ports" && !c.reverted_by) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
-        if (["unclear", "failed"].includes(c.status) && !c.saved) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
+        // Speichern (write memory) gibt es nur per SSH; eine SNMP-Änderung speichert der Switch selbst oder gar nicht (der Server lehnt ab)
+        if (["unclear", "failed"].includes(c.status) && !c.saved && c.mechanism !== "snmp") btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
         btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
         const foot = $("#m-foot"); foot.innerHTML = "";
         btns.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
-        if (c.status === "ok") toast("Änderung erledigt");
+        if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
         setTimeout(async () => { try { await loadMap(true); if (current === "switches") { const keep = picked; renderSwitchDetail(); picked = c.status === "ok" ? new Set() : keep; syncPicked(); } } catch (e) { /* egal */ } }, c.kind === "save" ? 200 : 4500);
         return;
       }
@@ -439,8 +499,8 @@
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
       if (d) {
         const c = await api("GET", `/api/changes/${d.dataset.cd}`);
-        modal(`Änderung #${c.id}`, `<p style="margin:0"><b>${esc(c.summary)}</b></p><p class="note" style="margin:0">${esc(c.switch_name)} · ${esc(c.username || "")} · ${esc(fmtTime(c.created_at))} · ${chPill(c)}</p>
-          ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}<div><p class="eyebrow">Befehle</p><pre class="code">${esc((c.commands || []).join("\n") || "–")}</pre></div>
+        modal(`Änderung #${c.id}`, `<p style="margin:0"><b>${esc(c.summary)}</b></p><p class="note" style="margin:0">${esc(c.switch_name)} · ${esc(c.username || "")} · ${esc(fmtTime(c.created_at))}${c.mechanism === "snmp" ? " · per SNMP" : ""} · ${chPill(c)}</p>
+          ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}<div><p class="eyebrow">${c.mechanism === "snmp" ? "Änderungen per SNMP" : "Befehle"}</p><pre class="code">${esc((c.commands || []).join("\n") || "–")}</pre></div>
           <div><p class="eyebrow">Ablauf</p>${stepsHtml(c)}</div>${c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`,
           [{ label: "Schließen", onClick: closeModal }]);
       }
@@ -460,9 +520,10 @@
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
-    const canEdit = s.ssh && !p.tr;
+    const canEdit = writable(s) && !p.tr;
     $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">Port bearbeiten</button></div>` : ""}
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(p.st)}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd><dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
+      ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
       <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
     if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); editPorts(s, [p.n]); });
@@ -512,22 +573,66 @@
   document.addEventListener("click", e => { if (!e.target.closest(".search")) res.hidden = true; });
 
   /* ── Switch anlegen / bearbeiten ── */
-  function editSwitch(s) {
-    const isNew = !s; s = s || { snmp_version: "2c", enabled: 1, sort: 0, zone: "" };
-    const secret = (id, label, set) => `<label class="field"><span>${label}</span><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? "gesetzt – leer lassen = unverändert" : ""}"></label>`;
-    const sel = (id, opts, val) => `<select id="${id}">${opts.map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o || "–")}</option>`).join("")}</select>`;
+  let DRIVERS = null; // GET /api/drivers: [{name, caps, notes}]
+  const CAP_TXT = { snmp_vlan: "VLANs", snmp_admin: "An/Aus", snmp_name: "Namen", snmp_poe: "PoE" };
+  const capsTxt = caps => [caps.includes("cli") ? "SSH-CLI" + (caps.includes("nac") ? " mit RADIUS/802.1X" : "") + (caps.includes("backup") ? " und Sicherung" : "") : "keine SSH-CLI",
+    "SNMP: " + (Object.keys(CAP_TXT).filter(c => caps.includes(c)).map(c => CAP_TXT[c]).join(", ") || "nichts"),
+    caps.includes("snmp_autosave") ? "speichert SNMP-Änderungen selbst" : "speichert SNMP-Änderungen nicht selbst"].join(" · ");
+  // Mit welcher Identität SNMP-SETs an diesen Switch gehen, gespeicherter Stand (der Server rechnet es mit poller.write_identity)
+  function writeState(s) {
+    if (!s.snmp_write) return "";
+    if (!s.snmp_write_via) return `<div class="error"><b>SNMP-Schreiben geht so nicht:</b> ${esc(s.snmp_write_error || "kein Schreib-Zugang")}</div>`;
+    const rw = s.snmp_write_via === "rw", v3 = rw ? !!s.snmp_rw_user : s.snmp_version === "3";
+    const who = v3 ? `SNMPv3-Benutzer „${esc(rw ? s.snmp_rw_user : s.snmp_user)}“` : "v2c-Community";
+    return `<p class="note" style="margin:0">Zurzeit: <span class="pill ${s.snmp_rw_insecure ? "crit" : "ok"}">${rw ? "schreibt mit eigenem Schreib-Zugang" : "schreibt mit Lese-Zugang"}</span> ${who}${rw ? "" : ", braucht dafür am Switch Schreibrechte"}</p>`
+      + (s.snmp_rw_insecure ? `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${v3 ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>` : "");
+  }
+  async function editSwitch(s) {
+    const isNew = !s; s = s || { snmp_version: "2c", enabled: 1, sort: 0, zone: "", driver: "procurve", snmp_write: false };
+    if (!DRIVERS) { try { DRIVERS = await api("GET", "/api/drivers"); } catch (e) { /* dann bleibt der Treiber, wie er ist */ } }
+    const drv = DRIVERS, curDrv = s.driver || "procurve";
+    // Ein gespeicherter Treiber, den die Liste nicht kennt (am Server wie generic), bleibt wählbar: sonst wechselte ihn ein Speichern still
+    const drvs = !drv ? [{ name: curDrv, caps: s.caps || [], notes: "Treiberliste nicht ladbar, der Treiber bleibt unverändert." }]
+      : drv.some(d => d.name === curDrv) ? drv : [...drv, { name: curDrv, caps: s.caps || [], notes: "Unbekannter Treiber, wirkt wie generic (nur Standard-MIBs)." }];
+    const KEEP = "gesetzt – leer lassen = unverändert";
+    // Geheimnis: leer = unverändert (null), „Löschen“ schickt "" (main.SECRET_FIELDS). Einen Wert liefert der Server nie, nur *_set.
+    const secret = (id, label, set) => `<div class="field"><label for="${id}">${label}</label><div class="sec"><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? KEEP : ""}">${set ? `<button class="btn small" type="button" data-clr="${id}" aria-pressed="false" aria-label="${label} löschen">Löschen</button>` : ""}</div></div>`;
+    // Ein gespeicherter Wert, den die Auswahl nicht kennt, bleibt als eigene Option stehen (sonst nähme ein Speichern still die erste)
+    const sel = (id, opts, val) => `<select id="${id}">${(opts.includes(val) ? opts : [...opts, val]).map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o || "–")}</option>`).join("")}</select>`;
+    const AUTH = ["SHA", "SHA-256", "SHA-512", "MD5"], PRIV = ["AES", "AES-256", "DES", ""];
+    // RW-Protokolle: zu einem gespeicherten RW-Benutzer genau wie gespeichert (auch keins), sonst die Empfehlung authPriv (SHA, AES)
+    const rwAp = s.snmp_rw_user ? s.snmp_rw_auth_proto || "" : s.snmp_rw_auth_proto || "SHA", rwPp = s.snmp_rw_user ? s.snmp_rw_priv_proto || "" : s.snmp_rw_priv_proto || "AES";
+    const rwStored = !!(s.snmp_rw_user || s.snmp_rw_community_set || s.snmp_rw_auth_pass_set || s.snmp_rw_priv_pass_set);
     const body = `<div class="grid2"><label class="field"><span>Name</span><input id="f-name" value="${esc(s.name || "")}" required maxlength="64"></label>
       <label class="field"><span>Adresse (IP oder Hostname)</span><input id="f-host" value="${esc(s.host || "")}" required maxlength="64"></label>
       <label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>
       <label class="field"><span>Reihenfolge</span><input id="f-sort" type="number" value="${esc(s.sort || 0)}"></label></div>
+      <label class="field"><span>Treiber</span><select id="f-driver" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
+        <span class="hint" id="f-drv-notes"></span><span class="hint" id="f-drv-caps"></span></label>
       <label class="check"><input id="f-enabled" type="checkbox" ${s.enabled ? "checked" : ""}> Aktiv (wird abgefragt und gesichert)</label>
       <fieldset class="fs"><legend>SNMP (lesen)</legend><label class="field"><span>Version</span>${sel("f-snmpv", ["2c", "3"], s.snmp_version)}</label>
         <div id="snmp2">${secret("f-comm", "Community", s.snmp_community_set)}</div>
         <div id="snmp3" class="grid2"><label class="field"><span>Benutzer</span><input id="f-suser" value="${esc(s.snmp_user || "")}"></label>
-          <label class="field"><span>Auth-Verfahren</span>${sel("f-aproto", ["SHA", "SHA-256", "SHA-512", "MD5"], s.snmp_auth_proto || "SHA")}</label>
-          ${secret("f-apass", "Auth-Kennwort", s.snmp_auth_pass_set)}<label class="field"><span>Verschlüsselung</span>${sel("f-pproto", ["AES", "AES-256", "DES", ""], s.snmp_priv_proto || "AES")}</label>
+          <label class="field"><span>Auth-Verfahren</span>${sel("f-aproto", AUTH, s.snmp_auth_proto || "SHA")}</label>
+          ${secret("f-apass", "Auth-Kennwort", s.snmp_auth_pass_set)}<label class="field"><span>Verschlüsselung</span>${sel("f-pproto", PRIV, s.snmp_priv_proto || "AES")}</label>
           ${secret("f-ppass", "Priv-Kennwort", s.snmp_priv_pass_set)}</div></fieldset>
-      <fieldset class="fs"><legend>SSH (Sicherung, später Änderungen)</legend><div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set)}</div></fieldset>`;
+      <fieldset class="fs"><legend>SNMP (schreiben)</legend>
+        <label class="check"><input id="f-sw" type="checkbox" ${s.snmp_write ? "checked" : ""}> SNMP darf schreiben</label>
+        <p class="note" id="f-sw-hint" style="margin:0"></p>
+        ${isNew ? "" : writeState(s)}
+        <div id="f-rw" style="display:grid;gap:12px">
+          <p class="eyebrow" style="margin:0">Eigener Schreib-Zugang · empfohlen: SNMPv3 mit Auth und Verschlüsselung (authPriv)</p>
+          <div class="grid2"><label class="field"><span>v3-Benutzer</span><input id="f-rwuser" value="${esc(s.snmp_rw_user || "")}" maxlength="64" autocomplete="off"></label>
+            <label class="field"><span>Auth-Verfahren</span>${sel("f-rwaproto", AUTH, rwAp)}</label>
+            ${secret("f-rwapass", "Auth-Kennwort", s.snmp_rw_auth_pass_set)}<label class="field"><span>Verschlüsselung</span>${sel("f-rwpproto", PRIV, rwPp)}</label>
+            ${secret("f-rwppass", "Priv-Kennwort", s.snmp_rw_priv_pass_set)}</div>
+          <details class="adv" ${s.snmp_rw_community_set ? "open" : ""}><summary>Statt v3: v2c-Schreib-Community (unsicher)</summary><div style="display:grid;gap:10px;margin-top:10px">
+            <div class="banner crit"><span><b>v2c ist unsicher:</b> die Community geht im Klartext übers Netz. Wer sie mitliest, kann damit an diesem Switch schreiben. Nur, wenn der Switch kein SNMPv3 kann.</span></div>
+            ${secret("f-rwcomm", "Schreib-Community", s.snmp_rw_community_set)}</div></details>
+          <p class="note" style="margin:0">Es schreibt der v3-Benutzer, ohne ihn die v2c-Community, ohne beide der Lese-Zugang oben (er braucht dann am Switch Schreibrechte). Die Community „public“ schreibt nie.</p>
+        </div></fieldset>
+      <fieldset class="fs"><legend>SSH (Sicherung und Änderungen)</legend><p class="note" id="f-ssh-hint" style="margin:0" hidden></p>
+        <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set)}</div></fieldset>`;
     const buttons = [];
     if (!isNew) buttons.push({ label: "Löschen", cls: "danger", onClick: async () => {
       closeModal();
@@ -536,10 +641,19 @@
     } });
     buttons.push({ label: "Abbrechen", onClick: closeModal });
     buttons.push({ label: isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async btn => {
-      const val = id => $("#" + id).value, pw = id => { const x = $("#" + id).value; return x === "" ? null : x; };
+      const val = id => $("#" + id).value;
+      const pw = id => { const x = $("#" + id); return x.closest(".sec").classList.contains("clr") ? "" : x.value === "" ? null : x.value; };
       const payload = { name: val("f-name").trim(), host: val("f-host").trim(), zone: val("f-zone").trim(), sort: +val("f-sort") || 0, enabled: $("#f-enabled").checked, snmp_version: val("f-snmpv"),
         snmp_community: pw("f-comm"), snmp_user: val("f-suser").trim() || null, snmp_auth_proto: val("f-aproto") || null, snmp_auth_pass: pw("f-apass"), snmp_priv_proto: val("f-pproto") || null,
-        snmp_priv_pass: pw("f-ppass"), ssh_user: val("f-ssh-user").trim() || null, ssh_pass: pw("f-ssh-pass") };
+        snmp_priv_pass: pw("f-ppass"), ssh_user: val("f-ssh-user").trim() || null, ssh_pass: pw("f-ssh-pass"),
+        snmp_rw_community: pw("f-rwcomm"), snmp_rw_auth_pass: pw("f-rwapass"), snmp_rw_priv_pass: pw("f-rwppass") };
+      // Treiber, SNMP-Schreiben, RW-Benutzer und seine Protokolle lässt ein PUT ohne sie stehen (main.UPDATE_IF_SENT): beim Anlegen alle,
+      // beim Bearbeiten nur, was sich gegenüber dem gespeicherten Stand ändert. Die RW-Protokolle nur zu einem RW-Benutzer (ohne ihn unbenutzt).
+      const rwUser = val("f-rwuser").trim() || null, upd = { snmp_write: $("#f-sw").checked, snmp_rw_user: rwUser };
+      if (drv) upd.driver = val("f-driver");
+      if (rwUser) { upd.snmp_rw_auth_proto = val("f-rwaproto") || null; upd.snmp_rw_priv_proto = val("f-rwpproto") || null; }
+      const was = { driver: curDrv, snmp_write: !!s.snmp_write, snmp_rw_user: s.snmp_rw_user || null, snmp_rw_auth_proto: s.snmp_rw_auth_proto || null, snmp_rw_priv_proto: s.snmp_rw_priv_proto || null };
+      Object.entries(upd).forEach(([k, v]) => { if (isNew || v !== was[k]) payload[k] = v; });
       if (!payload.name || !payload.host) { toast("Name und Adresse sind Pflicht"); return; }
       btn.disabled = true;
       try {
@@ -553,6 +667,24 @@
     modal(isNew ? "Switch hinzufügen" : `Zugang bearbeiten: ${s.name}`, body, buttons);
     const sync = () => { const v3 = $("#f-snmpv").value === "3"; $("#snmp2").hidden = v3; $("#snmp3").hidden = !v3; };
     $("#f-snmpv").addEventListener("change", sync); sync();
+    const syncDrv = () => {
+      const d = drvs.find(x => x.name === $("#f-driver").value) || drvs[0], caps = d.caps || [], cli = caps.includes("cli");
+      $("#f-drv-notes").textContent = d.notes || ""; $("#f-drv-caps").textContent = capsTxt(caps);
+      $("#f-sw-hint").textContent = (cli ? "Dieser Treiber ändert sonst per SSH: SNMP schreibt nur, wenn SSH nicht geht, und für PoE (PoE geht immer per SNMP)."
+        : "Ohne SSH-CLI gehen alle Änderungen an diesem Switch per SNMP; ohne SNMP-Schreiben kann SwitchView hier nur lesen.")
+        + (caps.includes("snmp_autosave") ? "" : " SNMP-Änderungen speichert dieser Switch nicht selbst: danach am Switch speichern.");
+      $("#f-ssh-hint").hidden = cli; $("#f-ssh-hint").textContent = cli ? "" : `Treiber ${d.name} hat keine SSH-CLI: SwitchView braucht hier keinen SSH-Zugang.`;
+    };
+    $("#f-driver").addEventListener("change", syncDrv); syncDrv();
+    const syncRw = () => { $("#f-rw").hidden = !$("#f-sw").checked && !rwStored; };
+    $("#f-sw").addEventListener("change", syncRw); syncRw();
+    // „Löschen“ je gespeichertem Geheimnis: markiert es, beim Speichern geht "" hinaus; noch einmal klicken nimmt es zurück
+    $("#m-body").onclick = e => {
+      const b = e.target.closest("[data-clr]"); if (!b) return;
+      const inp = $("#" + b.dataset.clr), on = b.getAttribute("aria-pressed") !== "true";
+      b.setAttribute("aria-pressed", String(on)); b.textContent = on ? "Nicht löschen" : "Löschen";
+      inp.value = ""; inp.disabled = on; inp.placeholder = on ? "wird beim Speichern gelöscht" : KEEP; inp.closest(".sec").classList.toggle("clr", on);
+    };
   }
 
   /* ── Geräte-Datenbank ── */
