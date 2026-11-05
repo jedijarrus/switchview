@@ -558,7 +558,13 @@ async def cached_cfg(sid: int) -> tuple[dict | None, str | None]:
 
 async def fresh_cfg(sid: int, max_age_s: int = CFG_MAX_AGE_S) -> dict:
     """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und nicht verworfen (R27, invalidate_cfg), sonst
-    per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen."""
+    per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen. RuntimeError ohne Read und ohne Cache fuer
+    einen Switch, dessen Treiber keine SSH-CLI hat (R39): ein Eintrag in switch_cfg waere dort eine Fehldeutung oder von vor einem
+    Treiberwechsel. Die Aufrufer fragen das schon vorher; diese Sperre gilt unabhaengig davon."""
+    row = await _switch_row(sid)
+    reason = sshcli.cli_refusal(row) if row is not None else "Switch nicht gefunden"
+    if reason:
+        raise RuntimeError(reason)
     cfg, at = (None, None) if sid in _cfg_stale else await cached_cfg(sid)
     if cfg and at and (datetime.now(timezone.utc) - datetime.strptime(at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds() < max_age_s:
         return cfg
@@ -605,7 +611,8 @@ async def run_change(cid: int):
     """Hintergrund-Task. Status: queued -> running -> ok | unclear | failed | aborted.
 
     Auf dem Schreibweg der Vorschau (changes.mechanism; NULL heisst ssh, eine Zeile von vor der Spalte): "snmp" faehrt _run_snmp, ein
-    unbekannter bricht ab, ohne den Switch anzufassen (nie still per SSH). Der Rest hier ist der SSH-Weg."""
+    unbekannter bricht ab, ohne den Switch anzufassen (nie still per SSH). Der Rest hier ist der SSH-Weg; ab dem Lock gilt die Switch-Zeile
+    von dann, und ohne SSH-CLI in ihrem Treiber endet er failed, ohne Sitzung (R39)."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
             ch = await cur.fetchone()
@@ -630,6 +637,14 @@ async def run_change(cid: int):
             await _step(cid, steps, "Warte auf laufende Aktion an diesem Switch")
         async with lock:
             await _upd(cid, status="running")
+            # R39, das Gegenstueck zu R33 auf dem SNMP-Weg: die Switch-Zeile von jetzt, nach dem Warten auf den Lock. Hat ihr Treiber
+            # (inzwischen) keine SSH-CLI, geht keine Sitzung auf und nichts hinaus.
+            row = await _switch_row(sid)
+            reason = sshcli.cli_refusal(row) if row is not None else "Switch nicht gefunden"
+            if reason:
+                status, error = "failed", f"{reason}: nichts gesendet"
+                await _step(cid, steps, error, "error")
+                return
             await _step(cid, steps, f"Verbinde mit {row['host']}")
             conn = await asyncio.to_thread(sshcli.connect, row)
             try:

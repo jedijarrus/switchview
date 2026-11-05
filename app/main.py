@@ -409,6 +409,14 @@ async def _row(sid: int):
     return row
 
 
+def _cli_way(row, cap: str, what: str):
+    """409, wenn der Treiber des Switches row die Faehigkeit cap (cli, backup) nicht hat: what gibt es nur ueber die SSH-CLI (R39).
+    Darunter sperrt sshcli ohnehin jede Sitzung; hier bekommt die Anfrage ihren Grund, bevor etwas versucht wird."""
+    driver = drivers.driver_for(row)
+    if not drivers.can(driver, cap):
+        raise HTTPException(409, f"{what} geht nur über die SSH-CLI (ProCurve), Treiber {driver.name} kann das nicht")
+
+
 @app.post("/api/switches/{sid}/test")
 async def test_switch(sid: int, user=Depends(auth.current_user)):
     row = await _row(sid)
@@ -437,7 +445,7 @@ async def poll_everything(user=Depends(auth.current_user)):
 # ── Sicherungen ───────────────────────────────────────────────────────────────
 @app.post("/api/switches/{sid}/backup")
 async def backup_now(sid: int, user=Depends(auth.current_user)):
-    await _row(sid)
+    _cli_way(await _row(sid), "backup", "Konfiguration sichern")
     res = await sshcli.backup_config(sid, "manual")
     await audit(user["username"], "backup", str(sid), json.dumps(res))
     return res
@@ -986,7 +994,7 @@ async def get_change(cid: int, user=Depends(auth.current_user)):
 
 @app.post("/api/switches/{sid}/config/refresh")
 async def refresh_config(sid: int, user=Depends(auth.current_user)):
-    await _row(sid)
+    _cli_way(await _row(sid), "cli", "Konfiguration lesen")
     res = await sshcli.backup_config(sid, "lesen")
     if not res.get("ok"):
         raise HTTPException(502, res.get("error") or "Lesen fehlgeschlagen")
@@ -996,6 +1004,7 @@ async def refresh_config(sid: int, user=Depends(auth.current_user)):
 @app.post("/api/switches/{sid}/port-access")
 async def port_access(sid: int, user=Depends(auth.current_user)):
     row = await _row(sid)
+    _cli_way(row, "cli", "Anmeldungen anzeigen")
     if not row["ssh_user"] or not row["ssh_pass"]:
         raise HTTPException(422, "Kein SSH-Zugang hinterlegt")
     cmds = ["show port-access authenticator", "show port-access authenticator clients", "show port-access mac-based clients"]
@@ -1164,6 +1173,10 @@ async def build_map() -> dict:
             mrows = await cur.fetchall()
         async with conn.execute("SELECT switch_id, taken_at, parsed FROM switch_cfg") as cur:
             cfgs = {r["switch_id"]: (r["taken_at"], json.loads(r["parsed"])) for r in await cur.fetchall()}
+    # R39: ein Read der running-config zaehlt nur fuer einen Treiber mit SSH-CLI. Bei jedem anderen waere er eine Fehldeutung durch den
+    # ProCurve-Parser (jeder Port "Protected") oder von vor einem Treiberwechsel: der Switch gilt als nicht gelesen.
+    with_cli = {s["id"] for s in sws if drivers.can(drivers.driver_for(s), "cli")}
+    cfgs = {sid: v for sid, v in cfgs.items() if sid in with_cli}
 
     vlans: dict[str, str] = {}
     vl_by: dict[int, list[str]] = defaultdict(list)

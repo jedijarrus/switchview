@@ -2,6 +2,9 @@
 
 Lesen (Test, Sicherung) und die Verbindung fuer Aenderungen (changes.py).
 Pro Switch laeuft immer nur eine SSH-Aktion (lock), der Switch erlaubt max. 5 Sessions.
+Nur fuer einen Treiber mit SSH-CLI (drivers, Faehigkeit cli): netmiko spricht den Switch als hp_procurve mit ProCurve-Befehlen an, und
+die Antwort verstehen nur der ProCurve-Parser und das Maskieren in cfgparse. Fuer jeden anderen Treiber geht keine Sitzung auf (R39),
+auch mit gespeichertem SSH-Zugang (er bleibt gespeichert, wird aber nie benutzt): _device ist die eine Stelle davor.
 """
 import asyncio
 import hashlib
@@ -13,6 +16,7 @@ from datetime import datetime, timezone
 from netmiko import ConnectHandler
 
 import cfgparse
+import drivers
 from crypto import decrypt
 from db import db
 
@@ -33,7 +37,27 @@ def clean(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.splitlines()).strip() + "\n"
 
 
+class NoCliError(RuntimeError):
+    """Fuer diesen Switch geht keine SSH-Sitzung auf: sein Treiber hat keine SSH-CLI (cli_refusal)."""
+
+
+# Was der Verbindungstest fuer SSH meldet, wenn der Treiber keine CLI hat: kein Fehler, dieser Switch braucht kein SSH
+SSH_UNUSED = "nicht verwendet (Treiber ohne CLI)"
+
+
+def cli_refusal(row) -> str | None:
+    """Warum fuer den Switch row (switches-Zeile) keine SSH-Sitzung aufgeht, sonst None: sein Treiber (drivers.driver_for) hat keine
+    SSH-CLI."""
+    driver = drivers.driver_for(row)
+    return None if drivers.can(driver, "cli") else f"Treiber {driver.name} hat keine SSH-CLI"
+
+
 def _device(row) -> dict:
+    """Die netmiko-Parameter fuer den Switch row. Alles, was ConnectHandler erreicht (connect, _run_show), geht hier durch: ohne CLI im
+    Treiber NoCliError statt einer Sitzung."""
+    reason = cli_refusal(row)
+    if reason:
+        raise NoCliError(reason)
     return {
         "device_type": "hp_procurve",
         "host": row["host"],
@@ -67,6 +91,8 @@ def _run_show(row, commands: list[str]) -> dict[str, str]:
 
 
 async def test_ssh(row) -> dict:
+    if cli_refusal(row):    # kein Fehlschlag: SSH ist fuer diesen Switch kein Weg (gleich, ob ein Zugang gespeichert ist)
+        return {"ok": None, "unused": True, "detail": SSH_UNUSED}
     if not row["ssh_user"] or not row["ssh_pass"]:
         return {"ok": False, "error": "Kein SSH-Zugang hinterlegt"}
     try:
@@ -99,6 +125,9 @@ async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
             row = await cur.fetchone()
     if not row:
         return {"ok": False, "error": "Switch nicht gefunden"}
+    reason = cli_refusal(row)    # vor allem anderen: keine Sitzung, keine Sicherung, kein switch_cfg aus einer Fehldeutung
+    if reason:
+        return {"ok": False, "error": reason}
     if not row["ssh_user"] or not row["ssh_pass"]:
         return {"ok": False, "error": "Kein SSH-Zugang hinterlegt"}
     try:
@@ -122,8 +151,10 @@ async def run_shows(row, commands: list[str]) -> dict[str, str]:
 
 
 async def backup_all():
+    """Die naechtliche Sicherung: jeder aktive Switch mit SSH-Zugang, dessen Treiber sichern kann (Faehigkeit backup). Die anderen
+    uebergeht sie still, ohne Sitzung und ohne Meldung, auch mit gespeichertem SSH-Zugang (R39)."""
     async with db() as conn:
-        async with conn.execute("SELECT id FROM switches WHERE enabled = 1 AND ssh_user IS NOT NULL AND ssh_pass IS NOT NULL") as cur:
-            ids = [r["id"] for r in await cur.fetchall()]
+        async with conn.execute("SELECT id, driver FROM switches WHERE enabled = 1 AND ssh_user IS NOT NULL AND ssh_pass IS NOT NULL") as cur:
+            ids = [r["id"] for r in await cur.fetchall() if drivers.can(drivers.driver_for(r), "backup")]
     for i in ids:
         await backup_config(i, "nightly")

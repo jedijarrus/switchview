@@ -340,7 +340,13 @@
       if (b.dataset.a === "poll") { const r = await api("POST", `/api/switches/${s.id}/poll`); toast(r.ok ? `${r.ports} Ports, ${r.macs} MACs gelesen` : r.error); await loadMap(true); renderSwitchDetail(); }
       if (b.dataset.a === "backup") { const r = await api("POST", `/api/switches/${s.id}/backup`); toast(r.ok ? (r.changed ? "Konfiguration gesichert" : "Unverändert seit letzter Sicherung") : r.error); await loadMap(true); renderSwitchDetail(); }
       if (b.dataset.a === "readcfg") { toast("Lese Konfiguration …"); await api("POST", `/api/switches/${s.id}/config/refresh`); await loadMap(true); renderSwitchDetail(); toast("Konfiguration gelesen"); }
-      if (b.dataset.a === "test") { const r = await api("POST", `/api/switches/${s.id}/test`); const line = (lbl, x) => `<div><span class="st-dot ${x.ok ? "" : "bad"}"></span><b>${lbl}</b> ${x.ok ? "erreichbar" : "fehlgeschlagen"} <span class="muted">${esc(x.detail || x.error || "")}</span></div>`; modal(`Verbindungstest ${s.k}`, `<div class="testres">${line("SNMP", r.snmp)}${line("SSH", r.ssh)}</div>`, [{ label: "Schließen", onClick: closeModal }]); }
+      if (b.dataset.a === "test") {
+        const r = await api("POST", `/api/switches/${s.id}/test`);
+        // unused: ein Weg, den dieser Switch nicht hat (SSH bei einem Treiber ohne CLI), weder erreichbar noch fehlgeschlagen
+        const line = (lbl, x) => x.unused ? `<div><span class="st-dot down"></span><b>${lbl}</b> <span class="muted">${esc(x.detail || "")}</span></div>`
+          : `<div><span class="st-dot ${x.ok ? "" : "bad"}"></span><b>${lbl}</b> ${x.ok ? "erreichbar" : "fehlgeschlagen"} <span class="muted">${esc(x.detail || x.error || "")}</span></div>`;
+        modal(`Verbindungstest ${s.k}`, `<div class="testres">${line("SNMP", r.snmp)}${line("SSH", r.ssh)}</div>`, [{ label: "Schließen", onClick: closeModal }]);
+      }
       if (b.dataset.a === "pa") { const r = await api("POST", `/api/switches/${s.id}/port-access`); modal(`Anmeldungen an ${s.k}`, Object.entries(r).map(([c, o]) => `<p class="eyebrow">${esc(c)}</p><pre class="code">${esc(o || "–")}</pre>`).join(""), [{ label: "Schließen", onClick: closeModal }]); }
     } catch (err) { toast(err.message); } finally { b.disabled = false; }
   }
@@ -657,7 +663,7 @@
             ${secret("f-rwcomm", "Schreib-Community", s.snmp_rw_community_set, "Schreib-Community")}</div></details>
           <p class="note" style="margin:0">Es schreibt der v3-Benutzer, ohne ihn die v2c-Community, ohne beide der Lese-Zugang oben (er braucht dann am Switch Schreibrechte). Die Community „public“ schreibt nie.</p>
         </div></fieldset>
-      <fieldset class="fs"><legend>SSH (Sicherung und Änderungen)</legend><p class="note" id="f-ssh-hint" style="margin:0" hidden></p>
+      <fieldset class="fs" id="f-ssh"><legend>SSH (Sicherung und Änderungen)</legend><p class="note" id="f-ssh-hint" style="margin:0" hidden></p>
         <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set, "SSH-Kennwort")}</div></fieldset>`;
     const buttons = [];
     if (!isNew) buttons.push({ label: "Switch löschen", cls: "danger", onClick: async () => {
@@ -671,9 +677,11 @@
       const pw = id => { const x = $("#" + id); return x.closest(".sec").classList.contains("clr") ? "" : x.value === "" ? null : x.value; };
       // Ein verborgener RW-Block (SNMP-Schreiben aus, nichts RW gespeichert) schickt nichts, auch nicht, was vorher darin getippt wurde
       const rwOn = !$("#f-rw").hidden;
+      // Ebenso der gesperrte SSH-Block (Treiber ohne CLI): der gespeicherte Zugang bleibt, wie er ist (Benutzer unverändert, Kennwort null)
+      const sshOn = !$("#f-ssh").disabled;
       const payload = { name: val("f-name").trim(), host: val("f-host").trim(), zone: val("f-zone").trim(), sort: +val("f-sort") || 0, enabled: $("#f-enabled").checked, snmp_version: val("f-snmpv"),
         snmp_community: pw("f-comm"), snmp_user: val("f-suser").trim() || null, snmp_auth_proto: val("f-aproto") || null, snmp_auth_pass: pw("f-apass"), snmp_priv_proto: val("f-pproto") || null,
-        snmp_priv_pass: pw("f-ppass"), ssh_user: val("f-ssh-user").trim() || null, ssh_pass: pw("f-ssh-pass"),
+        snmp_priv_pass: pw("f-ppass"), ssh_user: sshOn ? val("f-ssh-user").trim() || null : s.ssh_user || null, ssh_pass: sshOn ? pw("f-ssh-pass") : null,
         snmp_rw_community: rwOn ? pw("f-rwcomm") : null, snmp_rw_auth_pass: rwOn ? pw("f-rwapass") : null, snmp_rw_priv_pass: rwOn ? pw("f-rwppass") : null };
       // Treiber, SNMP-Schreiben, RW-Benutzer und seine Protokolle lässt ein PUT ohne sie stehen (main.UPDATE_IF_SENT): beim Anlegen alle,
       // beim Bearbeiten nur, was sich gegenüber dem gespeicherten Stand ändert. Die RW-Protokolle nur zu einem RW-Benutzer (ohne ihn unbenutzt).
@@ -711,7 +719,10 @@
       $("#f-sw-hint").textContent = !caps ? "" : (cli ? "Dieser Treiber ändert sonst per SSH: SNMP schreibt nur, wenn SSH nicht geht, und für PoE (PoE geht immer per SNMP)."
         : "Ohne SSH-CLI gehen alle Änderungen an diesem Switch per SNMP; ohne SNMP-Schreiben kann SwitchView hier nur lesen.")
         + (caps.includes("snmp_autosave") ? "" : " SNMP-Änderungen speichert dieser Switch nicht selbst: danach am Switch speichern.");
-      $("#f-ssh-hint").hidden = !caps || cli; $("#f-ssh-hint").textContent = caps && !cli ? `Treiber ${d.name} hat keine SSH-CLI: SwitchView braucht hier keinen SSH-Zugang.` : "";
+      // Ohne SSH-CLI öffnet SwitchView keine SSH-Sitzung (R39): der Block ist gesperrt, ein gespeicherter Zugang bleibt unbenutzt erhalten
+      $("#f-ssh").disabled = !!caps && !cli;
+      $("#f-ssh-hint").hidden = !caps || cli;
+      $("#f-ssh-hint").textContent = caps && !cli ? `Treiber ${d.name} hat keine SSH-CLI: SwitchView nutzt hier kein SSH${s.ssh_user || s.ssh_pass_set ? ", der gespeicherte Zugang bleibt unbenutzt erhalten" : ""}.` : "";
     };
     $("#f-driver").addEventListener("change", syncDrv); syncDrv();
     const syncRw = () => { $("#f-rw").hidden = !$("#f-sw").checked && !rwStored; };
@@ -813,19 +824,24 @@
     const list = await api("GET", "/api/switches").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!list) return;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Konfigurationssicherungen</h2><span class="sub">nächtlich 02:30, gespeichert nur bei Änderung</span>
-      <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.name === selSwitch ? "selected" : ""}>${esc(s.name)}${s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
-      <button class="btn small" type="button" id="b-now">Jetzt sichern</button></div></div><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
+      <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.name === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
+      <button class="btn small" type="button" id="b-now" aria-describedby="b-why">Jetzt sichern</button></div></div><p class="note gate" id="b-why" hidden></p><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
     if (!list.length) return;
+    const selected = () => list.find(x => String(x.id) === $("#b-sw").value);
+    // Sichern geht nur über die SSH-CLI (Treiber mit backup, ProCurve): sonst ist „Jetzt sichern“ gesperrt, mit dem Grund daneben
+    const gate = () => { const sw = selected(), ok = has(sw, "backup"); $("#b-now").disabled = !ok; $("#b-why").hidden = ok;
+      $("#b-why").textContent = ok ? "" : `Treiber ${sw ? sw.driver : ""} sichert keine Konfiguration: das geht nur über die SSH-CLI (ProCurve).`; };
     const load = async () => {
+      gate();
       const id = $("#b-sw").value, rows = await api("GET", `/api/switches/${id}/backups`);
       const sw = list.find(x => String(x.id) === id);
       $("#b-list").innerHTML = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeitpunkt</th><th>Anlass</th><th>Größe</th><th></th></tr></thead><tbody>` +
         rows.map(r => `<tr><td>${esc(fmtTime(r.taken_at))}</td><td>${r.trigger === "manual" ? "von Hand" : r.trigger === "nightly" ? "nächtlich" : r.trigger === "lesen" ? "gelesen" : esc(r.trigger)}</td><td class="num">${(r.size / 1024).toFixed(1).replace(".", ",")} KB</td>
           <td><div class="actions"><button class="btn small" type="button" data-show="${r.id}">Anzeigen</button><button class="btn small" type="button" data-diff="${r.id}">Änderungen</button></div></td></tr>`).join("") + `</tbody></table></div>`
-        : `<div class="empty">${sw && !sw.ssh_pass_set ? "Für diesen Switch ist noch kein SSH-Zugang hinterlegt (Switches → Zugang bearbeiten)." : "Noch keine Sicherung. „Jetzt sichern\" klicken."}</div>`;
+        : `<div class="empty">${!has(sw, "backup") ? "Keine Sicherungen: dieser Treiber sichert nicht." : sw && !sw.ssh_pass_set ? "Für diesen Switch ist noch kein SSH-Zugang hinterlegt (Switches → Zugang bearbeiten)." : "Noch keine Sicherung. „Jetzt sichern\" klicken."}</div>`;
     };
     $("#b-sw").addEventListener("change", load);
-    $("#b-now").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", `/api/switches/${$("#b-sw").value}/backup`); toast(r.ok ? (r.changed ? "Gesichert" : "Unverändert") : r.error); await load(); } catch (err) { toast(err.message); } e.target.disabled = false; });
+    $("#b-now").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", `/api/switches/${$("#b-sw").value}/backup`); toast(r.ok ? (r.changed ? "Gesichert" : "Unverändert") : r.error); await load(); } catch (err) { toast(err.message); } gate(); });
     $("#b-list").addEventListener("click", async e => {
       const s = e.target.closest("[data-show]"), d = e.target.closest("[data-diff]");
       if (s) { const t = await api("GET", `/api/backups/${s.dataset.show}`); modal("Konfiguration", `<pre class="code">${esc(t)}</pre>`, [{ label: "Schließen", onClick: closeModal }]); }
