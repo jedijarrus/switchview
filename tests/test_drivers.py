@@ -103,6 +103,16 @@ def test_driver_shape():
         fresh.name = "y"
 
 
+def test_notes_are_user_text():
+    """L30: the notes are shown in the switch form, so they are German user text: no internal ruling id such as "(R30)" or "R35", and
+    real umlauts. A transliteration (ae / oe / ue standing in for ä / ö / ü: "loest", "bestaetigt", "fuer") does not occur in any
+    word of them."""
+    for name, driver in DRIVERS.items():
+        assert not re.search(r"\bR\d+\b", driver.notes), (name, driver.notes)
+        assert not re.findall(r"\w*(?:ae|oe|ue)\w*", driver.notes), (name, driver.notes)
+    assert "löst" in DRIVERS["procurve"].notes and "bestätigt" in DRIVERS["arista"].notes
+
+
 def test_procurve_caps():
     procurve = DRIVERS["procurve"]
     assert can(procurve, "cli") and can(procurve, "nac") and can(procurve, "snmp_vlan")

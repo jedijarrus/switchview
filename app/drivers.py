@@ -89,18 +89,19 @@ _CLI_CAPS = frozenset({"cli", "nac", "backup"})
 # bestaetigt, sie bekommen die Faehigkeit nicht.
 _AUTOSAVE = frozenset({"snmp_autosave"})
 
+# Die notes sind Text fuer das Switch-Formular: deutsch mit echten Umlauten, ohne interne Verweise (Rnn).
 _UNGEPRUEFT = (
-    "Standard-Profil (Q-BRIDGE, IF-MIB, POWER-ETHERNET-MIB); SET-Unterstuetzung und herstellerspezifische Abweichungen "
-    "(Index-Offsets) sind noch nicht gegen ein Geraet bestaetigt. Kein PoE (R35): welcher PoE-Eintrag zu welchem Port gehoert, ist "
-    "fuer diesen Hersteller nicht belegt."
+    "Standard-Profil (Q-BRIDGE, IF-MIB, POWER-ETHERNET-MIB); SET-Unterstützung und herstellerspezifische Abweichungen "
+    "(Index-Offsets) sind noch nicht gegen ein Gerät bestätigt. Kein PoE: welcher PoE-Eintrag zu welchem Port gehört, ist "
+    "für diesen Hersteller nicht belegt."
 )
 
 # Jede Zeile bekommt ihr eigenes oids-dict (dict(...)), damit sich Treiber nie ein veraenderbares Profil teilen.
 DRIVERS: dict[str, Driver] = {d.name: d for d in (
     Driver(
         "procurve", _SNMP_CAPS | _POE | _CLI_CAPS | _AUTOSAVE, "qbridge", {**_STANDARD_OIDS, "poe_power": _HP_POE_POWER},
-        "HPE ProCurve / AOS-S. Standardweg ist die SSH-CLI (gestuft, Backup, NAC), SNMP nur als Fallback; PoE immer per SNMP (R30). Die "
-        "PVID darf nicht in der Tagged-Liste stehen; ein SNMP-Set loest implizit write-mem aus (kein Staging). PoE-Index = ifIndex, "
+        "HPE ProCurve / AOS-S. Standardweg ist die SSH-CLI (gestuft, Backup, NAC), SNMP nur als Fallback; PoE immer per SNMP. Die "
+        "PVID darf nicht in der Tagged-Liste stehen; ein SNMP-Set löst implizit write-mem aus (kein Staging). PoE-Index = ifIndex, "
         "Gruppe 1: ein weiteres Stack-Mitglied (Gruppe 2 ...) hat kein PoE.",
         poe_index="ifindex",
     ),
@@ -108,14 +109,14 @@ DRIVERS: dict[str, Driver] = {d.name: d for d in (
     Driver(
         "cisco", _SNMP_CAPS | _POE, "cisco_vmps",
         {**_STANDARD_OIDS, "vmvlan": _VMVLAN, "poe_power": _CISCO_POE_POWER, "poe_entphy": _CISCO_POE_ENTPHY, "ent_alias": _ENT_ALIAS},
-        "Cisco IOS (klassisch). Access-VLAN ueber vmVlan statt ueber Q-BRIDGE-Untagged; Trunk-Mitglieder weiter ueber dot1q. PoE-Port "
-        "ueber cpeExtPsePortEntPhyIndex und ENTITY-MIB (entAliasMappingIdentifier).",
+        "Cisco IOS (klassisch). Access-VLAN über vmVlan statt über Q-BRIDGE-Untagged; Trunk-Mitglieder weiter über dot1q. PoE-Port "
+        "über cpeExtPsePortEntPhyIndex und ENTITY-MIB (entAliasMappingIdentifier).",
         poe_index="cisco_entity",
     ),
     Driver(
         "cisco_sb", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
-        "Cisco Small Business (SG/CBS), kein klassisches IOS. Angenommen: Q-BRIDGE statt vmVlan; nicht gegen ein Geraet bestaetigt. "
-        "Kein PoE (R35): seine PoE-MIB (CISCOSB-POE-MIB) und die Zuordnung zum Port sind nicht belegt.",
+        "Cisco Small Business (SG/CBS), kein klassisches IOS. Angenommen: Q-BRIDGE statt vmVlan; nicht gegen ein Gerät bestätigt. "
+        "Kein PoE: seine PoE-MIB (CISCOSB-POE-MIB) und die Zuordnung zum Port sind nicht belegt.",
     ),
     Driver("comware", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "HPE/H3C Comware. " + _UNGEPRUEFT),
     Driver("juniper", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS), "Juniper Junos (EX/QFX). " + _UNGEPRUEFT),
@@ -125,13 +126,13 @@ DRIVERS: dict[str, Driver] = {d.name: d for d in (
     # R31: dass RouterOS PoE ueber POWER-ETHERNET-MIB zeigt, ist nicht belegt; ohne snmp_poe weder PoE-Walk noch PoE-SET
     Driver(
         "mikrotik", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
-        "MikroTik RouterOS. Standard-Profil (Q-BRIDGE, IF-MIB); SET-Unterstuetzung und herstellerspezifische Abweichungen sind noch nicht "
-        "gegen ein Geraet bestaetigt. Kein PoE: dass RouterOS es ueber POWER-ETHERNET-MIB zeigt, ist nicht belegt (R31).",
+        "MikroTik RouterOS. Standard-Profil (Q-BRIDGE, IF-MIB); SET-Unterstützung und herstellerspezifische Abweichungen sind noch nicht "
+        "gegen ein Gerät bestätigt. Kein PoE: dass RouterOS es über POWER-ETHERNET-MIB zeigt, ist nicht belegt.",
     ),
     Driver(
         "generic", _SNMP_CAPS, "qbridge", dict(_STANDARD_OIDS),
-        "Reine Standard-MIBs (Q-BRIDGE, IF-MIB) ohne Herstellerannahmen; Fallback fuer unbekannte Treibernamen. Kein PoE (R35): "
-        "POWER-ETHERNET-MIB sagt nicht, welcher PoE-Eintrag zu welchem Port gehoert.",
+        "Reine Standard-MIBs (Q-BRIDGE, IF-MIB) ohne Herstellerannahmen; Fallback für unbekannte Treibernamen. Kein PoE: "
+        "POWER-ETHERNET-MIB sagt nicht, welcher PoE-Eintrag zu welchem Port gehört.",
     ),
 )}
 
