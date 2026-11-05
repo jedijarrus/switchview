@@ -1147,6 +1147,8 @@ async def build_map() -> dict:
         devs[(m["switch_id"], m["port"])].append([m["mac"], m["vlan"], m["ip"] or "", m["dname"] or m["name"] or "",
                                                   m["vendor"] or names_mod.vendor_of(m["mac"]), known])
     ports_by: dict[int, list] = defaultdict(list)
+    # PoE nur, wo der Treiber des Switches es jetzt kann: PoE-Spalten eines Polls von vor einem Treiberwechsel zeigen nichts mehr
+    poe_ok = {s["id"]: drivers.can(drivers.driver_for(s), "snmp_poe") for s in sws}
     for p in prows:
         key = (p["switch_id"], p["trunk"] or p["name"])
         d = sorted(devs.get(key, []), key=lambda x: -x[5])
@@ -1159,7 +1161,7 @@ async def build_map() -> dict:
             "pv": p["pvid"] or "", "u": json.loads(p["untagged"] or "[]"), "t": json.loads(p["tagged"] or "[]"),
             "tr": p["trunk"] or "", "mb": json.loads(p["members"] or "[]"), "l": json.loads(p["lldp"] or "[]"),
             "mc": p["mac_count"], "d": d[:12]}
-        if p["poe_admin"] is not None or p["poe_status"] is not None:
+        if poe_ok.get(p["switch_id"]) and (p["poe_admin"] is not None or p["poe_status"] is not None):
             # nur ein Port mit sicher zugeordnetem PoE-Eintrag (poller.poe_ports): an / aus, Erkennungsstatus (RFC 3621), Leistung in mW
             port["poe"] = {"on": None if p["poe_admin"] is None else p["poe_admin"] == 1, "status": p["poe_status"], "mw": p["poe_power"]}
         ports_by[p["switch_id"]].append(port)

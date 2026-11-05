@@ -71,15 +71,17 @@ def _vids(vids) -> str:
     return ", ".join(sorted(vids, key=lambda v: (len(v), v)))
 
 
-def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None = None, text_hex: bool = False) -> tuple[dict, dict]:
+def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None = None, text_hex: bool = False,
+              driver: drivers.Driver | None = None) -> tuple[dict, dict]:
     """(cfg, raw) aus den Walk-Zeilen W: Schluessel wie in WALKS -> [(oid, wert), ...], so wie poller.poll_switch sie sammelt, dazu
     "ifType", wenn driver_name die Ports danach waehlt (poller.by_iftype; fehlt er dann, ist das ein KeyError des Aufrufers), bei
     vlan_strategy cisco_vmps "vmVlan" (dann ist vmvlan_base die OID, unter der diese Zeilen gewalkt wurden; wie bei jedem anderen
-    Walk zaehlen nur Zeilen darunter) und die PoE-Walks des Treibers (poller.poe_walks; ein fehlender ist leer). Der Treiber ist der
-    namens driver_name (drivers.driver_for). Weitere Schluessel stoeren nicht. Rein, ohne I/O. Welche Interfaces Ports und Trunks
-    sind, entscheidet poller.select_ports fuer driver_name, genau wie in der Anzeige, welcher PoE-Eintrag zu welchem Port gehoert
-    poller.poe_ports, ebenso. text_hex (nur read_cfg): die Spalten aus TEXT_AS_HEX kommen als Hex und werden zu Text (UTF-8, sonst
-    latin-1); ohne text_hex (Zeilen im Format des Pollers) bleiben sie, wie sie sind.
+    Walk zaehlen nur Zeilen darunter) und die PoE-Walks des Treibers (poller.poe_walks; ein fehlender ist leer). Der Treiber ist
+    driver (read_cfg gibt den seinen mit, er muss driver_name heissen), ohne ihn der namens driver_name (drivers.driver_for). Weitere
+    Schluessel stoeren nicht. Rein, ohne I/O. Welche Interfaces Ports und Trunks sind, entscheidet poller.select_ports fuer
+    driver_name, genau wie in der Anzeige, welcher PoE-Eintrag zu welchem Port gehoert poller.poe_ports, ebenso. text_hex (nur
+    read_cfg): die Spalten aus TEXT_AS_HEX kommen als Hex und werden zu Text (UTF-8, sonst latin-1); ohne text_hex (Zeilen im Format
+    des Pollers) bleiben sie, wie sie sind.
 
     cfg hat genau die Schluessel von cfgparse.parse_config. Vom Switch gelesen sind vlans ({vid: Name}, nach Nummer), trunks
     ({Trunk: [Mitglieder]}; Trunk ist der ifName, TrkN bei ProCurve, sonst der des LAG, etwa Po1, ae0, auch ein LAG ohne Mitglieder)
@@ -121,7 +123,10 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
     rows = {k: W[k] for k in ((*WALKS, "ifType") if poller.by_iftype(driver_name) else WALKS)}
     if "vmVlan" in W and not vmvlan_base:
         raise TypeError("build_cfg: vmVlan-Zeilen ohne vmvlan_base (die OID, unter der sie gewalkt wurden)")
-    driver = drivers.driver_for({"driver": driver_name})
+    if driver is None:
+        driver = drivers.driver_for({"driver": driver_name})
+    elif driver.name != driver_name:
+        raise TypeError(f"build_cfg: Treiber {driver.name!r} zu driver_name {driver_name!r}")
     poe = {k: poller._tbl(W.get(k, []), base) for k, base in poller.poe_walks(driver).items()}
     try:
         return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {}, driver_name, text_hex, driver, poe)
@@ -132,7 +137,7 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
 def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool, driver: drivers.Driver,
            poe_tables: dict[str, dict[str, str]]) -> tuple[dict, dict]:
     """Der Kern von build_cfg: rows = die Walks aus WALKS (plus ifType, wenn driver_name nach ihm waehlt), vmvlan = {ifIndex: vmVlan}
-    (leer ohne vmVlan-Walk), text_hex wie bei build_cfg, driver der Treiber namens driver_name, poe_tables seine PoE-Tabellen
+    (leer ohne vmVlan-Walk), text_hex wie bei build_cfg, driver der Treiber von build_cfg, poe_tables seine PoE-Tabellen
     (_tbl-Tabellen der Walks aus poller.poe_walks)."""
     tbl = {k: poller._tbl(v, poller.O[k]) for k, v in rows.items()}
     if text_hex:
@@ -161,8 +166,7 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     egress = {k: snmp.bitmap_ports(v) for k, v in eg_hex.items()}
     untag = {k: snmp.bitmap_ports(v) for k, v in un_hex.items()}
     port_ifis, member_of, members = poller.select_ports(ifname, tbl.get("ifType", {}), tbl["ifStack"], driver_name)
-    trunks = poller.trunk_ports(ifname, port_ifis, members, driver_name)
-    poe, unmapped = poller.poe_ports(driver, poe_tables, [ifi for ifi in port_ifis if ifi not in trunks], strict=True)
+    poe, unmapped = poller.poe_ports(driver, poe_tables, ifname, port_ifis, members, strict=True)
 
     raw: dict = {"egress": {k: snmp.hex_to_bytes(v) for k, v in eg_hex.items()},
                  "untagged": {k: snmp.hex_to_bytes(v) for k, v in un_hex.items()},
@@ -235,8 +239,8 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
     (changes.touches_poe, R34): eine PoE-MIB, die scheitert oder gesperrt ist, haelt so keine VLAN-, Namens- oder An/Aus-Aenderung auf.
     Ohne with_poe hat jeder Port poe None und raw["poe"] ist leer; beide Reads einer Aenderung (vorher, Zuruecklesen) brauchen
     denselben Wert. Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex, damit Umlaute lesbar sind; build_cfg bekommt
-    driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den Change-Lock: den haelt
-    der Aufrufer (asyncio.Lock ist nicht reentrant).
+    driver.name, driver selbst und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den
+    Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
@@ -256,7 +260,7 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
     for r in results:
         if isinstance(r, BaseException):
             raise r
-    cfg, raw = build_cfg(dict(zip(walks, results)), driver.name, vmvlan_base=vm_base, text_hex=True)
+    cfg, raw = build_cfg(dict(zip(walks, results)), driver.name, vmvlan_base=vm_base, text_hex=True, driver=driver)
     cfg["hostname"] = hostname
     return cfg, raw
 
@@ -356,7 +360,10 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
     if p in member_of:  # ein Mitglied hat keinen eigenen Bridge-Port, seine VLANs sind die des Trunks
         return f"gehört zu {member_of[p]}, bitte {member_of[p]} wählen"
     if p not in raw["port2bp"] or p not in raw["ifindex"]:
-        # etwa ein Management-Port ausserhalb der Bridge: nur Anzeige, auch kein Abschalten (es koennte SwitchViews eigener Zugang sein)
+        # etwa ein Management-Port ausserhalb der Bridge: nur Anzeige, auch kein Abschalten (es koennte SwitchViews eigener Zugang sein).
+        # Diese Regel sperrt auch PoE an einem Port, dem poller.poe_ports einen Eintrag zuordnet, der aber kein Bridge-Port ist (etwa ein
+        # SVI, den ein falsch gewaehlter Treiber als Port fuehrt). In der Zuordnung selbst einen Bridge-Port zu verlangen ginge nicht: ein
+        # ProCurve-Trunk-Mitglied hat keinen eigenen, ohne es als physischen Port verloere der ganze Switch sein PoE.
         return "kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige"
     bp = raw["port2bp"][p]
     if raw["bp2port"].get(bp) != p:

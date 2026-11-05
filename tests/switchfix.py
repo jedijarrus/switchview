@@ -224,7 +224,8 @@ def random_procurve_switch(rng: random.Random) -> tuple[dict, dict]:
     then a port is untagged in two VLANs (hybrid) or has a PVID other than its untagged VLAN.
 
     The truth comes from the sets the generator drew, not through bitmap_ports or a copy of the port loop: per port u / t / name /
-    en and the unmanaged reason, and the raw maps (effective bridge port, owner per bridge port, PVID, ...), trunks and VLANs."""
+    en and the unmanaged reason, and the raw maps (effective bridge port, owner per bridge port, PVID, ...), trunks and VLANs, and the
+    ifIndexes of the physical ports (every port but the TrkN, trunk members included)."""
     phys = [str(i) for i in rng.sample(range(1, 300), rng.randint(1, 10))]
     names = {ifi: rng.choice(("", "A", "B")) + str(k + 1) for k, ifi in enumerate(phys)}
     free, trunks = list(phys), {}                            # trunk ifIndex -> member ifIndexes
@@ -322,6 +323,7 @@ def random_procurve_switch(rng: random.Random) -> tuple[dict, dict]:
         },
         "trunks": {names[t]: [names[m] for m in sorted(mem, key=int)] for t, mem in trunks.items() if mem},
         "vlans": {v: vnames[v] for v in sorted(vids, key=int)},
+        "physical": sorted(phys, key=int),
     }
     return W, truth
 
@@ -449,8 +451,8 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
     bits, which must not count.
 
     The truth comes from what the generator drew, not from select_ports: the ports in ifIndex order, every LAG that is a trunk with
-    its members (an empty 161 LAG too), and per port the effective bridge port (a member uses its LAG's) with u / t from the drawn
-    VLAN sets."""
+    its members (an empty 161 LAG too), per port the effective bridge port (a member uses its LAG's) with u / t from the drawn VLAN
+    sets, and the ifIndexes of the physical ports (type 6 / 117, LAG members included)."""
     taken: set[int] = set()
 
     def fresh(low: int, high: int) -> str:
@@ -559,6 +561,7 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
         "port2bp": port2bp,
         "ifindex": {kept[i]: int(i) for i in order},
         "state": state,
+        "physical": sorted(phys, key=int),
     }
     return W, truth
 

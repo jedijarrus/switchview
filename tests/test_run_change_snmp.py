@@ -1116,7 +1116,8 @@ CISCO = drivers.DRIVERS["cisco"]
 ])
 def test_verify_snmp(drv, pre, desired, ports, extra, bad):
     cfg_after, raw_after = readback(ports, **extra)
-    assert changes.verify_snmp(drv, readback(pre)[0], cfg_after, raw_after, desired) == bad
+    cfg, raw = readback(pre)
+    assert changes.verify_snmp(drv, cfg, cfg_after, raw_after, desired, raw=raw) == bad
 
 
 # ── The host guard in snmp.py ─────────────────────────────────────────────────────────────────────────────────────────────────────

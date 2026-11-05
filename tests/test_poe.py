@@ -107,6 +107,12 @@ def tables(**cols) -> dict:
     return {k: dict(v) for k, v in cols.items()}
 
 
+def physical(*ifis: str) -> tuple[dict, list, dict]:
+    """(ifname, ports, members) as poller.select_ports gives them for a switch whose ports are these ifIndexes, all physical (named
+    "p<ifIndex>", no trunk), whatever the driver."""
+    return {i: f"p{i}" for i in ifis}, list(ifis), {}
+
+
 def display(W: dict, driver: str = "procurve") -> list[tuple]:
     """What the display poller stores per port, PoE columns only: (name, poe_admin, poe_status, poe_power)."""
     full = {k: W.get(k, []) for k in poller.O} | {k: W[k] for k in W if k not in poller.O}
@@ -131,7 +137,7 @@ def test_default_mapping_group_1_index_is_the_ifindex():
     """ProCurve, modular naming (W_ODD: A1 = ifIndex 1, A99 = ifIndex 999): entry 1.<n> belongs to the port with ifIndex n, whatever its
     name, and the result is keyed by ifIndex; admin / status / power come from the entry's own rows."""
     got, unmapped = poller.poe_ports(PROCURVE, tables(poeAdmin={"1.1": "1", "1.999": "2"}, poeStatus={"1.1": "3", "1.999": "1"},
-                                                      poePower={"1.1": "4100", "1.999": "0"}), ["1", "2", "3", "4", "999"])
+                                                      poePower={"1.1": "4100", "1.999": "0"}), *physical("1", "2", "3", "4", "999"))
     assert got == {"1": {"group": 1, "index": 1, "admin": 1, "status": 3, "power": 4100},
                    "999": {"group": 1, "index": 999, "admin": 2, "status": 1, "power": 0}}
     assert unmapped == []
@@ -179,7 +185,7 @@ def test_catalyst_numbering_is_unmappable_by_the_default():
     1.1 even is an ifIndex, of Vl1. The default mapping (ProCurve's "ifindex") maps none of them, never Vl1 or a wrong port; a generic
     driver does not even read them (R35)."""
     cols = {k: poller._tbl(rows, WALK_BASES[k]) for k, rows in W_CATALYST_POE.items() if k in POE_WALKS}
-    assert poller.poe_ports(PROCURVE, cols, ["10101", "10102", "10103", "10104"], strict=True) == ({}, ["1.1", "1.2", "1.3", "1.4"])
+    assert poller.poe_ports(PROCURVE, cols, *physical("10101", "10102", "10103", "10104"), strict=True) == ({}, ["1.1", "1.2", "1.3", "1.4"])
     cfg, raw = read(W_CATALYST_POE, "generic")
     assert (raw["poe"], raw["poe_unmapped"]) == ({}, []) and set(poe_of(cfg).values()) == {None}
     assert {p[1:] for p in display(W_CATALYST_POE, "generic")} == {(None, None, None)}
@@ -210,6 +216,9 @@ def test_catalyst_cisco_entity_mapping():
     pytest.param({"entAlias": {"1014.0": f".{IF_INDEX}.10101"}}, ["Gi1/0/3", "Gi1/0/4"], id="two-entries-one-port"),
     pytest.param({"entAlias": {"1014.3": f".{IF_INDEX}.10102"}}, ["Gi1/0/1", "Gi1/0/2", "Gi1/0/3", "Gi1/0/4"], id="same-ifindex-twice"),
     pytest.param({"entAlias": {"1014.0": f"{IF_INDEX}.10102"}}, ["Gi1/0/1", "Gi1/0/2", "Gi1/0/3", "Gi1/0/4"], id="without-leading-dot"),
+    # a row that points at no ifTable row is ignored: next to the entity's ifIndex row that one decides (as in RFC 6933's example)
+    pytest.param({"entAlias": {"1014.3": ".1.3.6.1.2.1.16.1.1.1.1.5"}}, ["Gi1/0/1", "Gi1/0/2", "Gi1/0/3", "Gi1/0/4"],
+                 id="a-non-iftable-row-next-to-the-iftable-row"),
 ])
 def test_cisco_entity_mapping_fails_closed(edits, mapped):
     """Each way the entity chain can be incomplete or ambiguous leaves exactly the affected entry without a port (two entries claiming
@@ -249,7 +258,7 @@ def test_the_mapping_ignores_tables_of_another_strategy():
          "poeStatus": walk_rows(POE_STATUS, dict.fromkeys(by_ifindex, "2"))}
     assert read(W, "cisco")[1]["poe"] == {}
     cols = {"poeAdmin": by_ifindex, "poeStatus": dict.fromkeys(by_ifindex, "2")}
-    assert list(poller.poe_ports(PROCURVE, cols, ["10101", "10102", "10103", "10104"])[0]) == ["10101", "10102"]    # the default would
+    assert list(poller.poe_ports(PROCURVE, cols, *physical("10101", "10102", "10103", "10104"))[0]) == ["10101", "10102"]
 
 
 @pytest.mark.parametrize("name", NO_POE_DRIVERS)
@@ -266,7 +275,7 @@ def test_a_driver_without_snmp_poe_has_no_poe(name):
 
 def test_an_unknown_mapping_strategy_maps_nothing():
     odd = Driver("odd", GENERIC.caps, "qbridge", dict(GENERIC.oids), "", poe_index="by-name")
-    got, unmapped = poller.poe_ports(odd, tables(poeAdmin={"1.1": "1"}, poeStatus={"1.1": "2"}), ["1"])
+    got, unmapped = poller.poe_ports(odd, tables(poeAdmin={"1.1": "1"}, poeStatus={"1.1": "2"}), *physical("1"))
     assert (got, unmapped) == ({}, ["1.1"])
 
 
@@ -290,51 +299,65 @@ def _random_poe(rng: random.Random, ifindexes: list[str]) -> tuple[dict, dict]:
     return {k: walk_rows(bases[k], v) for k, v in cols.items()}, cols
 
 
+def _expected_mapping(strategy: str, cols: dict, physical: set[str]) -> dict[str, str]:
+    """The test's own reading of the mapping rules, written independently of poller.poe_ports: PoE entry -> ifIndex of its port."""
+    entries = set(cols["poeAdmin"]) | set(cols["poeStatus"])
+    target = {}
+    if strategy == "ifindex":
+        group1 = {k: k.split(".")[1] for k in entries if k.split(".")[0] == "1"}
+        target = group1 if all(ifi in physical for ifi in group1.values()) else {}
+    elif strategy == "cisco_entity":
+        for k in entries:
+            e = cols.get("poeEntPhy", {}).get(k)
+            ifis = {v.split(".")[-1] for a, v in cols["entAlias"].items() if a.split(".")[0] == e and v.lstrip(".").startswith(IF_INDEX + ".")}
+            if e not in (None, "0") and len(ifis) == 1 and ifis <= physical:
+                target[k] = ifis.pop()
+    taken = [ifi for ifi in target.values()]
+    return {k: ifi for k, ifi in target.items() if taken.count(ifi) == 1}
+
+
 def test_poe_mapping_properties_on_random_switches():
-    """800 random switches (ProCurve, and other vendors read as cisco) with random PoE tables, through both mappings (procurve's
-    "ifindex" and cisco's "cisco_entity": the function does not care for the vendor, only for the tables). Whatever they say:
-      * a mapped entry belongs to a PHYSICAL port (never a trunk, a VLAN interface, nothing), no port has two entries, no entry two ports;
+    """800 random switches (ProCurve, and other vendors read as cisco) with random PoE tables, through both mappings ("ifindex" and
+    "cisco_entity"; the strategy does not care for the vendor, only for the tables, so each switch also runs through the other one under
+    its own port rule, the driver's name). poe_ports gets the port selection as in production (poller.select_ports for that name); the
+    oracle uses the generator's OWN physical ports. Whatever the tables say:
+      * the mapping is exactly the test's own reading of the rules (_expected_mapping), so in particular a mapped entry belongs to a
+        physical port (never a trunk, a VLAN interface, nothing), no port has two entries, no entry two ports, ifindex maps every entry
+        of group 1 or none, cisco_entity never entity 0;
       * mapped and unmapped entries are disjoint and together all entries;
-      * ifindex maps only group 1 with index = the port's ifIndex, and either every entry of group 1 or none;
-      * cisco_entity maps only along cpeExtPsePortEntPhyIndex -> exactly one ifIndex.N of that entity (never entity 0);
       * for the switch's own driver the display (lenient) and the write path (strict, when it does not refuse the read) see the same
         PoE on every port."""
     rng = random.Random(1212)
     seen = {"mapped": 0, "voided": 0, "entity": 0, "refused": 0}
     for case in range(800):
         if rng.random() < 0.5:
-            W, _ = random_procurve_switch(rng)
+            W, truth = random_procurve_switch(rng)
             selection = "procurve"
+            other = Driver("procurve", PROCURVE.caps, "qbridge", dict(PROCURVE.oids), "", poe_index="cisco_entity")
         else:
-            W, _ = random_multivendor_switch(rng)
+            W, truth = random_multivendor_switch(rng)
             selection = "cisco"
+            other = Driver("cisco", CISCO.caps, "cisco_vmps", dict(CISCO.oids), "", poe_index="ifindex")
+        truly_physical = set(truth["physical"])
         ifname = poller._tbl(W["ifName"], WALK_BASES["ifName"])
         ports, _, members = poller.select_ports(ifname, poller._tbl(W.get("ifType", []), IF_TYPE),
                                                 poller._tbl(W["ifStack"], WALK_BASES["ifStack"]), selection)
-        physical = [i for i in ports if i not in poller.trunk_ports(ifname, ports, members, selection)]
         # half the time a clean switch whose PoE indexes are physical ports' ifIndexes, else any interface (or none) of the switch
-        rows, cols = _random_poe(rng, physical if rng.random() < 0.5 else [i for i in ifname if i.isdigit()])
+        rows, cols = _random_poe(rng, truth["physical"] if rng.random() < 0.5 else [i for i in ifname if i.isdigit()])
         W = {**W, **rows}
         entries = set(cols["poeAdmin"])
-        for driver in (PROCURVE, CISCO):
-            found, unmapped = poller.poe_ports(driver, cols, physical)
-            assert set(found) <= set(physical), case
+        for driver in (DRIVERS[selection], other):
+            found, unmapped = poller.poe_ports(driver, cols, ifname, ports, members)
             mapped = {f"{e['group']}.{e['index']}": ifi for ifi, e in found.items()}
-            assert len(mapped) == len(found) and not set(mapped) & set(unmapped) and set(mapped) | set(unmapped) == entries, case
+            assert len(mapped) == len(found) and set(found) <= truly_physical, case
+            assert mapped == _expected_mapping(driver.poe_index, cols, truly_physical), case
+            assert not set(mapped) & set(unmapped) and set(mapped) | set(unmapped) == entries, case
             if driver.poe_index == "ifindex":
-                assert all(k == f"1.{ifi}" for k, ifi in mapped.items()), case
-                group1 = {k for k in entries if k.startswith("1.")}
-                assert set(mapped) in (group1, set()), case
-                seen["voided"] += bool(group1) and not mapped
+                seen["voided"] += any(k.startswith("1.") for k in entries) and not mapped
                 seen["mapped"] += len(mapped)
             else:
-                alias = cols["entAlias"]
-                for k, ifi in mapped.items():
-                    e = cols.get("poeEntPhy", {}).get(k)
-                    assert e not in (None, "0"), case
-                    assert {v.rpartition(".")[2] for a, v in alias.items() if a.partition(".")[0] == e} == {ifi}, case
                 seen["entity"] += len(mapped)
-        found, unmapped = poller.poe_ports(DRIVERS[selection], cols, physical)
+        found, unmapped = poller.poe_ports(DRIVERS[selection], cols, ifname, ports, members)
         display_poe = {p["name"]: p["poe_admin"] for p in poller._build({k: W.get(k, []) for k in poller.O} | rows, selection)["ports"]}
         try:
             cfg, raw = snmpwrite.build_cfg(W, selection)
@@ -350,7 +373,7 @@ def test_display_mapping_is_lenient():
     """The display takes what it can read: an entry with only a status row (the admin walk failed) still shows its status, unreadable
     values show as None, a malformed index is skipped; the write path refuses the same rows (below)."""
     got, unmapped = poller.poe_ports(PROCURVE, tables(poeAdmin={"1.1": "1", "1.2": "x", "1.x": "1"}, poeStatus={"1.1": "3", "1.3": "2"},
-                                                      poePower={"1.1": "-5", "1.2": "abc"}), ["1", "2", "3"])
+                                                      poePower={"1.1": "-5", "1.2": "abc"}), *physical("1", "2", "3"))
     assert got == {"1": {"group": 1, "index": 1, "admin": 1, "status": 3, "power": None},
                    "2": {"group": 1, "index": 2, "admin": None, "status": None, "power": None},
                    "3": {"group": 1, "index": 3, "admin": None, "status": 2, "power": None}}
@@ -463,6 +486,20 @@ async def test_read_cfg_fails_closed_when_a_poe_walk_fails(monkeypatch, driver, 
     assert raw["poe"] == {} and cfg["ports"]
 
 
+async def test_build_cfg_uses_the_driver_it_is_given(monkeypatch):
+    """read_cfg hands build_cfg its own driver object (no second lookup by name): a driver of that name with another PoE strategy than
+    the registered one is the one that counts. A driver whose name is not driver_name is a caller bug (TypeError)."""
+    no_mapping = Driver("procurve", PROCURVE.caps, "qbridge", dict(PROCURVE.oids), "", poe_index="none")
+    cfg, raw = snmpwrite.build_cfg(W_POE, "procurve", driver=no_mapping)
+    assert raw["poe"] == {} and raw["poe_unmapped"] == ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"]
+    assert snmpwrite.build_cfg(W_POE, "procurve", driver=PROCURVE) == snmpwrite.build_cfg(W_POE) == read(W_POE)
+    with pytest.raises(TypeError, match=r"^build_cfg: Treiber 'cisco' zu driver_name 'procurve'$"):
+        snmpwrite.build_cfg(W_POE, "procurve", driver=CISCO)
+    monkeypatch.setattr(snmp, "walk", FakeAgent(agent(W_POE)).walk)
+    cfg, raw = await snmpwrite.read_cfg(ROW, no_mapping, with_poe=True)
+    assert raw["poe"] == {} and raw["poe_unmapped"] == ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"]
+
+
 # ── render_ops: pethPsePortAdminEnable ───────────────────────────────────────────────────────────────────────────────────────────
 POE_SW = agent(W_POE)
 
@@ -546,6 +583,25 @@ def test_poe_refused(W, selection, driver, port, value, reason):
     assert str(refused.value) == f"Port {port}: {reason}"
 
 
+def test_poe_on_a_port_without_a_bridge_port_is_refused():
+    """A port the mapping gives a PoE entry, but that is no bridge port, is never written: the bridge-port rule of snmp_block_reason
+    refuses it (the mapping cannot demand a bridge port: a ProCurve trunk member has none of its own). A Catalyst run as procurve: the
+    ProCurve rule takes the SVIs Vl1 / Vl10 (ifIndex 1, 10) as ports and the entries 1.1 / 1.10 map onto them; and W_ODD's A3 (ifIndex
+    3) is a port without a bridge port."""
+    reason = "kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige"
+    W = {**W_CATALYST, "poeAdmin": walk_rows(POE_ADMIN, {"1.1": "1", "1.10": "2"}),
+         "poeStatus": walk_rows(POE_STATUS, {"1.1": "3", "1.10": "1"})}
+    cfg, raw = read(W, "procurve")
+    assert list(raw["poe"]) == ["Vl1", "Vl10"] and not {"Vl1", "Vl10"} & set(raw["port2bp"])
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "Vl1", {"poe": False}) == reason
+    W = {**W_ODD, "poeAdmin": walk_rows(POE_ADMIN, {"1.3": "1"}), "poeStatus": walk_rows(POE_STATUS, {"1.3": "2"})}
+    cfg, raw = read(W)
+    assert raw["poe"] == {"A3": entry(1, 3, 1, 2)} and "A3" not in raw["port2bp"]
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "A3", {"poe": False}) == reason
+    with pytest.raises(ValueError, match=r"^Port A3: kein Bridge-Port"):
+        snmpwrite.render_ops(PROCURVE, cfg, raw, {"A3": {"poe": False}})
+
+
 def test_two_ports_on_one_poe_entry_are_refused_by_render_ops():
     """Cannot come out of build_cfg (the mapping drops both), so raw is edited by hand: two ports writing one PoE entry would switch
     the same device twice and the other one never."""
@@ -594,6 +650,35 @@ def test_plan_ports_snmp_poe():
     assert plan_snmp({"ports": ["1"], "set": {"poe": True}})["shown"] == []        # already on: nothing to do
     blocked = plan_snmp({"ports": ["1", "Trk1"], "set": {"poe": False}, "expert": True})
     assert blocked["blocked"] == [{"port": "Trk1", "reason": POE_TRUNK}] and blocked["desired"] == {"1": {"poe": False}}
+
+
+def test_lag_members_keep_their_poe_state_read_only():
+    """R36: a trunk member is a physical port and its PoE entry maps to it, so display, cfg and raw show its state (ports 4 / 5, Trk1's
+    members; Gi1/0/3 / Gi1/0/4, Po1's). Writing it stays refused by the member rule; the trunk itself has no PoE."""
+    cfg, raw = read(W_POE)
+    assert (poe_of(cfg)["4"], poe_of(cfg)["5"], raw["poe"]["4"], raw["poe"]["5"]) == (True, True, entry(1, 4, 1, 2), entry(1, 5, 1, 2))
+    assert display(W_POE)[3:5] == [("4", 1, 2, None), ("5", 1, 2, None)]
+    assert snmpwrite.snmp_block_reason(PROCURVE, cfg, raw, "4", {"poe": False}) == "gehört zu Trk1, bitte Trk1 wählen"
+    plan = plan_snmp({"ports": ["4"], "set": {"poe": False}})
+    assert (plan["blocked"], plan["ops"]) == ([{"port": "4", "reason": "gehört zu Trk1, bitte Trk1 wählen"}], [])
+    cfg, raw = read({**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}, "cisco")
+    assert {p: raw["poe"][p] for p in ("Gi1/0/3", "Gi1/0/4")} == {p: CATALYST_POE_RAW[p] for p in ("Gi1/0/3", "Gi1/0/4")}
+    assert snmpwrite.snmp_block_reason(CISCO, cfg, raw, "Gi1/0/3", {"poe": True}) == "gehört zu Po1, bitte Po1 wählen"
+
+
+def test_verify_snmp_checks_the_poe_entry():
+    """The read-back must map the port to the very entry the SET went to (raw["poe"] of the read the change was rendered against):
+    same entry and state ok; another entry, even in the wanted state, a mismatch; no entry any more: poe None; none planned: never ok."""
+    cfg, raw = read(POE_SW, text_hex=True)
+    cfg2, raw2 = read(store(POE_SW, [(f"{POE_ADMIN}.1.1", "i", "2")]), text_hex=True)
+    off = {"1": {"poe": False}}
+    assert changes.verify_snmp(PROCURVE, cfg, cfg2, raw2, off, raw=raw) == []
+    moved = {**raw2, "poe": {**raw2["poe"], "1": {**raw2["poe"]["1"], "index": 7}}}
+    assert changes.verify_snmp(PROCURVE, cfg, cfg2, moved, off, raw=raw) == ["Port 1: PoE-Eintrag ist jetzt 1.7, geschrieben wurde 1.1"]
+    gone = {**raw2, "poe": {k: v for k, v in raw2["poe"].items() if k != "1"}}
+    cfg_gone = {**cfg2, "ports": {**cfg2["ports"], "1": {**cfg2["ports"]["1"], "poe": None}}}
+    assert changes.verify_snmp(PROCURVE, cfg, cfg_gone, gone, off, raw=raw) == ["Port 1: poe ist None, erwartet False"]
+    assert changes.verify_snmp(PROCURVE, cfg, cfg2, raw2, off, raw={**raw, "poe": {}}) == ["Port 1: PoE ohne geplanten Eintrag"]
 
 
 def test_plan_ports_snmp_poe_revert():
@@ -957,6 +1042,17 @@ async def test_poe_round_trip_with_revert(world):
     assert world.ssh == []
 
 
+async def test_poe_verify_checks_the_entry_it_wrote(world):
+    """Hardening: right after the SET the entity table maps Gi1/0/2 to entry 1.1 and Gi1/0/1 to 1.2 (PoE hardware changed between read
+    and SET, say). Gi1/0/2 then reads as on, as wanted, because entry 1.1 is on, but the SET went to 1.2: unclear, never ok."""
+    row = await world.switch("cisco", agent({**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}))
+    cid, _ = await apply(world, row, {"ports": ["Gi1/0/2"], "change": {"poe": True}})
+    world.after_set = lambda W: edit_walks(W, entAlias={"1013.0": f".{IF_INDEX}.10102", "1014.0": f".{IF_INDEX}.10101"})
+    ch = await run(cid)
+    assert world.sets == [(HOST, RW_CRED, [(f"{POE_ADMIN}.1.2", "i", "1")])]
+    assert (ch["status"], ch["error"]) == ("unclear", MISMATCH + "Port Gi1/0/2: PoE-Eintrag ist jetzt 1.1, geschrieben wurde 1.2")
+
+
 async def test_poe_change_on_the_catalyst(world):
     """cisco: the entry found through the entity tables (Gi1/0/2 = 1.2), saved=0 with the R26 warning (no autosave)."""
     row = await world.switch("cisco", agent({**W_CATALYST_POE, "vmVlan": CATALYST_VMVLAN}))
@@ -1095,23 +1191,33 @@ async def test_poll_unmappable_poe_is_not_shown(world, monkeypatch):
     assert {r[1:] for r in await stored_poe(row["id"])} == {(None, None, None)}
 
 
+# The sample ProCurve's ports rows as the display poll stores them, worked out by hand from W_SAMPLE: the recording has no ifOper,
+# ifHighSpeed, LLDP or FDB rows (oper 0, speed 0, no neighbours, no MACs); pvid / untagged / tagged are those of the port's EFFECTIVE
+# bridge port (1 -> bp 3, 2 -> bp 1, 3 -> bp 2, 4 / 5 -> Trk1's bp 7, 6 -> bp 5); the lists as json.dumps writes them.
+#   ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, mac_count, poe_admin, poe_status, poe_power
+SAMPLE_STORED = [
+    (1, "1", "Platz-107", 0, 1, 0, "20", '["20"]', '["30"]', "", "[]", "[]", 0, None, None, None),
+    (2, "2", "", 0, 1, 0, "99", '["99"]', "[]", "", "[]", "[]", 0, None, None, None),
+    (3, "3", "", 0, 1, 0, "1", "[]", '["20", "30"]', "", "[]", "[]", 0, None, None, None),
+    (4, "4", "", 0, 1, 0, "1", '["1"]', '["20", "30", "99"]', "Trk1", "[]", "[]", 0, None, None, None),
+    (5, "5", "", 0, 1, 0, "1", '["1"]', '["20", "30", "99"]', "Trk1", "[]", "[]", 0, None, None, None),
+    (6, "6", "unused", 0, 0, 0, "1", '["1"]', "[]", "", "[]", "[]", 0, None, None, None),
+    (289, "Trk1", "", 0, 1, 0, "1", '["1"]', '["20", "30", "99"]', "Trk1", '["4", "5"]', "[]", 0, None, None, None),
+]
+
+
 async def test_poll_without_poe_rows_stores_what_it_did_before(world, monkeypatch):
-    """A ProCurve without PoE (the PoE walks answer nothing): every port row exactly as before Task 12 (the PoE columns stay NULL, all
-    other columns what _build gives), and a PoE walk that fails changes nothing either: the display poll is lenient."""
+    """A ProCurve without PoE (the PoE walks answer nothing): every port row exactly as before Task 12, pinned by hand (the PoE columns
+    stay NULL); and a PoE walk that fails changes nothing either: the display poll is lenient."""
     row = await world.switch("procurve", W_SAMPLE)
     for failing in ((), (POE_ADMIN, POE_STATUS, HP_POE_POWER)):
         monkeypatch.setattr(snmp, "walk", PollAgent(recording(W_SAMPLE), failing).walk)
         assert await poller.poll_switch(row["id"]) == {"ok": True, "ports": 7, "macs": 0}
         async with db.db() as conn:
-            async with conn.execute("SELECT * FROM ports WHERE switch_id = ? ORDER BY ifindex", (row["id"],)) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-        built = poller._build({k: recording(W_SAMPLE).get(base, []) for k, base in poller.O.items()})["ports"]
-        assert [(r["poe_admin"], r["poe_status"], r["poe_power"]) for r in rows] == [(None, None, None)] * 7
-        assert [{k: v for k, v in r.items() if not k.startswith("poe_")} for r in rows] == [
-            {"switch_id": row["id"], "ifindex": p["if"], "name": p["name"], "alias": p["alias"], "oper": p["oper"], "admin": p["admin"],
-             "speed": p["speed"], "pvid": p["pvid"], "untagged": json.dumps(p["untagged"]), "tagged": json.dumps(p["tagged"]),
-             "trunk": p["trunk"], "members": json.dumps(p["members"]), "lldp": json.dumps(p["lldp"]), "mac_count": p["mac_count"]}
-            for p in built]
+            async with conn.execute("SELECT ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, "
+                                    "mac_count, poe_admin, poe_status, poe_power FROM ports WHERE switch_id = ? ORDER BY ifindex",
+                                    (row["id"],)) as cur:
+                assert [tuple(r) for r in await cur.fetchall()] == SAMPLE_STORED, failing
 
 
 async def test_poll_tolerates_a_failed_poe_walk(world, monkeypatch):
@@ -1155,6 +1261,20 @@ async def test_map_shows_poe_only_where_there_is_some(world, monkeypatch):
     assert ports["3"]["poe"] == {"on": False, "status": 1, "mw": 0}
     assert set(ports["Trk1"]) == {"st", "lim", "n", "a", "o", "ad", "s", "pv", "u", "t", "tr", "mb", "l", "mc", "d"}
     assert set(ports["1"]) == set(ports["Trk1"]) | {"poe"}
+
+
+async def test_map_shows_no_poe_after_the_driver_lost_it(world, monkeypatch):
+    """A ProCurve polled with PoE, then switched to driver generic (no snmp_poe, R35) before the next poll: the old poll's PoE columns
+    are still in the ports table, but /api/netmap shows no PoE for that switch."""
+    row = await world.switch("procurve", W_POE)
+    monkeypatch.setattr(snmp, "walk", PollAgent(recording(W_POE) | {HP_POE_POWER: HP_POWER_SAMPLE}).walk)
+    await poller.poll_switch(row["id"])
+    assert any("poe" in p for p in (await main.netmap(user={"username": "tester"}))["switches"][0]["ports"])
+    async with db.db() as conn:
+        await conn.execute("UPDATE switches SET driver = 'generic' WHERE id = ?", (row["id"],))
+        await conn.commit()
+    assert (await stored_poe(row["id"]))[0] == ("1", 1, 3, 5400)    # still stored
+    assert not any("poe" in p for p in (await main.netmap(user={"username": "tester"}))["switches"][0]["ports"])
 
 
 def test_poll_walk_set_of_every_driver():

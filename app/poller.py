@@ -281,16 +281,18 @@ def _poe_number(table: dict[str, str], index: str, column: str, strict: bool, al
     return None
 
 
-def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physical, strict: bool = False) -> tuple[dict[str, dict], list[str]]:
+def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], ifname: dict[str, str], ports: list[str], members: dict[str, list[str]],
+              strict: bool = False) -> tuple[dict[str, dict], list[str]]:
     """Welcher PoE-Eintrag zu welchem Port gehoert, und was er sagt: die EINE Stelle dafuer, fuer die Anzeige (_build) und den Schreibweg
     (snmpwrite.build_cfg). Ein PoE-SET auf den falschen Eintrag schaltet ein anderes Geraet ab (Telefon, Access Point, Kamera), darum
     zaehlt nur eine sichere Zuordnung: was nicht sicher passt, gehoert zu keinem Port, und ein Port ohne Eintrag hat kein PoE, weder in
     der Anzeige noch zum Schreiben.
 
-    tables: _tbl-Tabellen der Walks aus poe_walks(driver) (ein fehlender Walk ist leer); physical: die ifIndexe der physischen Ports (die
-    von select_ports ohne trunk_ports: PoE hat nur ein physischer Port). Die PoE-Eintraege sind die Indexe der Admin- und der
-    Status-Spalte. Wie ihr <pethPsePortGroupIndex>.<pethPsePortIndex> zum ifIndex steht, legt RFC 3621 nicht fest; das sagt
-    driver.poe_index:
+    tables: _tbl-Tabellen der Walks aus poe_walks(driver) (ein fehlender Walk ist leer); ifname, ports, members: wie select_ports sie
+    fuer driver.name liefert. Zugeordnet wird nur ein physischer Port, einer der ports ohne die von trunk_ports: PoE hat nur ein
+    physischer Port. Ein Trunk-Mitglied ist einer und behaelt so seinen PoE-Zustand (Anzeige, cfg, raw); schreiben laesst ihn die
+    Mitglied-Regel nicht (R36). Die PoE-Eintraege sind die Indexe der Admin- und der Status-Spalte. Wie ihr
+    <pethPsePortGroupIndex>.<pethPsePortIndex> zum ifIndex steht, legt RFC 3621 nicht fest; das sagt driver.poe_index:
       ifindex       (nur ProCurve, R35) Gruppe 1 und pethPsePortIndex = ifIndex. Ein Eintrag einer anderen Gruppe (ein weiteres
                     Stack-Mitglied, ein Modul) gehoert zu keinem Port. Zeigt ein Eintrag der Gruppe 1 auf keinen physischen Port (kein
                     Interface, eins, das kein Port ist, ein Trunk), gilt die Annahme fuer diesen Switch nicht, etwa weil er Ports
@@ -298,7 +300,8 @@ def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physica
       cisco_entity  cpeExtPsePortEntPhyIndex des Eintrags (entPhysicalIndex seines Ports, 0 = keiner) und dessen
                     entAliasMappingIdentifier-Zeilen (ENTITY-MIB): zeigen sie, bei jedem logischen Index, auf genau ein ifIndex.N und
                     ist N ein physischer Port, gehoert der Eintrag zu ihm. Eine Zeile, die auf etwas anderes zeigt (keine ifTable-Zeile,
-                    0.0), zaehlt nicht.
+                    0.0), zaehlt nicht: neben einer ifIndex-Zeile entscheidet die (wie im Beispiel von RFC 6933), allein laesst sie den
+                    Eintrag ohne Port.
       none, jede andere  kein Eintrag gehoert zu einem Port.
     Zeigen zwei Eintraege auf denselben Port, gehoert keiner von beiden zu ihm.
 
@@ -311,6 +314,8 @@ def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physica
     ohne ihn, ist kein Eintrag zuordenbar, aber nichts falsch); ValueError fuer einen Index, der nicht <Gruppe>.<Port> ist, einen
     Admin-Wert ausser 1 / 2, einen Status oder entPhysicalIndex, der keine Zahl ist, und einen Index von entAliasMappingIdentifier, der
     nicht <entPhysicalIndex>.<logischer Index> ist. Ohne strict (die Anzeige) faellt nur das Unlesbare weg."""
+    trunks = trunk_ports(ifname, ports, members, driver.name)
+    phys = {ifi for ifi in ports if ifi not in trunks}
     admin, status = tables.get("poeAdmin", {}), tables.get("poeStatus", {})
     if strict and set(admin) != set(status):
         raise snmp.SnmpError("PoE-Tabelle unvollständig gelesen: Admin- und Status-Spalte passen nicht zusammen "
@@ -325,7 +330,6 @@ def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physica
     entries = {k: {"group": g, "index": i, "admin": _poe_number(admin, k, "pethPsePortAdminEnable", strict, ("1", "2")),
                    "status": _poe_number(status, k, "pethPsePortDetectionStatus", strict),
                    "power": _poe_number(tables.get("poePower", {}), k, "poePower", False)} for k, (g, i) in rows.items()}
-    phys = set(physical)
     if driver.poe_index == "ifindex":
         first = {k: k.partition(".")[2] for k, (g, _) in rows.items() if g == 1}
         target = first if all(ifi in phys for ifi in first.values()) else {}
@@ -476,8 +480,8 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
     # Trunk: bei ProCurve jedes Trk-Interface (auch ohne Mitglieder), sonst jeder LAG-Port (select_ports fuehrt ihn in members)
     trunks = trunk_ports(ifname, port_ifis, members, driver_name)
     driver = drivers.driver_for({"driver": driver_name})
-    poe, _ = poe_ports(driver, {k: _tbl(W.get(k, []), base) for k, base in poe_walks(driver, power=True).items()},
-                       [ifi for ifi in port_ifis if ifi not in trunks])
+    poe, _ = poe_ports(driver, {k: _tbl(W.get(k, []), base) for k, base in poe_walks(driver, power=True).items()}, ifname, port_ifis,
+                       members)
     ports, macs = [], []
     for ifi in port_ifis:
         name = ifname[ifi]

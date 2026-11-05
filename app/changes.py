@@ -374,10 +374,10 @@ def verify_ports(cfg_after: dict, desired: dict) -> list[str]:
     return bad
 
 
-def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: dict) -> list[str]:
+def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: dict, *, raw: dict) -> list[str]:
     """Das Pruefen nach einem SNMP-SET, das Gegenstueck zu verify_ports: was im Read-back (cfg_after, raw_after aus snmpwrite.read_cfg)
-    nicht so ist, wie die Aenderung desired es aus cfg (dem Read, gegen den sie geplant ist) machen will, je eine Zeile, Ports in
-    natuerlicher Reihenfolge; leer heisst ok.
+    nicht so ist, wie die Aenderung desired es aus cfg / raw (dem Read, gegen den sie geplant und gerendert ist) machen will, je eine
+    Zeile, Ports in natuerlicher Reihenfolge; leer heisst ok.
       - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]) oder als nicht verwaltbar fuehrt
         (raw_after["unmanaged"]), weicht ab: cfg haelt fuer ihn nur Platzhalter (port_state fuellte Vorgaben ein, u ist None), an denen
         ein Ziel wie "kein ungetaggtes VLAN" oder "Name leer" sonst unbemerkt vorbeikaeme.
@@ -387,7 +387,9 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
         schon u), muss bei Q-BRIDGE dazu dessen Egress-Bit gesetzt sein: ungetaggt ohne Egress zeigt cfg nicht (u kommt aus der
         Untagged-Liste), der Port gaebe das VLAN aber nicht aus.
       - en, name und poe wie verify_ports, wenn desired sie hat. poe ist das pethPsePortAdminEnable des Eintrags, den der Read-back dem
-        Port zuordnet (poller.poe_ports); ordnet er keinen mehr zu (poe None), weicht das ab.
+        Port zuordnet (poller.poe_ports); ordnet er keinen mehr zu (poe None), weicht das ab. Und es muss DER Eintrag sein, auf den das
+        SET ging (raw["poe"], Gruppe und Port): ordnet der Read-back dem Port einen anderen zu, etwa weil sich PoE-Hardware zwischen Read
+        und SET geaendert hat, sagt dessen Zustand nichts ueber das SET, und ein anderes Geraet koennte geschaltet sein.
       - Die PVID (R21) bei Q-BRIDGE (vlan_strategy "qbridge") fuer einen Port ohne vmVlan-Zeile, gelesen aus raw_after["pvid"]:
         erwartet ist eine ausdrueckliche pvid aus desired, sonst das neue ungetaggte VLAN, wenn u zu einem VLAN wechselt (genau das
         schreibt render_ops). Sonst (u -> None, nur t / en / name) schreibt render_ops keine PVID, und keine wird erwartet. Bei
@@ -406,6 +408,8 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
             st = cfgparse.port_state(cfg, p)
             want = {"u": st["u"], "t": st["t"]} | want
         bad += verify_ports(cfg_after, {p: want})
+        if "poe" in d:
+            bad += _poe_entry_moved(p, raw, raw_after)
         if driver.vlan_strategy != "qbridge" or p in raw_after["vmvlan"]:
             continue
         u = d.get("u")
@@ -417,6 +421,17 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
         if pvid is not None and raw_after["pvid"].get(p) != pvid:
             bad.append(f"Port {p}: pvid ist {raw_after['pvid'].get(p)!r}, erwartet {pvid!r}")
     return bad
+
+
+def _poe_entry_moved(p: str, raw: dict, raw_after: dict) -> list[str]:
+    """verify_snmp: zeigt der Read-back Port p einem anderen PoE-Eintrag zugeordnet als dem, auf den das SET ging (raw["poe"][p])?
+    Ohne Eintrag im Read-back meldet verify_ports schon poe None."""
+    planned, now = raw["poe"].get(p), raw_after["poe"].get(p)
+    if planned is None:  # render_ops lehnt PoE ohne Eintrag ab: kann nicht vorkommen, zaehlt aber nie als ok
+        return [f"Port {p}: PoE ohne geplanten Eintrag"]
+    if now is not None and (now["group"], now["index"]) != (planned["group"], planned["index"]):
+        return [f"Port {p}: PoE-Eintrag ist jetzt {now['group']}.{now['index']}, geschrieben wurde {planned['group']}.{planned['index']}"]
+    return []
 
 
 # ── RADIUS-Grundeinrichtung des Switches ──────────────────────────────────────
@@ -749,7 +764,7 @@ async def _run_snmp(cid: int, ch, row):
                 await _step(cid, steps, f"{error}. {kept}", "error")
                 return
             await _step(cid, steps, "Zustand nachher gelesen")
-            bad = verify_snmp(driver, cfg, cfg_after, raw_after, plan["desired"])
+            bad = verify_snmp(driver, cfg, cfg_after, raw_after, plan["desired"], raw=raw)
             if bad:
                 status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
                 await _step(cid, steps, f"{error}. {kept}", "error")
