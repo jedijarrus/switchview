@@ -732,10 +732,11 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
         try:
             return "ssh", await changes.fresh_cfg(row["id"]), None
         except Exception as e:  # noqa: BLE001
+            error = str(e) or type(e).__name__    # nie leer: ein leerer ssh_error hiesse sonst "kein SSH-Fehler", SNMP spraenge still ein
             refusal = _snmp_refusal(row, driver, body)
             if refusal:
-                raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e} (per SNMP geht es auch nicht: {refusal[1]})")
-            return "snmp", None, str(e)
+                raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {error} (per SNMP geht es auch nicht: {refusal[1]})")
+            return "snmp", None, error
     refusal = _snmp_refusal(row, driver, body)
     if refusal:
         status, reason = refusal
@@ -754,7 +755,7 @@ async def _read_snmp(row, driver: drivers.Driver, ssh_error: str | None = None, 
         async with sshcli.lock(row["id"]):
             return await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
     except (snmp.SnmpError, OSError) as e:
-        if ssh_error:
+        if ssh_error is not None:
             raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {ssh_error} (per SNMP auch nicht: {e})")
         raise HTTPException(502, f"Konfiguration des Switches per SNMP nicht lesbar: {e}")
 
@@ -802,7 +803,7 @@ async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str |
                                   raw=raw)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    if ssh_error:
+    if ssh_error is not None:    # nie still per SNMP (L19)
         plan["warnings"] = [f"SSH nicht verfügbar ({ssh_error}), die Änderung geht per SNMP", *plan["warnings"]]
     return plan, req, "ports", _summary(body)
 

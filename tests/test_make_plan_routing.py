@@ -147,6 +147,7 @@ class FakeSwitch:
 
     def __init__(self):
         self.ssh_up = True
+        self.ssh_exc: Exception = RuntimeError(SSH_DOWN)    # what the SSH read raises while ssh_up is False
         self.snmp_error: Exception | None = None
         self.views = dict(VIEWS)
         self.calls: list[tuple] = []
@@ -158,7 +159,7 @@ class FakeSwitch:
     async def fresh_cfg(self, sid: int, max_age_s: int = 600) -> dict:
         self.calls.append(("ssh", sid))
         if not self.ssh_up:
-            raise RuntimeError(SSH_DOWN)
+            raise self.ssh_exc
         self.cfg = cfgparse.parse_config(SSH_CONFIG)
         return self.cfg
 
@@ -513,6 +514,19 @@ def test_fallback_with_snmp_down_too_is_502_naming_both_errors(api, fake):
     fake.ssh_up, fake.snmp_error = False, snmp.SnmpError(SNMP_DOWN)
     refused(plan(api, sid, PC_PROBE), 502, f"{NOT_READABLE} (per SNMP auch nicht: {SNMP_DOWN})")
     assert fake.kinds() == ["ssh", "snmp"]
+
+
+def test_an_ssh_failure_without_a_message_never_falls_back_silently(api, fake):
+    """L19: an SSH read that fails with an empty message (asyncio's TimeoutError has none) is still a failure. SNMP takes over WITH the
+    warning, which then names the error's type; and where SNMP cannot take over, both 502 messages name it as well."""
+    sid = switch(api, "procurve")
+    fake.ssh_up, fake.ssh_exc = False, asyncio.TimeoutError()
+    got = preview(api, sid, PC_PROBE)
+    assert (got["mechanism"], got["warnings"]) == ("snmp", ["SSH nicht verfügbar (TimeoutError), die Änderung geht per SNMP"])
+    fake.snmp_error = snmp.SnmpError(SNMP_DOWN)
+    refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches nicht lesbar: TimeoutError (per SNMP auch nicht: {SNMP_DOWN})")
+    sid = switch(api, "procurve", snmp_write=False, host="203.0.113.22")
+    refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches nicht lesbar: TimeoutError (per SNMP geht es auch nicht: {WRITE_DISABLED})")
 
 
 # ── Port names per mechanism ──────────────────────────────────────────────────────────────────────────────────────────────────────
