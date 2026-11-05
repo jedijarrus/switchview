@@ -744,9 +744,11 @@ async def _run_snmp(cid: int, ch, row):
          Plan ohne Varbinds ("Nichts zu ändern": nie ok ohne Zuruecklesen und Pruefen); nichts geschrieben. before kommt aus diesem
          Read (mit der PVID, R21) und steht in der Zeile, bevor das SET hinausgeht.
       4. EIN SET (snmpwrite.apply_ops). Scheitert es (Timeout, Fehlerpaket), ist offen, ob der Switch es uebernommen hat: kein failed,
-         das Zuruecklesen entscheidet. Kommt es ohne Fehler zurueck, hat ein Treiber mit snmp_autosave seine gesamte laufende
+         das Zuruecklesen entscheidet. Hat der Switch das SET verarbeitet, hat ein Treiber mit snmp_autosave seine gesamte laufende
          Konfiguration gespeichert, also auch jede absichtlich nicht gespeicherte SSH-Aenderung (unsaved_ssh_changes, vor dem SET
-         festgestellt): sie bekommen saved=1 mit einem Schritt, und diese Aenderung einen, der sie nennt (R42).
+         festgestellt): sie bekommen saved=1 mit einem Schritt, und diese Aenderung einen, der sie nennt (R42). Verarbeitet heisst: das SET
+         kam ohne Fehler zurueck, oder seine Antwort fehlte, aber das Pruefen in 5. bestaetigt jeden Wert (R42b, dann nach dem Pruefen).
+         Ein SET mit Fehler, das das Zuruecklesen nicht bestaetigt, markiert nichts.
       5. Zuruecklesen und pruefen (verify_snmp, die ganze VLAN-Zugehoerigkeit, R32): scheitert der Read oder weicht etwas ab, unclear.
          Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
     Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed; ein
@@ -810,15 +812,15 @@ async def _run_snmp(cid: int, ch, row):
             unsaved = await unsaved_ssh_changes(sid) if autosave else []    # R42: was dieses SET mitspeichert, im Lock festgestellt
             sent = True
             invalidate_cfg(sid)
+            set_failed = False
             try:
                 output = await snmpwrite.apply_ops(row, driver, plan["ops"])
             except (snmp.SnmpError, OSError) as e:
-                output = str(e)
+                output, set_failed = str(e), True
                 await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
             else:
-                if unsaved:    # nur nach einem SET ohne Fehler: der Switch hat seine gesamte laufende Konfiguration gespeichert
-                    await _mark_saved_by_snmp(cid, unsaved)
-                    await _step(cid, steps, f"Mitgespeichert: Änderung {change_refs(unsaved)} ({ALSO_SAVED})", "warn")
+                if unsaved:    # ein SET ohne Fehler: der Switch hat seine gesamte laufende Konfiguration gespeichert
+                    await _also_saved(cid, steps, unsaved)
             try:
                 cfg_after, raw_after = await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
             except (snmp.SnmpError, OSError) as e:
@@ -832,6 +834,10 @@ async def _run_snmp(cid: int, ch, row):
                 await _step(cid, steps, f"{error}. {kept}", "error")
                 return
             await _step(cid, steps, "Prüfung ok")
+            if set_failed and unsaved:
+                # R42b: die Antwort auf das SET fehlte, das Zuruecklesen bestaetigt aber jeden Wert: der Switch hat das SET verarbeitet
+                # und dabei (wie bei jedem SET) seine gesamte laufende Konfiguration gespeichert (unsaved gibt es nur mit snmp_autosave)
+                await _also_saved(cid, steps, unsaved)
             status = "ok"
             if autosave:
                 saved = 1
@@ -868,6 +874,13 @@ async def unsaved_ssh_changes(sid: int) -> list[int]:
                                 "AND reverted_by IS NULL AND status IN ('ok', 'unclear', 'failed') AND kind != 'save' ORDER BY id",
                                 (sid,)) as cur:
             return [r["id"] for r in await cur.fetchall()]
+
+
+async def _also_saved(cid: int, steps: list, ids: list[int]):
+    """R42: die SNMP-Aenderung cid hat mit ihrem SET die gesamte laufende Konfiguration gespeichert: die Aenderungen ids bekommen saved=1
+    und einen Schritt (_mark_saved_by_snmp), cid einen, der sie nennt."""
+    await _mark_saved_by_snmp(cid, ids)
+    await _step(cid, steps, f"Mitgespeichert: Änderung {change_refs(ids)} ({ALSO_SAVED})", "warn")
 
 
 async def _mark_saved_by_snmp(cid: int, ids: list[int]):

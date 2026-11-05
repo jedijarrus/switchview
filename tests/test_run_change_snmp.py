@@ -1018,15 +1018,18 @@ async def test_snmp_revert_preview_warns_too_and_the_fallback_warning_stays_firs
     assert plan["warnings"] == [f"SSH nicht verfügbar ({SSH_DOWN}), die Änderung geht per SNMP", unsaved_warning(f"#{old}")]
 
 
+@pytest.mark.parametrize("set_mode", ["apply", "lost"])
 @pytest.mark.parametrize("drv, W, payload", [(GENERIC, VIEWS["generic"], GI_PROBE), (CLI_UNSAVED, SAMPLE_BY_IFTYPE, PC_PROBE)],
                          ids=["generic", "cli-without-autosave"])
-async def test_no_warning_and_no_marking_without_autosave(env, drv, W, payload):
-    """A driver without snmp_autosave keeps a SET in the running config only: it saves nothing, earlier unsaved changes stay unsaved."""
+async def test_no_warning_and_no_marking_without_autosave(env, drv, W, payload, set_mode):
+    """A driver without snmp_autosave keeps a SET in the running config only: it saves nothing, earlier unsaved changes stay unsaved,
+    whether the SET answered or its answer was lost and the read-back confirmed it."""
     env.mp.setitem(drivers.DRIVERS, drv.name, drv)
     sid = await env.switch(drv.name, W)
     old = await old_change(sid)
     cid, plan = await apply(sid, payload)
     assert plan["warnings"] == []
+    env.agent.set_mode = set_mode
     assert (await run(env, cid))["status"] == "ok"
     assert (await change(old))["saved"] == 0 and len((await change(old))["steps"]) == 1
     assert not any(ALSO_SAVED in text for text, _ in steps(await change(cid)))
@@ -1062,16 +1065,38 @@ async def test_an_unclear_verify_after_a_set_without_error_marks_them_all_the_sa
     assert (await change(old))["saved"] == 1
 
 
-@pytest.mark.parametrize("mode, status", [("lost", "ok"), ("timeout", "unclear")])
-async def test_an_erroring_snmp_set_marks_nothing(env, mode, status):
-    """A SET that errored marks nothing (R42), whatever the read-back finds afterwards: the switch took it but the answer was lost
-    ("lost": the change itself verifies ok), or it took nothing ("timeout")."""
+async def test_a_lost_set_answer_that_the_read_back_confirms_marks_them_too(env):
+    """R42b: the SET's answer was lost (snmpset errors), but the switch applied it and the read-back confirms every value: it evidently
+    processed the SET and, like every SET, saved its whole running config. The SNMP change ends ok and saved (R26), and the earlier
+    unsaved SSH change is marked saved with the same step note, after the check (only the check shows that the SET arrived)."""
     sid = await env.switch("procurve")
     old = await old_change(sid)
     cid, _ = await apply(sid, PC_PROBE)
-    env.agent.set_mode = mode
+    env.agent.set_mode = "lost"
     ch = await run(env, cid)
-    assert ch["status"] == status
+    assert (ch["status"], ch["saved"], ch["error"]) == ("ok", 1, None)
+    assert steps(ch) == [*READ_STEPS, (setting(5), "info"),
+                         (f"SET nicht bestätigt ({TIMEOUT}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error"),
+                         ("Zustand nachher gelesen", "info"), ("Prüfung ok", "info"), (f"Mitgespeichert: Änderung #{old} ({ALSO_SAVED})", "warn"),
+                         (AUTOSAVED, "ok")]
+    marked = await change(old)
+    assert (marked["saved"], steps(marked)) == (1, [("Gesendet", "info"), (f"Mitgespeichert durch SNMP-Änderung #{cid}: {ALSO_SAVED}.", "warn")])
+
+
+@pytest.mark.parametrize("case", ["nothing taken", "partly taken", "read-back fails"])
+async def test_an_erroring_set_the_read_back_does_not_confirm_marks_nothing(env, case):
+    """An erroring SET whose read-back does not confirm it stays an unknown outcome: unclear, nothing marked (R42, R42b). The switch took
+    nothing ("timeout"), took the SET without its PVID varbind, or took it while the read-back fails."""
+    sid = await env.switch("procurve")
+    old = await old_change(sid)
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.set_mode = {"nothing taken": "timeout"}.get(case, "lost")
+    if case == "partly taken":
+        env.agent.drop = {PVID}
+    elif case == "read-back fails":
+        env.agent.readback_error = snmp.SnmpError(TIMEOUT)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"]) == ("unclear", 0)
     assert (await change(old))["saved"] == 0 and len((await change(old))["steps"]) == 1
     assert not any(ALSO_SAVED in text for text, _ in steps(ch))
 
