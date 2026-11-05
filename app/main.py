@@ -566,6 +566,8 @@ class PortChange(BaseModel):
     name: str | None = Field(default=None, max_length=64)
     limit: int | None = Field(default=None, ge=1, le=32)
     guest: str | None = Field(default=None, pattern=r"^\d{0,4}$")
+    # PoE an (true) / aus (false), nur per SNMP (R30). strict: nur JSON true / false, kein "yes", 1 oder "off", das jemand anders meinen kann
+    poe: bool | None = Field(default=None, strict=True)
 
 
 class PlanIn(BaseModel):
@@ -610,6 +612,8 @@ def _summary(body: PlanIn) -> str:
         parts.append(f"{c.limit} Geräte/Port")
     if c.guest is not None:
         parts.append(f"Gast-VLAN {c.guest}" if c.guest else "ohne Gast-VLAN")
+    if c.poe is not None:
+        parts.append("PoE an" if c.poe else "PoE aus")
     return f"Port {_port_list(body.ports)}: " + (", ".join(parts) or "–")
 
 
@@ -617,8 +621,8 @@ def _summary(body: PlanIn) -> str:
 # Fixiert beim Planen, vor dem ersten Schreibzugriff, nie mitten im Ausfuehren (Spec §5, Q5); plan["mechanism"] nennt ihn.
 def needed_ops(body: PlanIn) -> set[str]:
     """Die SNMP-Faehigkeiten des Treibers (drivers.can), die die Anfrage per SNMP braucht: VLANs snmp_vlan, jeder Zustand snmp_admin
-    ("Aus" schaltet den Port ab, jeder andere ein), ein Name snmp_name. Das PoE-Feld (Task 12) kommt hier als snmp_poe dazu. Was per
-    SNMP gar nicht geht (802.1X / MAC-Anmeldung, Limit, Gast-VLAN), prueft _cli_only."""
+    ("Aus" schaltet den Port ab, jeder andere ein), ein Name snmp_name, PoE snmp_poe. Was per SNMP gar nicht geht (802.1X /
+    MAC-Anmeldung, Limit, Gast-VLAN), prueft _cli_only."""
     c, ops = body.change, set()
     if c.untagged is not None or c.tagged_add or c.tagged_remove:
         ops.add("snmp_vlan")
@@ -626,6 +630,8 @@ def needed_ops(body: PlanIn) -> set[str]:
         ops.add("snmp_admin")
     if c.name is not None:
         ops.add("snmp_name")
+    if c.poe is not None:
+        ops.add("snmp_poe")
     return ops
 
 
@@ -692,9 +698,15 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
       2. Treiber mit CLI und SSH-Zugang: SSH, das Lesen der Konfiguration (changes.fresh_cfg) ist der Pre-Flight. Scheitert es, geht die
          Aenderung per SNMP, wenn sie dort geht (mit Hinweis), sonst 502 wie bisher, mit dem Grund, warum SNMP nicht geht.
       3. Sonst SNMP, wenn die Anfrage dort geht, sonst 409 / 422 mit dem Grund (_snmp_refusal), bei einem Treiber mit CLI (dann fehlt
-         der SSH-Zugang) hinter der Meldung von bisher (SSH_NEEDED)."""
+         der SSH-Zugang) hinter der Meldung von bisher (SSH_NEEDED).
+    PoE (R30) geht bei jedem Treiber nur per SNMP, auch bei ProCurve mit SSH: eine Port-Aenderung mit PoE geht als Ganzes per SNMP (u, t,
+    an / aus und Name kann SNMP auch), ohne SSH-Read, wenn sie dort geht; sonst 422 "PoE erfordert SNMP-Schreibzugriff (Grund)", oder 409,
+    wenn sie dazu etwas will, das nur die CLI kann. Ein mitgeschicktes "ssh" mit PoE: 409 STALE (diese Vorschau gab es nie)."""
     ssh_refusal = _ssh_refusal(row, driver)
+    poe = body.mode == "ports" and body.change.poe is not None
     if body.mechanism == "ssh":
+        if poe:
+            raise HTTPException(409, f"{STALE} (PoE geht nur per SNMP)")
         if ssh_refusal:
             raise HTTPException(409, f"{STALE} ({ssh_refusal})")
         try:
@@ -708,6 +720,13 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
         reason = _snmp_unwritable(row, driver, needed_ops(body))
         if reason:
             raise HTTPException(409, f"{STALE} ({reason})")
+        return "snmp", None, None
+    if poe:
+        refusal = _snmp_refusal(row, driver, body)
+        if refusal and refusal[0] == 409:
+            raise HTTPException(409, f"{refusal[1]}. PoE geht nur per SNMP: bitte getrennt ändern")
+        if refusal:
+            raise HTTPException(422, f"PoE erfordert SNMP-Schreibzugriff ({refusal[1]})")
         return "snmp", None, None
     if not ssh_refusal:
         try:
@@ -1132,13 +1151,17 @@ async def build_map() -> dict:
         d = sorted(devs.get(key, []), key=lambda x: -x[5])
         cfg = cfgs.get(p["switch_id"], (None, None))[1]
         st = cfgparse.port_state(cfg, p["name"]) if cfg else None
-        ports_by[p["switch_id"]].append({
+        port = {
             "st": changes.status_of(st) if st else ("off" if not p["admin"] else ""),
             "lim": ((st["cl"] if st["x"] else None) or (st["al"] if st["m"] else None)) if st else None,
             "n": p["name"], "a": p["alias"] or "", "o": bool(p["oper"]), "ad": bool(p["admin"]), "s": p["speed"] or 0,
             "pv": p["pvid"] or "", "u": json.loads(p["untagged"] or "[]"), "t": json.loads(p["tagged"] or "[]"),
             "tr": p["trunk"] or "", "mb": json.loads(p["members"] or "[]"), "l": json.loads(p["lldp"] or "[]"),
-            "mc": p["mac_count"], "d": d[:12]})
+            "mc": p["mac_count"], "d": d[:12]}
+        if p["poe_admin"] is not None or p["poe_status"] is not None:
+            # nur ein Port mit sicher zugeordnetem PoE-Eintrag (poller.poe_ports): an / aus, Erkennungsstatus (RFC 3621), Leistung in mW
+            port["poe"] = {"on": None if p["poe_admin"] is None else p["poe_admin"] == 1, "status": p["poe_status"], "mw": p["poe_power"]}
+        ports_by[p["switch_id"]].append(port)
 
     sw_name = {s["id"]: s["name"] for s in sws}
     all_macs = defaultdict(set)  # (switch_name, port) -> alle MACs, fuer die Link-Erkennung

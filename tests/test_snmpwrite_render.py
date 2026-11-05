@@ -571,12 +571,13 @@ def test_one_refused_port_refuses_the_whole_change():
 
 
 # ── refused: the field or value ────────────────────────────────────────────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("fields", [{"x": True}, {"m": True}, {"cl": 2}, {"al": 2}, {"xuv": "99"}, {"muv": None}, {"poe": False},
-                                    {"vlan": "20"}, {"u": "20", "m": True}], ids=str)
+@pytest.mark.parametrize("fields", [{"x": True}, {"m": True}, {"cl": 2}, {"al": 2}, {"xuv": "99"}, {"muv": None}, {"vlan": "20"},
+                                    {"u": "20", "m": True}, {"poe": False, "x": True}], ids=str)
 def test_a_field_the_snmp_write_path_does_not_have_is_refused(fields):
-    """Fail closed: 802.1X / MAC auth only go over the CLI, PoE is not built yet, anything unknown is refused, also next to a valid u."""
+    """Fail closed: 802.1X / MAC auth only go over the CLI, anything unknown is refused, also next to a valid u or a PoE value (PoE
+    itself is a field of the write path since Task 12, tests/test_poe.py)."""
     cfg, raw = _read(SAMPLE)
-    odd = ", ".join(sorted(k for k in fields if k != "u"))
+    odd = ", ".join(sorted(k for k in fields if k not in ("u", "poe")))
     with pytest.raises(ValueError, match=rf"^Port 6: per SNMP nicht änderbar: {odd}$"):
         snmpwrite.render_ops(PROCURVE, cfg, raw, {"6": fields})
 

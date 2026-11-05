@@ -37,7 +37,22 @@ FREE_TEXT = {"ifAlias", "vlanName"}
 IF_TYPE = "1.3.6.1.2.1.2.2.1.3"               # ifType (IANAifType)  .<ifIndex>   6 / 117 physical port, 161 LAG, anything else no port
 # Only for drivers with vlan_strategy cisco_vmps, one more:
 VMVLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"       # vmVlan (CISCO-VLAN-MEMBERSHIP-MIB)  .<ifIndex>   access VLAN, 0 = none; trunk ports have no row
-WALK_BASES = {**BASES, "ifType": IF_TYPE, "vmVlan": VMVLAN}
+# PoE, for drivers with the cap snmp_poe. POWER-ETHERNET-MIB (RFC 3621): pethPsePortEntry is 1.3.6.1.2.1.105.1.1.1, indexed
+# .<pethPsePortGroupIndex>.<pethPsePortIndex> (group 1 on a non-modular device); the RFC does not say how that index relates to an
+# ifIndex. Both columns are walked by the display poller and, strictly, by read_cfg.
+POE_ADMIN = "1.3.6.1.2.1.105.1.1.1.3"         # pethPsePortAdminEnable       TruthValue 1 on / 2 off, read-write
+POE_STATUS = "1.3.6.1.2.1.105.1.1.1.6"        # pethPsePortDetectionStatus   1 disabled, 2 searching, 3 deliveringPower, 4 fault, ...
+# Power per port in milliwatts, display only. Both tables AUGMENT pethPsePortEntry, so they share its index:
+HP_POE_POWER = "1.3.6.1.4.1.11.2.14.11.1.9.1.1.1.3"    # hpicfPoePethPsePortPower (HP-ICF-POE-MIB), "Power supplied at this port", mW
+CISCO_POE_POWER = "1.3.6.1.4.1.9.9.402.1.2.1.9"        # cpeExtPsePortPwrConsumption (CISCO-POWER-ETHERNET-EXT-MIB), mW
+# Cisco's own way from a PoE entry to its port: the entry's entPhysicalIndex, then ENTITY-MIB's alias mapping to the ifTable row.
+CISCO_POE_ENTPHY = "1.3.6.1.4.1.9.9.402.1.2.1.11"      # cpeExtPsePortEntPhyIndex  .<group>.<port>  entPhysicalIndex of the PSE port, 0 = none
+ENT_ALIAS = "1.3.6.1.2.1.47.1.3.2.1.2"                 # entAliasMappingIdentifier .<entPhysicalIndex>.<logical index, 0 = all>  RowPointer
+IF_INDEX = "1.3.6.1.2.1.2.2.1.1"                       # ifIndex: an alias row points at ifIndex.<N> of the port's ifTable row
+WALK_BASES = {**BASES, "ifType": IF_TYPE, "vmVlan": VMVLAN, "poeAdmin": POE_ADMIN, "poeStatus": POE_STATUS, "poeEntPhy": CISCO_POE_ENTPHY,
+              "entAlias": ENT_ALIAS}
+# The PoE walks of read_cfg. A switch without PoE answers each of them with no rows (an empty subtree), as these fixtures do.
+POE_WALKS = {"poeAdmin", "poeStatus", "poeEntPhy", "entAlias"}
 
 
 def walk_rows(base: str, values: dict) -> list[tuple[str, str]]:
@@ -109,7 +124,26 @@ IFTYPE_SAMPLE = walk_rows(IF_TYPE, {"1": "6", "2": "6", "3": "6", "4": "6", "5":
                                     "1030": "53", "1099": "53", "4097": "24"})
 # The sample switch as a cisco_vmps driver would read it: vmVlan puts port 1 into VLAN 99 (Q-BRIDGE: 20) and port 6 into none.
 VMVLAN_SAMPLE = walk_rows(VMVLAN, {"1": "99", "6": "0"})
-RECORDING = {BASES[k]: rows for k, rows in W_SAMPLE.items()} | {IF_TYPE: IFTYPE_SAMPLE, VMVLAN: VMVLAN_SAMPLE}    # the fake agent, by OID
+# The fake agent, by OID. The sample switch has no PoE: its PoE tables answer with no rows.
+RECORDING = ({BASES[k]: rows for k, rows in W_SAMPLE.items()} | {IF_TYPE: IFTYPE_SAMPLE, VMVLAN: VMVLAN_SAMPLE}
+             | {WALK_BASES[k]: [] for k in POE_WALKS})
+
+# The sample switch with PoE on ports 1-6, as a non-stacked ProCurve reports it: group 1, pethPsePortIndex = the port's ifIndex
+# (HP uses the ifIndex as the PoE port index):
+#   port         PoE entry   admin   detection status    power (hpicfPoePethPsePortPower, mW)
+#   1            1.1         on      3 deliveringPower   5400
+#   2            1.2         on      2 searching         0
+#   3            1.3         off     1 disabled          0
+#   4, 5         1.4, 1.5    on      2 searching         0        Trk1's members
+#   6            1.6         on      2 searching         0
+#   Trk1 (289)   -                                                a trunk has no PoE
+POE_SAMPLE = {
+    "poeAdmin": walk_rows(POE_ADMIN, {"1.1": "1", "1.2": "1", "1.3": "2", "1.4": "1", "1.5": "1", "1.6": "1"}),
+    "poeStatus": walk_rows(POE_STATUS, {"1.1": "3", "1.2": "2", "1.3": "1", "1.4": "2", "1.5": "2", "1.6": "2"}),
+}
+HP_POWER_SAMPLE = walk_rows(HP_POE_POWER, {"1.1": "5400", "1.2": "0", "1.3": "0", "1.4": "0", "1.5": "0", "1.6": "0"})
+W_POE = {**W_SAMPLE, **POE_SAMPLE}
+POE_EXPECTED = {"1": True, "2": True, "3": False, "4": True, "5": True, "6": True, "Trk1": None}    # cfg port "poe"
 
 NAC = {"x": False, "m": False, "cl": None, "al": None, "xuv": None, "muv": None}    # 802.1X / MAC auth: not readable here, defaulted
 EXPECTED_PORTS = {
@@ -284,7 +318,7 @@ def random_procurve_switch(rng: random.Random) -> tuple[dict, dict]:
             "alias": {kept[i]: aliases[i] for i in kept if i in aliases},
             "egress": {v: bytes.fromhex(portlist_hex(egress[v], size).replace(" ", "")) for v in vids},
             "untagged": {v: bytes.fromhex(portlist_hex(untagged[v], size).replace(" ", "")) for v in vids},
-            "unmanaged": {n: st["unmanaged"] for n, st in ports.items() if st["unmanaged"]}, "poe": {}, "vmvlan": {},
+            "unmanaged": {n: st["unmanaged"] for n, st in ports.items() if st["unmanaged"]}, "poe": {}, "poe_unmapped": [], "vmvlan": {},
         },
         "trunks": {names[t]: [names[m] for m in sorted(mem, key=int)] for t, mem in trunks.items() if mem},
         "vlans": {v: vnames[v] for v in sorted(vids, key=int)},
@@ -367,7 +401,29 @@ CATALYST_DISPLAY = [(5001, "Po1", "Po1", ["Gi1/0/3", "Gi1/0/4"]), (10101, "Gi1/0
                     (10103, "Gi1/0/3", "Po1", []), (10104, "Gi1/0/4", "Po1", [])]
 # vmVlan for the cisco driver: Gi1/0/1 and Gi1/0/2 are access ports, Po1 and its members are no access ports (no row)
 CATALYST_VMVLAN = walk_rows(VMVLAN, {"10101": "10", "10102": "1"})
-CATALYST_RECORDING = {WALK_BASES[k]: rows for k, rows in W_CATALYST.items()} | {VMVLAN: CATALYST_VMVLAN}    # by base OID
+# by base OID; no PoE (its PoE tables answer with no rows)
+CATALYST_RECORDING = ({WALK_BASES[k]: rows for k, rows in W_CATALYST.items()} | {VMVLAN: CATALYST_VMVLAN}
+                      | {WALK_BASES[k]: [] for k in POE_WALKS})
+
+# The Catalyst with PoE, the way classic IOS numbers it: group 1 = stack member 1, pethPsePortIndex = the port number on it (1-4), NOT
+# the ifIndex (10101-10104). Index 1 is even an ifIndex of this switch (Vl1), of no port though. CISCO-POWER-ETHERNET-EXT-MIB gives each
+# entry the entPhysicalIndex of its port, ENTITY-MIB's alias table maps that to the port's ifTable row (".1.3.6.1.2.1.2.2.1.1.<ifIndex>",
+# the way snmpbulkwalk -On prints an OID value):
+#   PoE entry   entPhysicalIndex   ifIndex (port)       admin   detection status    power (cpeExtPsePortPwrConsumption, mW)
+#   1.1         1013               10101 (Gi1/0/1)      on      3 deliveringPower   6200
+#   1.2         1014               10102 (Gi1/0/2)      off     1 disabled          0
+#   1.3         1015               10103 (Gi1/0/3)      on      2 searching         0      Po1's member
+#   1.4         1016               10104 (Gi1/0/4)      on      2 searching         0      Po1's member
+# The alias table also maps entity 1001 (the 10G uplink, no PoE) to Po1's ifIndex 5001: a mapping no PoE entry uses.
+POE_CATALYST = {
+    "poeAdmin": walk_rows(POE_ADMIN, {"1.1": "1", "1.2": "2", "1.3": "1", "1.4": "1"}),
+    "poeStatus": walk_rows(POE_STATUS, {"1.1": "3", "1.2": "1", "1.3": "2", "1.4": "2"}),
+    "poeEntPhy": walk_rows(CISCO_POE_ENTPHY, {"1.1": "1013", "1.2": "1014", "1.3": "1015", "1.4": "1016"}),
+    "entAlias": walk_rows(ENT_ALIAS, {"1001.0": f".{IF_INDEX}.5001", "1013.0": f".{IF_INDEX}.10101", "1014.0": f".{IF_INDEX}.10102",
+                                      "1015.0": f".{IF_INDEX}.10103", "1016.0": f".{IF_INDEX}.10104"}),
+}
+CISCO_POWER_CATALYST = walk_rows(CISCO_POE_POWER, {"1.1": "6200", "1.2": "0", "1.3": "0", "1.4": "0"})
+W_CATALYST_POE = {**W_CATALYST, **POE_CATALYST}
 
 # Port and LAG names per vendor, and interfaces that are never ports (name pattern, ifType)
 STYLES = [("Gi1/0/{}", "Po{}"), ("ge-0/0/{}", "ae{}"), ("1/1/{}", "lag{}"), ("GigabitEthernet1/0/{}", "Bridge-Aggregation{}"),
@@ -510,9 +566,9 @@ def random_multivendor_switch(rng: random.Random) -> tuple[dict, dict]:
 # ── The simulated agent: the oracle of the write-path tests ──────────────────────────────────────────────────────────────────────────
 # A switch held the way read_cfg walks it (agent), which takes one SET of rendered varbinds (store) and is then read back. WRITABLE:
 # the walk a written base OID lands in and the snmpset type of its object (dot1qPvid is VlanIndex = Unsigned32, the PortLists and
-# ifAlias are OCTET STRINGs written as hex (ifAlias since R22), ifAdminStatus and vmVlan INTEGERs).
+# ifAlias are OCTET STRINGs written as hex (ifAlias since R22), ifAdminStatus, vmVlan and pethPsePortAdminEnable INTEGERs).
 WRITABLE = {VLAN_EGRESS: ("vlanEgress", "x"), VLAN_UNTAGGED: ("vlanUntagged", "x"), PVID: ("pvid", "u"), IF_ADMIN: ("ifAdmin", "i"),
-            IF_ALIAS: ("ifAlias", "x"), VMVLAN: ("vmVlan", "i")}
+            IF_ALIAS: ("ifAlias", "x"), VMVLAN: ("vmVlan", "i"), POE_ADMIN: ("poeAdmin", "i")}
 PORTLISTS = {VLAN_EGRESS: "egress", VLAN_UNTAGGED: "untagged"}
 
 
@@ -525,16 +581,21 @@ def agent(W: dict) -> dict:
 def store(W: dict, ops) -> dict:
     """The simulated agent: W after one SET of `ops`. Each varbind replaces the row of exactly its OID, in the format the walk prints:
     hex pairs for a PortList and for ifAlias, numbers bare (or adds it: an agent has a PVID / ifAlias for every bridge port /
-    interface even where a fixture leaves the row out). Refused like on a switch: an object that is not one of the six writable ones,
-    a type that is not the object's, a PortList of a VLAN the switch does not have, a number or hex value that is none, an
-    ifAdminStatus other than up / down, an OID twice in one PDU."""
+    interface even where a fixture leaves the row out). Refused like on a switch: an object that is not one of the seven writable
+    ones, a type that is not the object's, a PortList of a VLAN the switch does not have, a PoE entry it does not have (its index is
+    <group>.<port>), a number or hex value that is none, an ifAdminStatus other than up / down, a pethPsePortAdminEnable other than
+    true / false, an OID twice in one PDU."""
     edits: dict[str, dict[str, str]] = {}
     for oid, typ, value in ops:
-        base, _, index = oid.rpartition(".")
+        poe = oid.startswith(POE_ADMIN + ".")
+        base, index = (POE_ADMIN, oid[len(POE_ADMIN) + 1:]) if poe else oid.rpartition(".")[::2]
         assert base in WRITABLE, f"write to an object the switch does not have: {oid}"
         key, want = WRITABLE[base]
         assert typ == want, (oid, typ)
-        assert index.isascii() and index.isdigit(), oid
+        assert re.fullmatch(r"[0-9]+\.[0-9]+" if poe else r"[0-9]+", index), oid
+        if poe:
+            assert oid in dict(W.get(key, [])), f"PoE entry the switch does not have: {oid}"
+            assert value in ("1", "2"), (oid, value)
         assert index not in edits.setdefault(key, {}), f"{oid} twice in one PDU"
         if typ == "x":
             assert re.fullmatch(r"(?:[0-9A-F]{2})*", value), (oid, value)

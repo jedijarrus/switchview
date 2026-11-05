@@ -6,7 +6,8 @@ is sent to (a wrong OID base is a write to the wrong object). So the tests pin t
 driver, every OID value and the way a switches row becomes a driver.
 
 The expected values are written out here by hand, independent of app/drivers.py. The OID bases were checked against the MIB
-definitions: Q-BRIDGE-MIB (RFC 2674 / 4363), IF-MIB (RFC 2863), POWER-ETHERNET-MIB (RFC 3621) and CISCO-VLAN-MEMBERSHIP-MIB.
+definitions: Q-BRIDGE-MIB (RFC 2674 / 4363), IF-MIB (RFC 2863), POWER-ETHERNET-MIB (RFC 3621), CISCO-VLAN-MEMBERSHIP-MIB, and for PoE
+(Task 12) HP-ICF-POE-MIB, CISCO-POWER-ETHERNET-EXT-MIB (Cisco's own cisco-mibs repository) and ENTITY-MIB (RFC 6933).
 Nothing here needs net-snmp, a network or an environment. The modules are imported flat (app/ is on sys.path via pytest.ini),
 exactly as the app imports them.
 """
@@ -23,6 +24,8 @@ from drivers import DRIVERS, Driver, can, driver_for
 NAMES = ["procurve", "aruba_cx", "cisco", "cisco_sb", "comware", "juniper", "arista", "dell", "netgear", "mikrotik", "generic"]
 
 SNMP_CAPS = {"snmp_vlan", "snmp_admin", "snmp_name", "snmp_poe"}
+# R31: RouterOS is not known to expose PoE through POWER-ETHERNET-MIB; unverified, so mikrotik has no PoE (fail closed).
+NO_POE = {"mikrotik"}
 CLI_CAPS = {"cli", "nac", "backup"}    # only reachable through the SSH CLI, so only the ProCurve driver may have them
 # R26: whether an SNMP set persists depends on the device. ProCurve / AOS-S saves it by itself (implicit write memory); for no other
 # driver is that confirmed, so only ProCurve has it.
@@ -39,12 +42,31 @@ STANDARD_OIDS = {
     "ifadmin": "1.3.6.1.2.1.2.2.1.7",             # ifAdminStatus, 1 = up / 2 = down, .<ifIndex>
     "ifalias": "1.3.6.1.2.1.31.1.1.1.18",         # ifAlias, DisplayString, .<ifIndex>
     # POWER-ETHERNET-MIB: pethPsePortEntry is 1.3.6.1.2.1.105.1.1.1 and its columns follow directly (AdminEnable = 3,
-    # DetectionStatus = 6), instance .<group>.<port>. Spec 3 writes ...105.1.1.1.1.3 and ...1.6, one ".1" too many:
-    # ...105.1.1.1.1 is the index column pethPsePortGroupIndex (not-accessible), so a SET to that OID could never take effect.
+    # DetectionStatus = 6), instance .<group>.<port> (R4). Not ...105.1.1.1.1.3 / ...1.6 with one ".1" more: ...105.1.1.1.1 is the
+    # index column pethPsePortGroupIndex (not-accessible), so a SET to that OID could never take effect.
     "poe_admin": "1.3.6.1.2.1.105.1.1.1.3",       # pethPsePortAdminEnable, TruthValue 1 = on / 2 = off
     "poe_status": "1.3.6.1.2.1.105.1.1.1.6",      # pethPsePortDetectionStatus
 }
 VMVLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"    # vmVlan (CISCO-VLAN-MEMBERSHIP-MIB), INTEGER 0..4095, .<ifIndex>
+# PoE beyond RFC 3621 (Task 12), only where a vendor MIB defines it. Both power tables AUGMENT pethPsePortEntry (index .<group>.<port>).
+#   HP-ICF-POE-MIB: hpicfCommon = 1.3.6.1.4.1.11.2.14.11.1 (HP-ICF-OID), hpicfPOE = { hpicfCommon 9 }, hpicfPoe = { hpicfPOE 1 },
+#   hpicfPoePethPsePortTable = { hpicfPoe 1 }, its entry .1, hpicfPoePethPsePortPower = { entry 3 }: "Power supplied at this port", mW
+HP_POE_POWER = "1.3.6.1.4.1.11.2.14.11.1.9.1.1.1.3"
+#   CISCO-POWER-ETHERNET-EXT-MIB = { ciscoMgmt 402 } = 1.3.6.1.4.1.9.9.402, cpeExtPsePortTable = { cpeExtMIBObjects 2 }, entry .1:
+#   cpeExtPsePortPwrConsumption = { entry 9 } (Unsigned32, milliwatts), cpeExtPsePortEntPhyIndex = { entry 11 } (entPhysicalIndex of the
+#   PSE port, 0 = none). (One third-party MIB browser lists them as .8 and .10; Cisco's own MIB file says 9 and 11.)
+CISCO_POE_POWER = "1.3.6.1.4.1.9.9.402.1.2.1.9"
+CISCO_POE_ENTPHY = "1.3.6.1.4.1.9.9.402.1.2.1.11"
+#   ENTITY-MIB (RFC 6933): entAliasMappingIdentifier = { entAliasMappingEntry 2 }, entry = entAliasMappingTable.1 = entityMapping.2.1,
+#   entityMapping = entityMIBObjects.3 = mib-2.47.1.3; index .<entPhysicalIndex>.<entAliasLogicalIndexOrZero>, value ifIndex.<N>
+ENT_ALIAS = "1.3.6.1.2.1.47.1.3.2.1.2"
+# The extra OIDs per driver, on top of STANDARD_OIDS
+EXTRA_OIDS = {
+    "procurve": {"poe_power": HP_POE_POWER},
+    "cisco": {"vmvlan": VMVLAN, "poe_power": CISCO_POE_POWER, "poe_entphy": CISCO_POE_ENTPHY, "ent_alias": ENT_ALIAS},
+}
+# How a PoE entry finds its port (poller.poe_ports): through ENTITY-MIB on cisco, by ifIndex everywhere else
+POE_INDEX = {"cisco": "cisco_entity"}
 
 
 def _sqlite_rows(sql: str, *rows: tuple) -> list[sqlite3.Row]:
@@ -67,7 +89,8 @@ def test_registry_has_the_planned_drivers():
 
 
 def test_driver_shape():
-    assert [f.name for f in dataclasses.fields(Driver)] == ["name", "caps", "vlan_strategy", "oids", "notes"]
+    assert [f.name for f in dataclasses.fields(Driver)] == ["name", "caps", "vlan_strategy", "oids", "notes", "poe_index"]
+    assert Driver(name="x", caps=frozenset(), vlan_strategy="qbridge", oids={}, notes="n").poe_index == "ifindex"    # the default
     for key, driver in DRIVERS.items():
         assert isinstance(driver.caps, frozenset), key
         assert isinstance(driver.notes, str) and driver.notes.strip(), key
@@ -95,9 +118,9 @@ def test_cisco_is_snmp_only():
 @pytest.mark.parametrize("name", NAMES)
 def test_capability_table(name):
     # all eight capabilities asked through can(), not only read from .caps: ProCurve has all, everyone else the four snmp_* write ones
-    # (no snmp_autosave: R26)
+    # (no snmp_autosave: R26), mikrotik without snmp_poe (R31)
     driver = DRIVERS[name]
-    expected = ALL_CAPS if name == "procurve" else SNMP_CAPS
+    expected = ALL_CAPS if name == "procurve" else SNMP_CAPS - {"snmp_poe"} if name in NO_POE else SNMP_CAPS
     assert {op for op in ALL_CAPS if can(driver, op)} == expected
     assert driver.caps == expected
 
@@ -152,15 +175,24 @@ def test_all_drivers_have_required_oids():
             assert key in driver.oids, f"{name} lacks the {key} OID"
         if driver.vlan_strategy == "cisco_vmps":
             assert "vmvlan" in driver.oids, f"{name} uses cisco_vmps but has no vmvlan OID"
+        if driver.poe_index == "cisco_entity":
+            assert {"poe_entphy", "ent_alias"} <= set(driver.oids), f"{name} maps PoE through ENTITY-MIB but lacks its OIDs"
 
 
 @pytest.mark.parametrize("name", NAMES)
 def test_oid_profile_is_pinned(name):
-    # exact keys and values: vmvlan only on a cisco_vmps driver, no stray entries, no typo in any OID
-    expected = dict(STANDARD_OIDS)
-    if DRIVERS[name].vlan_strategy == "cisco_vmps":
-        expected["vmvlan"] = VMVLAN
-    assert DRIVERS[name].oids == expected
+    # exact keys and values: vmvlan only on a cisco_vmps driver, a PoE power OID only where a vendor MIB has one (ProCurve, Cisco), the
+    # entity mapping only on cisco, no stray entries, no typo in any OID
+    assert DRIVERS[name].oids == {**STANDARD_OIDS, **EXTRA_OIDS.get(name, {})}
+    assert ("vmvlan" in DRIVERS[name].oids) is (DRIVERS[name].vlan_strategy == "cisco_vmps")
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_poe_index_per_driver(name):
+    # RFC 3621 does not relate <group>.<port> to an ifIndex: cisco maps through ENTITY-MIB (classic IOS numbers the PoE entries by the
+    # port number on the stack member, its ifIndexes start at 10101), every other driver by the default "group 1, index = ifIndex"
+    assert DRIVERS[name].poe_index == POE_INDEX.get(name, "ifindex")
+    assert {d.poe_index for d in DRIVERS.values()} <= {"ifindex", "cisco_entity"}
 
 
 def test_oids_are_plain_numeric_bases():

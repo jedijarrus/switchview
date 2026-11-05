@@ -16,10 +16,12 @@ oder eine PVID, die nicht sein ungetaggtes VLAN ist), steht ohne u in raw["unman
 Port mit vmVlan-Zeile ein Access-Port, dessen VLAN aus vmVlan kommt, dem Objekt, das der Schreibweg dort setzt (so liest das Pruefen
 zurueck, was geschrieben wurde).
 
-Zwei Index-Raeume, nie vermischen:
+Drei Index-Raeume, nie vermischen:
   Bridge-Port (dot1dBasePort)  dot1qPvid und die Bits der PortLists (Egress / Untagged)
   ifIndex                      ifAdminStatus, ifAlias, vmVlan (und ifName, der Portname)
-raw haelt beide getrennt: port2bp / bp2port fuer die Q-BRIDGE-Seite, ifindex fuer die IF-MIB-Seite.
+  PoE-Eintrag <Gruppe>.<Port>  pethPsePortAdminEnable (POWER-ETHERNET-MIB); zu welchem Port er gehoert, entscheidet allein
+                               poller.poe_ports (sicher oder gar nicht, wie fuer die Anzeige)
+raw haelt sie getrennt: port2bp / bp2port fuer die Q-BRIDGE-Seite, ifindex fuer die IF-MIB-Seite, poe fuer die PoE-Eintraege.
 
 render_ops macht aus dem Ziel pro Port (desired aus changes.plan_ports) die Varbinds fuer EIN snmpset, gerechnet auf den Bytes genau
 dieses Reads: jede PortList wird gelesen, nur die Bits der geaenderten Ports kippen, und sie geht ganz zurueck. Ein Revert ist kein
@@ -38,7 +40,8 @@ import snmp
 
 # Die Walks von read_cfg: Schluessel aus poller.O, die beiden PortLists als Hex wie im Poller (poller.HEX). Fuer pvid, egress, untagged,
 # ifadmin und ifalias hat jeder Treiber dieselben OIDs wie poller.O (tests/test_drivers.py), gelesen wird also, was geschrieben wird.
-# Dazu "ifType" fuer jeden Treiber, dessen Ports select_ports danach waehlt (poller.by_iftype: alle ausser procurve).
+# Dazu "ifType" fuer jeden Treiber, dessen Ports select_ports danach waehlt (poller.by_iftype: alle ausser procurve), und die PoE-Walks
+# des Treibers (poller.poe_walks, OIDs aus driver.oids, ohne die Leistung: die braucht nur die Anzeige).
 WALKS = ("ifName", "ifAlias", "ifAdmin", "bp2if", "vlanName", "vlanEgress", "vlanUntagged", "pvid", "ifStack")
 # Freitext, den read_cfg als Hex walkt (R18). Ohne MIBs gibt net-snmp einen OCTET STRING mit einem Byte, das es nicht fuer druckbar
 # haelt (etwa jedes Byte eines Umlauts in UTF-8), als nacktes Hex aus, alle 16 Bytes umbrochen; ein strikter Text-Walk lehnt das ab
@@ -69,27 +72,31 @@ def _vids(vids) -> str:
 
 def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None = None, text_hex: bool = False) -> tuple[dict, dict]:
     """(cfg, raw) aus den Walk-Zeilen W: Schluessel wie in WALKS -> [(oid, wert), ...], so wie poller.poll_switch sie sammelt, dazu
-    "ifType", wenn driver_name die Ports danach waehlt (poller.by_iftype; fehlt er dann, ist das ein KeyError des Aufrufers), und bei
+    "ifType", wenn driver_name die Ports danach waehlt (poller.by_iftype; fehlt er dann, ist das ein KeyError des Aufrufers), bei
     vlan_strategy cisco_vmps "vmVlan" (dann ist vmvlan_base die OID, unter der diese Zeilen gewalkt wurden; wie bei jedem anderen
-    Walk zaehlen nur Zeilen darunter). Weitere Schluessel stoeren nicht. Rein, ohne I/O. Welche Interfaces Ports und Trunks sind,
-    entscheidet poller.select_ports fuer driver_name, genau wie in der Anzeige. text_hex (nur read_cfg): die Spalten aus
-    TEXT_AS_HEX kommen als Hex und werden zu Text (UTF-8, sonst latin-1); ohne text_hex (Zeilen im Format des Pollers) bleiben sie,
-    wie sie sind.
+    Walk zaehlen nur Zeilen darunter) und die PoE-Walks des Treibers (poller.poe_walks; ein fehlender ist leer). Der Treiber ist der
+    namens driver_name (drivers.driver_for). Weitere Schluessel stoeren nicht. Rein, ohne I/O. Welche Interfaces Ports und Trunks
+    sind, entscheidet poller.select_ports fuer driver_name, genau wie in der Anzeige, welcher PoE-Eintrag zu welchem Port gehoert
+    poller.poe_ports, ebenso. text_hex (nur read_cfg): die Spalten aus TEXT_AS_HEX kommen als Hex und werden zu Text (UTF-8, sonst
+    latin-1); ohne text_hex (Zeilen im Format des Pollers) bleiben sie, wie sie sind.
 
     cfg hat genau die Schluessel von cfgparse.parse_config. Vom Switch gelesen sind vlans ({vid: Name}, nach Nummer), trunks
     ({Trunk: [Mitglieder]}; Trunk ist der ifName, TrkN bei ProCurve, sonst der des LAG, etwa Po1, ae0, auch ein LAG ohne Mitglieder)
     und ports. Jeder Port hat die Felder von cfgparse._empty_port plus "poe": u ist das VLAN, in dessen
     Untagged-Liste das Bit des Ports steht (sonst None), t sind die uebrigen VLANs mit Egress-Bit (nach Nummer), name ist ifAlias,
-    en ist ifAdminStatus == 1 (up). Ein Port mit vmVlan-Zeile ist ein Access-Port: u ist der vmVlan-Wert (0 = kein VLAN = None),
-    t ist leer, die Q-BRIDGE-Sicht auf u / t zaehlt fuer ihn nicht. Alles andere liest SNMP hier nicht und steht auf dem Wert einer
-    leeren Konfiguration: hostname "" (read_cfg traegt sys_name ein), primary_vlan "1", mgmt_vlan None, auth_active / eap_radius /
-    login_radius False, addr_format None, voice_vlans [], radius {}; pro Port x / m False, cl / al / xuv / muv None (802.1X /
-    MAC-Auth nur ueber die CLI) und poe None.
+    en ist ifAdminStatus == 1 (up), poe ist pethPsePortAdminEnable == 1 (an) des Eintrags, den poller.poe_ports ihm sicher zuordnet,
+    None ohne einen (kein PoE, oder nicht sicher zuzuordnen). Ein Port mit vmVlan-Zeile ist ein Access-Port: u ist der vmVlan-Wert
+    (0 = kein VLAN = None), t ist leer, die Q-BRIDGE-Sicht auf u / t zaehlt fuer ihn nicht. Alles andere liest SNMP hier nicht und steht
+    auf dem Wert einer leeren Konfiguration: hostname "" (read_cfg traegt sys_name ein), primary_vlan "1", mgmt_vlan None, auth_active /
+    eap_radius / login_radius False, addr_format None, voice_vlans [], radius {}; pro Port x / m False, cl / al / xuv / muv None (802.1X /
+    MAC-Auth nur ueber die CLI).
 
     raw: egress / untagged {vid: Bytes der PortList, wie gelesen}; pvid {Port: vid} ueber den effektiven Bridge-Port; admin
-    {Port: int}; alias {Port: str}, nur wo der Switch eine Zeile liefert; poe {}; port2bp {Port: effektiver Bridge-Port};
-    bp2port {Bridge-Port: Port, dem er gehoert}; ifindex {Port: ifIndex}; unmanaged {Port: Grund}, Ports, die der Schreibweg nicht
-    anfassen darf; vmvlan {Port: vmVlan wie gelesen}, nur Ports mit vmVlan-Zeile. Ein Port ohne Bridge-Port fehlt in port2bp und pvid.
+    {Port: int}; alias {Port: str}, nur wo der Switch eine Zeile liefert; poe {Port: {"group", "index", "admin", "status"}} (der
+    PoE-Eintrag <group>.<index>, admin 1 an / 2 aus, status pethPsePortDetectionStatus), nur Ports mit sicher zugeordnetem Eintrag;
+    poe_unmapped [PoE-Indexe "<Gruppe>.<Port>" ohne Port]; port2bp {Port: effektiver Bridge-Port}; bp2port {Bridge-Port: Port, dem er
+    gehoert}; ifindex {Port: ifIndex}; unmanaged {Port: Grund}, Ports, die der Schreibweg nicht anfassen darf; vmvlan {Port: vmVlan wie
+    gelesen}, nur Ports mit vmVlan-Zeile. Ein Port ohne Bridge-Port fehlt in port2bp und pvid.
 
     Nur der Port faellt heraus (raw["unmanaged"], kein u; t und raw bleiben, wie gelesen), wenn er in mehr als einem VLAN ungetaggt
     ist (Hybrid-/General-Port; das gilt auch mit vmVlan-Zeile), oder wenn er ohne vmVlan-Zeile genau ein ungetaggtes VLAN hat, sein
@@ -103,6 +110,9 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
       - ein Port kein lesbares ifAdminStatus hat (er gaelte sonst als aus, und ein Revert wuerde ihn abschalten),
       - ein Portname doppelt vorkommt (ein Schreibzugriff auf diesen Port waere nicht eindeutig),
       - die vmVlan-Zeile eines Ports keine Zahl ist oder ein vmVlan-Index kein ifIndex (falsche Basis-OID),
+      - die PoE-Tabelle da ist, aber nicht sicher lesbar (poller.poe_ports mit strict: Admin- und Status-Spalte mit verschiedenen
+        Eintraegen, ein Index, der nicht <Gruppe>.<Port> ist, ein Wert, der keiner ist, bei cisco_entity dasselbe fuer die Tabellen der
+        Zuordnung). Gar keine PoE-Zeile ist kein Fehler: dann hat kein Port PoE,
       - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0" oder mit text_hex ein Freitext, der kein Hex ist; hier
         wird jeder ValueError zu SnmpError. Ein KeyError bleibt einer: jeder Zugriff auf Switch-Daten ist abgesichert, er kann nur ein
         Fehler im Code sein).
@@ -110,15 +120,19 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
     rows = {k: W[k] for k in ((*WALKS, "ifType") if poller.by_iftype(driver_name) else WALKS)}
     if "vmVlan" in W and not vmvlan_base:
         raise TypeError("build_cfg: vmVlan-Zeilen ohne vmvlan_base (die OID, unter der sie gewalkt wurden)")
+    driver = drivers.driver_for({"driver": driver_name})
+    poe = {k: poller._tbl(W.get(k, []), base) for k, base in poller.poe_walks(driver).items()}
     try:
-        return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {}, driver_name, text_hex)
+        return _synth(rows, poller._tbl(W["vmVlan"], vmvlan_base) if "vmVlan" in W else {}, driver_name, text_hex, driver, poe)
     except ValueError as e:
         raise snmp.SnmpError(f"Unerwartete SNMP-Daten (Index oder Wert nicht lesbar): {e}") from e
 
 
-def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool) -> tuple[dict, dict]:
+def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool, driver: drivers.Driver,
+           poe_tables: dict[str, dict[str, str]]) -> tuple[dict, dict]:
     """Der Kern von build_cfg: rows = die Walks aus WALKS (plus ifType, wenn driver_name nach ihm waehlt), vmvlan = {ifIndex: vmVlan}
-    (leer ohne vmVlan-Walk), text_hex wie bei build_cfg."""
+    (leer ohne vmVlan-Walk), text_hex wie bei build_cfg, driver der Treiber namens driver_name, poe_tables seine PoE-Tabellen
+    (_tbl-Tabellen der Walks aus poller.poe_walks)."""
     tbl = {k: poller._tbl(v, poller.O[k]) for k, v in rows.items()}
     if text_hex:
         for k in TEXT_AS_HEX:
@@ -146,11 +160,13 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool)
     egress = {k: snmp.bitmap_ports(v) for k, v in eg_hex.items()}
     untag = {k: snmp.bitmap_ports(v) for k, v in un_hex.items()}
     port_ifis, member_of, members = poller.select_ports(ifname, tbl.get("ifType", {}), tbl["ifStack"], driver_name)
+    trunks = poller.trunk_ports(ifname, port_ifis, members, driver_name)
+    poe, unmapped = poller.poe_ports(driver, poe_tables, [ifi for ifi in port_ifis if ifi not in trunks], strict=True)
 
     raw: dict = {"egress": {k: snmp.hex_to_bytes(v) for k, v in eg_hex.items()},
                  "untagged": {k: snmp.hex_to_bytes(v) for k, v in un_hex.items()},
-                 "pvid": {}, "admin": {}, "alias": {}, "poe": {}, "port2bp": {}, "bp2port": {}, "ifindex": {}, "unmanaged": {},
-                 "vmvlan": {}}
+                 "pvid": {}, "admin": {}, "alias": {}, "poe": {}, "poe_unmapped": unmapped, "port2bp": {}, "bp2port": {}, "ifindex": {},
+                 "unmanaged": {}, "vmvlan": {}}
     ports: dict[str, dict] = {}
     kept: dict[str, str] = {}  # ifIndex -> Portname
     for ifi in port_ifis:
@@ -179,14 +195,17 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool)
             raw["unmanaged"][name] = (f"PVID {pvid[eff]} weicht vom ungetaggten VLAN {u} ab (Fehlkonfiguration oder dynamisch per "
                                       f"802.1X/RADIUS zugewiesen) – per SNMP nicht verwaltbar")
             u = None
+        pe = poe.get(ifi)
         st = cfgparse._empty_port()
-        st.update(u=u, t=tg, name=alias.get(ifi, ""), en=admin[ifi] == "1", poe=None)
+        st.update(u=u, t=tg, name=alias.get(ifi, ""), en=admin[ifi] == "1", poe=pe["admin"] == 1 if pe else None)
         ports[name] = st
         kept[ifi] = name
         raw["ifindex"][name] = int(ifi)
         raw["admin"][name] = int(admin[ifi])
         if ifi in alias:
             raw["alias"][name] = alias[ifi]
+        if pe:
+            raw["poe"][name] = {"group": pe["group"], "index": pe["index"], "admin": pe["admin"], "status": pe["status"]}
         if eff:
             raw["port2bp"][name] = int(eff)
             if eff in pvid:
@@ -210,10 +229,11 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
     Liest mit der LESE-Identitaet (poller.creds_of(row)), alle Walks parallel und strikt (snmp.walk(strict=True)): ein Walk, der
     mittendrin abbricht, oder eine fremde Zeile hinter einem Wert ist ein Fehler, keine kuerzere oder falsche Tabelle. Waehlt der
     Treiber seine Ports nach ifType (poller.by_iftype, alle ausser procurve), kommt ifType als weiterer Walk dazu; ProCurve braucht
-    ihn nicht und hat damit auch keinen weiteren Walk, der scheitern kann. Bei driver.vlan_strategy "cisco_vmps" kommt
-    driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg). Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex,
-    damit Umlaute lesbar sind; build_cfg bekommt driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder
-    den Poll-Lock noch den Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
+    ihn nicht. Bei driver.vlan_strategy "cisco_vmps" kommt driver.oids["vmvlan"] dazu (W["vmVlan"], siehe build_cfg), bei einem
+    Treiber mit snmp_poe seine PoE-Walks (poller.poe_walks, ohne die Leistung), auch fuer eine Aenderung, die PoE nicht beruehrt: cfg
+    beschreibt immer den ganzen Port. Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex, damit Umlaute lesbar sind;
+    build_cfg bekommt driver.name und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den
+    Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
@@ -226,6 +246,7 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
         walks["ifType"] = (poller.O["ifType"], False)
     if vm_base:
         walks["vmVlan"] = (vm_base, False)
+    walks |= {k: (base, False) for k, base in poller.poe_walks(driver).items()}
     results = await asyncio.gather(*(snmp.walk(host, cred, oid, hex_values=hx, strict=True) for oid, hx in walks.values()),
                                    return_exceptions=True)
     for r in results:
@@ -238,10 +259,11 @@ async def read_cfg(row, driver) -> tuple[dict, dict]:
 
 # ── Operationen rendern ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 # Felder, die render_ops schreibt, und die Faehigkeit des Treibers, die jedes braucht (drivers.can). Jedes andere Feld lehnt es ab:
-# 802.1X / MAC-Anmeldung (x, m, cl, al, xuv, muv) gehen nur ueber die CLI, poe kommt erst mit dem PoE-Schreibweg. pvid (R21) ist die
-# PVID ausdruecklich, fuer einen Revert, der sie wiederherstellt; cfg kennt sie nicht, sie steht nur in raw["pvid"].
-FIELD_CAPS = {"u": "snmp_vlan", "pvid": "snmp_vlan", "t": "snmp_vlan", "en": "snmp_admin", "name": "snmp_name"}
-_CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portnamen"}
+# 802.1X / MAC-Anmeldung (x, m, cl, al, xuv, muv) gehen nur ueber die CLI. pvid (R21) ist die PVID ausdruecklich, fuer einen Revert,
+# der sie wiederherstellt; cfg kennt sie nicht, sie steht nur in raw["pvid"]. poe (an / aus) geht bei jedem Treiber nur hier (R30).
+FIELD_CAPS = {"u": "snmp_vlan", "pvid": "snmp_vlan", "t": "snmp_vlan", "en": "snmp_admin", "name": "snmp_name", "poe": "snmp_poe"}
+_CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portnamen", "snmp_poe": "PoE"}
+POE_DELIVERING = 3    # pethPsePortDetectionStatus deliveringPower(3): der Port versorgt gerade ein Geraet (changes.plan_ports warnt)
 ALIAS_MAX = 64  # ifAlias ist DisplayString SIZE (0..64): hoechstens 64 Bytes, geschrieben werden die UTF-8-Bytes des Namens
 _RUNS = re.compile(r"[0-9]+|[^0-9]+")
 _VLAN_ID = re.compile(r"[1-9][0-9]{0,3}")  # eine VLAN-ID, wie ein Walk sie zeigt: Dezimal ohne fuehrende Null (1..4094 prueft int)
@@ -301,8 +323,8 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
     Ports weiter. Gerechnet auf cfg / raw desselben Reads (read_cfg); die Reihenfolge der Pruefungen ist der Vorrang der Gruende.
 
     Abgelehnt wird
-      - ein Port, den es nicht gibt, und ein anderes Feld als u / pvid / t / en / name (802.1X / MAC-Anmeldung gehen nur ueber die CLI,
-        PoE kommt erst mit dem PoE-Schreibweg);
+      - ein Port, den es nicht gibt, und ein anderes Feld als u / pvid / t / en / name / poe (802.1X / MAC-Anmeldung gehen nur ueber die
+        CLI);
       - ein Port in raw["unmanaged"]; ein Trunk-Mitglied (der Trunk selbst geht: er ist ein Bridge-Port); ein Port ohne Bridge-Port oder
         ifIndex (nur Anzeige, auch kein Abschalten) oder dessen Bridge-Port laut raw["bp2port"] nicht ihm gehoert; ein Feld, dessen
         Faehigkeit der Treiber nicht hat (FIELD_CAPS, drivers.can);
@@ -311,8 +333,11 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
       - wenn sich VLANs aendern (u, t oder eine pvid): bei cisco_vmps (R20) jede pvid und alles ausser dem Access-VLAN eines Ports mit
         vmVlan-Zeile, auch keins (vmVlan 0); bei qbridge ein Port, den der Read per vmVlan beschreibt; ein VLAN, das es auf dem Switch
         nicht gibt, auch als pvid (R23); u zugleich in t; ein Port ohne jedes VLAN; eine pvid neben einem anderen ungetaggten VLAN (der
-        Port waere danach nicht verwaltbar, R12); jede andere vlan_strategy.
-    Was nur mehrere Ports zusammen betrifft (zwei Ports einer Aenderung auf einem ifIndex), prueft render_ops selbst."""
+        Port waere danach nicht verwaltbar, R12); jede andere vlan_strategy;
+      - PoE (poe, nicht wahr oder falsch: abgelehnt) an einem Port ohne PoE-Eintrag in raw["poe"]: ein Trunk (PoE hat nur ein einzelner
+        Port), ein Port ohne PoE, und einer, dessen Eintrag poller.poe_ports nicht sicher zuordnen konnte (raw["poe_unmapped"] nennt die
+        Eintraege ohne Port). Ein SET auf einen geratenen Eintrag schaltete womoeglich ein anderes Geraet ab.
+    Was nur mehrere Ports zusammen betrifft (zwei Ports einer Aenderung auf einem ifIndex oder PoE-Eintrag), prueft render_ops selbst."""
     p, d = port, fields
     if not d:
         return None
@@ -353,8 +378,26 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
     if "en" in d and not isinstance(d["en"], bool):
         return f"en ist nicht wahr oder falsch ({d['en']!r})"
     if "name" in d:
-        return _name_refusal(d["name"])
+        reason = _name_refusal(d["name"])
+        if reason:
+            return reason
+    if "poe" in d:
+        return _poe_refusal(cfg, raw, p, d["poe"])
     return None
+
+
+def _poe_refusal(cfg: dict, raw: dict, p: str, on) -> str | None:
+    """Warum Port p sein PoE nicht auf `on` (an True, aus False) bekommt; sonst None."""
+    if not isinstance(on, bool):
+        return f"poe ist nicht wahr oder falsch ({on!r})"
+    if p in raw["poe"]:
+        return None
+    if p in cfg["trunks"]:
+        return "PoE nur an einzelnen Ports: nicht am Trunk und noch nicht an Trunk-Mitgliedern"
+    if raw["poe_unmapped"]:
+        return ("hat kein PoE, oder sein PoE-Eintrag lässt sich nicht sicher zuordnen "
+                f"(Einträge ohne Port: {poller.poe_listing(raw['poe_unmapped'])})")
+    return "hat kein PoE" if raw["poe"] else "hat kein PoE (der Switch meldet keine PoE-Ports)"
 
 
 def _name_refusal(name) -> str | None:
@@ -443,14 +486,15 @@ def _vlan_ops(driver, raw: dict, p: str, st: dict, u: str | None, t: list[str], 
 
 
 def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> tuple[list[tuple[str, str, str]], list[str]]:
-    """Die Aenderung `desired` ({Port: {Feld: Zielwert}} mit u, pvid, t, en, name, wie changes.plan_ports sie plant) als Varbinds fuer
-    EIN snmpset, gerechnet auf cfg / raw desselben Reads (read_cfg). Ergebnis (ops, shown):
+    """Die Aenderung `desired` ({Port: {Feld: Zielwert}} mit u, pvid, t, en, name, poe, wie changes.plan_ports sie plant) als Varbinds
+    fuer EIN snmpset, gerechnet auf cfg / raw desselben Reads (read_cfg). Ergebnis (ops, shown):
       ops    [(OID, Typ, Wert)] fuer snmp.set_vars. dot1qPvid "u" (VlanIndex = Unsigned32), PortList "x" (snmp.portlist_to_hex),
              ifAdminStatus "i" ("1" an, "2" aus), ifAlias "x" (die UTF-8-Bytes des Namens als Hex: dasselbe OCTET STRING wie mit
-             "s", aber snmpset liest den Wert nie als Option, R22), vmVlan "i".
+             "s", aber snmpset liest den Wert nie als Option, R22), vmVlan "i", pethPsePortAdminEnable "i" ("1" an, "2" aus).
       shown  je Port und geaendertem Feld eine Zeile mit vorher und nachher: "Port 6: VLAN ungetaggt 1 → 20", "Port 3: PVID 99 → 1",
-             "Port 1: VLAN getaggt 30 → 30, 99", "Port 2: an → aus", 'Port 2: Name "" → "Drucker"' ("–" heisst keins); Ports in
-             natuerlicher Reihenfolge, Felder in der Reihenfolge u, pvid, t, en, name. Daraus entsteht der Token (changes.cmd_token).
+             "Port 1: VLAN getaggt 30 → 30, 99", "Port 2: an → aus", 'Port 2: Name "" → "Drucker"', "Port 5: PoE an → aus" ("–"
+             heisst keins); Ports in natuerlicher Reihenfolge, Felder in der Reihenfolge u, pvid, t, en, name, poe. Daraus entsteht der
+             Token (changes.cmd_token).
              PortList-Bytes stehen nie darin: aendert sich nach der Vorschau ein anderer Port derselben PortList, bleibt der Token (R6),
              und die ops kommen beim Ausfuehren ohnehin aus einem frischen Read; aendert sich der Port selbst, aendert sich seine Zeile.
 
@@ -463,18 +507,23 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
     neue ungetaggte VLAN; bei u -> None ohne pvid wird keine PVID geschrieben. Hat der Port danach ein ungetaggtes VLAN, muss eine
     ausdrueckliche pvid es sein (sonst waere er per SNMP nicht verwaltbar, R12). Eine pvid, die schon gilt, schreibt nichts (ausser
     zusammen mit u). cisco_vmps (R20): VLANs nur als Access-VLAN eines Ports mit vmVlan-Zeile, ueber vmVlan.<ifIndex>, keine pvid. An/Aus
-    und Name bei jedem Treiber ueber IF-MIB: ifAdminStatus / ifAlias .<ifIndex>.
+    und Name bei jedem Treiber ueber IF-MIB: ifAdminStatus / ifAlias .<ifIndex>. PoE (R30, jeder Treiber mit snmp_poe):
+    pethPsePortAdminEnable.<Gruppe>.<Port> des Eintrags, den raw["poe"] dem Port zuordnet (poller.poe_ports), nie ifIndex oder
+    Bridge-Port.
 
     Feste Reihenfolge der Varbinds (das SET-PDU wirkt laut RFC 3416 als Ganzes): Egress, Untagged (je nach VLAN-ID), dot1qPvid (nach
-    Bridge-Port), vmVlan, ifAdminStatus, ifAlias (je nach ifIndex). Ein Feld mit schon dem Zielwert, ein Port ohne Felder: nichts.
+    Bridge-Port), vmVlan, ifAdminStatus, ifAlias (je nach ifIndex), pethPsePortAdminEnable (nach Gruppe, dann Port). Ein Feld mit schon
+    dem Zielwert, ein Port ohne Felder: nichts.
 
     ValueError mit deutschem Grund ("Port X: <Grund>") und ohne Teilergebnis, sobald snmp_block_reason einen Port ablehnt (dort stehen
     die Regeln; changes.plan_ports sperrt solche Ports schon beim Planen und rendert nur die anderen), die Felder eines Ports kein dict
-    sind oder zwei Ports der Aenderung denselben ifIndex haetten. cfg, raw und desired bleiben unveraendert.
+    sind oder zwei Ports der Aenderung denselben ifIndex oder denselben PoE-Eintrag haetten. cfg, raw und desired bleiben unveraendert.
     """
     portlists: dict[str, dict[str, bytes]] = {"egress": {}, "untagged": {}}  # VLAN -> PortList mit allen Bits dieses Plans
     values: dict[str, dict[int, tuple[str, str]]] = {"pvid": {}, "vmvlan": {}, "ifadmin": {}, "ifalias": {}}  # Index -> (Typ, Wert)
     owner: dict[int, str] = {}  # ifIndex -> Port; zwei Ports auf einem ifIndex ueberschrieben einander (Bridge-Ports: bp2port)
+    poe: dict[tuple[int, int], str] = {}  # PoE-Eintrag (Gruppe, Port) -> "1" an / "2" aus
+    poe_owner: dict[tuple[int, int], str] = {}  # PoE-Eintrag -> Port; zwei Ports auf einem schalteten dasselbe Geraet
     shown: list[str] = []
     for p in sorted(desired, key=port_order):
         d = desired[p]
@@ -497,11 +546,18 @@ def render_ops(driver: drivers.Driver, cfg: dict, raw: dict, desired: dict) -> t
         if "name" in d and d["name"] != st["name"]:
             values["ifalias"][ifi] = ("x", d["name"].encode("utf-8").hex().upper())
             shown.append(f"Port {p}: Name {_quote(st['name'])} → {_quote(d['name'])}")
+        if "poe" in d and d["poe"] != st["poe"]:
+            entry = (raw["poe"][p]["group"], raw["poe"][p]["index"])
+            if poe_owner.setdefault(entry, p) != p:
+                raise ValueError(f"Port {p}: PoE-Eintrag {entry[0]}.{entry[1]} gehört auch zu Port {poe_owner[entry]}")
+            poe[entry] = "1" if d["poe"] else "2"
+            shown.append(f"Port {p}: PoE {_onoff(st['poe'])} → {_onoff(d['poe'])}")
     ops = [(f"{driver.oids[kind]}.{vid}", "x", snmp.portlist_to_hex(data))
            for kind in ("egress", "untagged") for vid, data in sorted(portlists[kind].items(), key=lambda kv: int(kv[0]))
            if data != raw[kind][vid]]
     ops += [(f"{driver.oids[kind]}.{index}", typ, value)
             for kind in ("pvid", "vmvlan", "ifadmin", "ifalias") for index, (typ, value) in sorted(values[kind].items())]
+    ops += [(f"{driver.oids['poe_admin']}.{group}.{index}", "i", value) for (group, index), value in sorted(poe.items())]
     return ops, shown
 
 

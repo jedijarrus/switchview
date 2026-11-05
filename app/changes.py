@@ -104,6 +104,8 @@ def _desired_from_set(cfg: dict, ports: list[str], s: dict) -> dict:
             d["t"] = sorted((set(cur["t"]) | set(add)) - set(rem), key=int)
         if s.get("name") is not None:
             d["name"] = s["name"]
+        if s.get("poe") is not None:  # PoE an / aus; nur per SNMP (R30), der SSH-Weg lehnt den Port ab (plan_ports)
+            d["poe"] = s["poe"]
         status = s.get("status")
         if status == "off":
             d["en"] = False
@@ -128,7 +130,8 @@ def _desired_from_set(cfg: dict, ports: list[str], s: dict) -> dict:
         # (J.15 meldet sonst: "Only Web or MAC-authenticator can have unauthenticated VLAN enabled ...")
         if x_new and m_new and cur["xuv"]:
             d["xuv"] = None
-        out[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur[k]) != v}
+        # cur.get: eine running-config kennt kein PoE (port_state hat dann kein "poe"), ein PoE-Feld bleibt dort also stehen
+        out[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur.get(k)) != v}
     return out
 
 
@@ -142,7 +145,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
 
     Gesperrt wird auf beiden Wegen gleich (Uplink / Trunk nur im Expertenmodus, kein NAC auf Uplinks und Trunks, ein Trunk-Mitglied nur
     ueber seinen Trunk, VLANs muss es geben, ...). Trunk ist TrkN oder jeder Trunk / LAG in cfg["trunks"] (Po1, ae0, ...); Mitglied ist
-    ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
+    ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. Per SSH dazu jeder Port mit PoE (R30: PoE nur per SNMP;
+    _commands kennt das Feld nicht und liesse es still weg). Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
     snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...). Ein gesperrter
     Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter geplant;
     ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
@@ -166,8 +170,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             cur = cfgparse.port_state(cfg, p)
             if over_snmp:
                 desired[p] = {k: v for k, v in d.items() if _snmp_differs(raw, p, cur, k, v)}
-            else:
-                desired[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur[k]) != v}
+            else:  # PoE kennt eine running-config nicht: es bleibt stehen, unten wird der Port abgelehnt
+                desired[p] = {k: v for k, v in d.items() if k == "poe" or (sorted(cur[k], key=int) if k == "t" else cur[k]) != v}
     else:
         ports = [str(p) for p in req.get("ports") or []]
         s = req.get("set") or {}
@@ -197,6 +201,9 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             blocked.append({"port": p, "reason": f"gehört zu {trk}, bitte {trk} wählen"})
             continue
         if not d:
+            continue
+        if not over_snmp and "poe" in d:
+            blocked.append({"port": p, "reason": "PoE geht nur per SNMP, nicht über die SSH-CLI"})
             continue
         x_new, m_new = d.get("x", cur["x"]), d.get("m", cur["m"])
         if (d.get("x") or d.get("m")) and (is_trk or p in inv["uplinks"]):
@@ -235,6 +242,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             warnings.append(f"Port {p}: dort hängt {ip['l'][0][0]} (LLDP). Muss sich danach selbst anmelden können")
         if d.get("en") is False and ip["o"]:
             warnings.append(f"Port {p}: hat Link, das Gerät verliert die Verbindung")
+        if d.get("poe") is False and over_snmp and raw["poe"].get(p, {}).get("status") == snmpwrite.POE_DELIVERING:
+            warnings.append(f"Port {p}: versorgt gerade ein Gerät mit Strom (PoE), es verliert die Stromversorgung")
         if d.get("u") == "1":
             warnings.append(f"Port {p}: VLAN 1 ist das Standard-VLAN")
 
@@ -265,7 +274,7 @@ def _snmp_differs(raw: dict, p: str, cur: dict, k: str, v) -> bool:
         return True
     if k == "pvid":
         return raw["pvid"].get(p) != v
-    return (sorted(cur[k], key=int) if k == "t" else cur[k]) != v
+    return (sorted(cur[k], key=int) if k == "t" else cur.get(k)) != v    # cur.get: poe fehlt bei einem Port, den der Read nicht kennt
 
 
 def _snmp_before(driver, cfg: dict, raw: dict, p: str, d: dict) -> dict:
@@ -349,7 +358,7 @@ def verify_ports(cfg_after: dict, desired: dict) -> list[str]:
             # Limits/Gast-VLAN bleiben nach 'no aaa port-access ...' in der Konfiguration stehen, wirken dann aber nicht
             if (k in ("cl", "xuv") and not st["x"]) or (k in ("al", "muv") and not st["m"]):
                 continue
-            have = sorted(st[k], key=int) if k == "t" else st[k]
+            have = sorted(st[k], key=int) if k == "t" else st.get(k)    # ohne PoE-Zustand (poe fehlt / None) passt kein PoE-Ziel
             want = sorted(v, key=int) if k == "t" else v
             if have != want:
                 bad.append(f"Port {p}: {k} ist {have!r}, erwartet {want!r}")
@@ -368,7 +377,8 @@ def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: di
         der Port sonst etwa noch getaggt im alten VLAN. Wechselt u zu einem VLAN und zeigt der Read-back es (sonst meldet verify_ports
         schon u), muss bei Q-BRIDGE dazu dessen Egress-Bit gesetzt sein: ungetaggt ohne Egress zeigt cfg nicht (u kommt aus der
         Untagged-Liste), der Port gaebe das VLAN aber nicht aus.
-      - en und name wie verify_ports, wenn desired sie hat.
+      - en, name und poe wie verify_ports, wenn desired sie hat. poe ist das pethPsePortAdminEnable des Eintrags, den der Read-back dem
+        Port zuordnet (poller.poe_ports); ordnet er keinen mehr zu (poe None), weicht das ab.
       - Die PVID (R21) bei Q-BRIDGE (vlan_strategy "qbridge") fuer einen Port ohne vmVlan-Zeile, gelesen aus raw_after["pvid"]:
         erwartet ist eine ausdrueckliche pvid aus desired, sonst das neue ungetaggte VLAN, wenn u zu einem VLAN wechselt (genau das
         schreibt render_ops). Sonst (u -> None, nur t / en / name) schreibt render_ops keine PVID, und keine wird erwartet. Bei

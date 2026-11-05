@@ -41,7 +41,7 @@ import snmp
 import snmpwrite
 import sshcli
 from drivers import Driver
-from switchfix import CATALYST_VMVLAN, VMVLAN, W_CATALYST, W_SAMPLE, agent, edit_walks
+from switchfix import CATALYST_VMVLAN, VMVLAN, W_CATALYST, W_POE, W_SAMPLE, agent, edit_walks
 
 USER = {"username": "tester", "name": "Tester", "method": "local"}
 
@@ -843,8 +843,46 @@ def test_drivers_list(api):
     by_name = {d["name"]: d["caps"] for d in got}
     assert by_name["procurve"] == ["backup", "cli", "nac", "snmp_admin", "snmp_autosave", "snmp_name", "snmp_poe", "snmp_vlan"]
     assert by_name["cisco"] == ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
+    assert by_name["mikrotik"] == ["snmp_admin", "snmp_name", "snmp_vlan"]     # R31: no PoE
 
 
 def test_drivers_list_needs_a_session(api):
     main.app.dependency_overrides.pop(auth.current_user)
     assert api.get("/api/drivers").status_code == 401
+
+
+# ── PoE (Task 12, R30): over SNMP for every driver, ProCurve with working SSH included ──────────────────────────────────────────────
+POE_OFF = {"ports": ["1"], "change": {"poe": False}}
+
+
+def test_poe_preview_and_apply_go_snmp_on_a_procurve_with_ssh(api, fake):
+    """/plan of a PoE change on a ProCurve whose SSH works: SNMP, without any SSH read; /apply with the echoed mechanism and the token
+    creates the change with mechanism snmp (tests/test_poe.py runs such changes)."""
+    fake.views["procurve"] = (agent(W_POE), "procurve")
+    sid = switch(api, "procurve", ssh=True)
+    got = preview(api, sid, POE_OFF)
+    assert got == {"kind": "ports", "summary": "Port 1: PoE aus", "mechanism": "snmp", "commands": ["Port 1: PoE an → aus"],
+                   "warnings": ["Port 1: versorgt gerade ein Gerät mit Strom (PoE), es verliert die Stromversorgung"], "blocked": [],
+                   "before": {"1": {"poe": True}}, "desired": {"1": {"poe": False}}, "token": token(["Port 1: PoE an → aus"])}
+    assert fake.calls == [("snmp", "procurve", True), ("plan", "snmp")]
+    r = apply(api, sid, POE_OFF, got["token"], mechanism="snmp")
+    assert r.status_code == 200, r.text
+    assert (fake.created[-1]["mechanism"], fake.created[-1]["ops"]) == ("snmp", [("1.3.6.1.2.1.105.1.1.1.3.1.1", "i", "2")])
+    assert ("ssh", sid) not in fake.calls
+
+
+@pytest.mark.parametrize("driver, kw, detail", [
+    ("procurve", {"snmp_write": False}, f"PoE erfordert SNMP-Schreibzugriff ({WRITE_DISABLED})"),
+    ("procurve", {"ssh": False, "creds": NO_CREDS}, f"PoE erfordert SNMP-Schreibzugriff ({NO_WRITE_CREDS})"),
+    ("mikrotik", {}, "PoE erfordert SNMP-Schreibzugriff (Treiber mikrotik kann PoE nicht per SNMP schreiben)"),
+], ids=["procurve-snmp-off", "procurve-no-identity", "mikrotik"])
+def test_poe_without_an_snmp_way_is_422(api, fake, driver, kw, detail):
+    refused(plan(api, switch(api, driver, **kw), POE_OFF), 422, detail)
+    assert fake.calls == []          # neither an SSH nor an SNMP read
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", "off"])
+def test_poe_must_be_a_json_boolean(api, fake, value):
+    r = plan(api, switch(api, "procurve"), {"ports": ["1"], "change": {"poe": value}})
+    assert r.status_code == 422 and r.json()["detail"][0]["loc"] == ["body", "change", "poe"], r.text
+    assert fake.calls == []

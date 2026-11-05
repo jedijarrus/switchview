@@ -3,8 +3,10 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime, timezone
 
+import drivers
 import snmp
 from crypto import decrypt
 from db import db
@@ -50,6 +52,14 @@ NAMED_LAG_IFTYPES = frozenset({"53", "54"})
 #   ch                         Channel-Gruppen mancher Smart-Switches ("ch1")
 #   Trk                        HPE ProCurve / AOS-S ("Trk1"), falls so ein Switch unter einem anderen Treiber laeuft
 LAG_NAME = re.compile(r"(?:Po|Port-channel|ae|Bridge-Aggregation|BAGG|lag|ch|Trk)[0-9]", re.IGNORECASE)
+
+# PoE (Faehigkeit snmp_poe): Walk-Schluessel -> Schluessel der OID in driver.oids. Nicht in O: die OIDs kommen aus dem Treiber (R4), sie
+# haengen an ihm (Leistung und Zuordnung je Hersteller), und gewalkt wird nur, wo er PoE hat (siehe poe_walks, poe_ports).
+POE_OIDS = {"poeAdmin": "poe_admin", "poeStatus": "poe_status", "poeEntPhy": "poe_entphy", "entAlias": "ent_alias", "poePower": "poe_power"}
+_SUBID = r"(?:0|[1-9][0-9]{0,9})"    # ein OID-Bestandteil, wie net-snmp ihn druckt (32 Bit: hoechstens 10 Ziffern, keine fuehrende Null)
+_POE_INDEX = re.compile(rf"({_SUBID})\.({_SUBID})")    # <pethPsePortGroupIndex>.<pethPsePortIndex>
+_NUMBER = re.compile(_SUBID)
+_IFINDEX_ROW = re.compile(r"\.?1\.3\.6\.1\.2\.1\.2\.2\.1\.1\.([1-9][0-9]{0,9})")    # RowPointer auf eine ifTable-Zeile: ifIndex.<N>
 
 _locks: dict[int, asyncio.Lock] = {}
 
@@ -224,6 +234,141 @@ def select_ports(ifname: dict[str, str], iftype: dict[str, str], ifstack: dict[s
     return ports, member_of, members
 
 
+def trunk_ports(ifname: dict[str, str], ports: list[str], members: dict[str, list[str]], driver_name: str) -> set[str]:
+    """Die Trunks unter den Ports von select_ports (ifIndex): bei ProCurve jedes Interface namens Trk..., auch ein leeres, sonst jeder LAG
+    (select_ports fuehrt ihn in members). Die uebrigen Ports sind physisch."""
+    if by_iftype(driver_name):
+        return {ifi for ifi in ports if ifi in members}
+    return {ifi for ifi in ports if ifname[ifi].startswith("Trk")}
+
+
+def poe_walks(driver: drivers.Driver, power: bool = False) -> dict[str, str]:
+    """Die PoE-Walks fuer driver, {Walk-Schluessel: Basis-OID aus driver.oids}: leer ohne snmp_poe (R31), sonst pethPsePortAdminEnable und
+    pethPsePortDetectionStatus, bei poe_index "cisco_entity" dazu die beiden Tabellen der Zuordnung (cpeExtPsePortEntPhyIndex,
+    entAliasMappingIdentifier); mit power (nur die Anzeige) die Leistung je Port, wo der Treiber eine OID dafuer hat."""
+    if not drivers.can(driver, "snmp_poe"):
+        return {}
+    keys = ["poeAdmin", "poeStatus"]
+    if driver.poe_index == "cisco_entity":
+        keys += ["poeEntPhy", "entAlias"]
+    if power and "poe_power" in driver.oids:
+        keys.append("poePower")
+    return {k: driver.oids[POE_OIDS[k]] for k in keys}
+
+
+def _poe_order(index: str) -> tuple[int, int]:
+    """Sortierschluessel eines PoE-Index "<Gruppe>.<Port>": nach Gruppe, dann Port, als Zahlen; ein unlesbarer dahinter."""
+    m = _POE_INDEX.fullmatch(index)
+    return (int(m.group(1)), int(m.group(2))) if m else (2**32, 2**32)
+
+
+def poe_listing(indexes) -> str:
+    """PoE-Indexe fuer eine Meldung: nach Gruppe und Port, hoechstens fuenf, dann ", ..."."""
+    listed = sorted(indexes, key=lambda k: (_poe_order(k), k))
+    return ", ".join(listed[:5]) + (", ..." if len(listed) > 5 else "")
+
+
+def _poe_number(table: dict[str, str], index: str, column: str, strict: bool, allowed: tuple[str, ...] = ()) -> int | None:
+    """Der Wert von column.<index> als Zahl (None ohne Zeile). Nur einer aus allowed, sonst jede Zahl; einen anderen gibt es mit strict
+    als ValueError, sonst als None."""
+    value = table.get(index)
+    if value is None:
+        return None
+    if (value in allowed) if allowed else bool(_NUMBER.fullmatch(value)):
+        return int(value)
+    if strict:
+        raise ValueError(f"{column}.{index} ist weder 1 (an) noch 2 (aus): {value!r}" if allowed else f"{column}.{index} ist keine Zahl: {value!r}")
+    return None
+
+
+def poe_ports(driver: drivers.Driver, tables: dict[str, dict[str, str]], physical, strict: bool = False) -> tuple[dict[str, dict], list[str]]:
+    """Welcher PoE-Eintrag zu welchem Port gehoert, und was er sagt: die EINE Stelle dafuer, fuer die Anzeige (_build) und den Schreibweg
+    (snmpwrite.build_cfg). Ein PoE-SET auf den falschen Eintrag schaltet ein anderes Geraet ab (Telefon, Access Point, Kamera), darum
+    zaehlt nur eine sichere Zuordnung: was nicht sicher passt, gehoert zu keinem Port, und ein Port ohne Eintrag hat kein PoE, weder in
+    der Anzeige noch zum Schreiben.
+
+    tables: _tbl-Tabellen der Walks aus poe_walks(driver) (ein fehlender Walk ist leer); physical: die ifIndexe der physischen Ports (die
+    von select_ports ohne trunk_ports: PoE hat nur ein physischer Port). Die PoE-Eintraege sind die Indexe der Admin- und der
+    Status-Spalte. Wie ihr <pethPsePortGroupIndex>.<pethPsePortIndex> zum ifIndex steht, legt RFC 3621 nicht fest; das sagt
+    driver.poe_index:
+      ifindex       Gruppe 1 und pethPsePortIndex = ifIndex. Ein Eintrag einer anderen Gruppe (ein weiteres Stack-Mitglied, ein Modul)
+                    gehoert zu keinem Port. Zeigt ein Eintrag der Gruppe 1 auf keinen physischen Port (kein Interface, eins, das kein
+                    Port ist, ein Trunk), gilt die Annahme fuer diesen Switch nicht, etwa weil er Ports durchzaehlt, statt den ifIndex zu
+                    nehmen: dann gehoert KEIN Eintrag zu einem Port, auch keiner, der zufaellig passte.
+      cisco_entity  cpeExtPsePortEntPhyIndex des Eintrags (entPhysicalIndex seines Ports, 0 = keiner) und dessen
+                    entAliasMappingIdentifier-Zeilen (ENTITY-MIB): zeigen sie, bei jedem logischen Index, auf genau ein ifIndex.N und
+                    ist N ein physischer Port, gehoert der Eintrag zu ihm. Eine Zeile, die auf etwas anderes zeigt (keine ifTable-Zeile,
+                    0.0), zaehlt nicht.
+      jede andere   kein Eintrag gehoert zu einem Port.
+    Zeigen zwei Eintraege auf denselben Port, gehoert keiner von beiden zu ihm.
+
+    Ergebnis: ({ifIndex: {"group", "index", "admin", "status", "power"}}, [PoE-Indexe "<Gruppe>.<Port>" ohne Port, nach Gruppe und Port]).
+    group / index sind Zahlen, admin (1 an, 2 aus), status (pethPsePortDetectionStatus) und power (mW, aus poePower) Zahlen, None ohne
+    lesbare Zeile.
+
+    strict (der Schreibweg, R5): nichts wird uebersprungen. snmp.SnmpError, wenn die Spalten einer Tabellenzeile nicht dieselben Eintraege
+    haben (Admin und Status; bei cisco_entity cpeExtPsePortEntPhyIndex, er erweitert pethPsePortEntry; fehlt er ganz, etwa auf einem IOS
+    ohne ihn, ist kein Eintrag zuordenbar, aber nichts falsch); ValueError fuer einen Index, der nicht <Gruppe>.<Port> ist, einen
+    Admin-Wert ausser 1 / 2, einen Status oder entPhysicalIndex, der keine Zahl ist, und einen Index von entAliasMappingIdentifier, der
+    nicht <entPhysicalIndex>.<logischer Index> ist. Ohne strict (die Anzeige) faellt nur das Unlesbare weg."""
+    admin, status = tables.get("poeAdmin", {}), tables.get("poeStatus", {})
+    if strict and set(admin) != set(status):
+        raise snmp.SnmpError("PoE-Tabelle unvollständig gelesen: Admin- und Status-Spalte passen nicht zusammen "
+                             f"(Eintrag {poe_listing(set(admin) ^ set(status))})")
+    rows: dict[str, tuple[int, int]] = {}    # PoE-Index -> (Gruppe, Port), nach Gruppe und Port
+    for k in sorted(set(admin) | set(status), key=lambda k: (_poe_order(k), k)):
+        m = _POE_INDEX.fullmatch(k)
+        if m:
+            rows[k] = (int(m.group(1)), int(m.group(2)))
+        elif strict:
+            raise ValueError(f"PoE-Index {k!r} ist nicht <Gruppe>.<Port>")
+    entries = {k: {"group": g, "index": i, "admin": _poe_number(admin, k, "pethPsePortAdminEnable", strict, ("1", "2")),
+                   "status": _poe_number(status, k, "pethPsePortDetectionStatus", strict),
+                   "power": _poe_number(tables.get("poePower", {}), k, "poePower", False)} for k, (g, i) in rows.items()}
+    phys = set(physical)
+    if driver.poe_index == "ifindex":
+        first = {k: k.partition(".")[2] for k, (g, _) in rows.items() if g == 1}
+        target = first if all(ifi in phys for ifi in first.values()) else {}
+    elif driver.poe_index == "cisco_entity":
+        target = _poe_entities(rows, tables, phys, strict)
+    else:
+        target = {}
+    claims = Counter(target.values())
+    found = {ifi: entries[k] for k, ifi in target.items() if claims[ifi] == 1}
+    return found, [k for k in rows if k not in target or claims[target[k]] > 1]
+
+
+def _poe_entities(rows: dict[str, tuple[int, int]], tables: dict[str, dict[str, str]], phys: set[str], strict: bool) -> dict[str, str]:
+    """poe_index "cisco_entity" (siehe poe_ports): {PoE-Index: ifIndex} ueber cpeExtPsePortEntPhyIndex und entAliasMappingIdentifier."""
+    entphy, alias = tables.get("poeEntPhy", {}), tables.get("entAlias", {})
+    if strict and entphy and set(entphy) != set(rows):
+        raise snmp.SnmpError("PoE-Tabelle unvollständig gelesen: cpeExtPsePortEntPhyIndex passt nicht zu den PoE-Einträgen "
+                             f"(Eintrag {poe_listing(set(entphy) ^ set(rows))})")
+    ifis: dict[str, set[str]] = {}    # entPhysicalIndex -> ifIndexe, auf die seine Alias-Zeilen zeigen
+    for k, v in alias.items():
+        e, dot, logical = k.partition(".")
+        if not (_NUMBER.fullmatch(e) and dot and _NUMBER.fullmatch(logical)):
+            if strict:
+                raise ValueError(f"entAliasMappingIdentifier: Index {k!r} ist nicht <entPhysicalIndex>.<logisch>")
+            continue
+        m = _IFINDEX_ROW.fullmatch(v)
+        if m:
+            ifis.setdefault(e, set()).add(m.group(1))
+    target = {}
+    for k in rows:
+        e = entphy.get(k)
+        if e is None:
+            continue
+        if not _NUMBER.fullmatch(e):
+            if strict:
+                raise ValueError(f"cpeExtPsePortEntPhyIndex.{k} ist keine Zahl: {e!r}")
+            continue
+        candidates = ifis.get(e, set())
+        if e != "0" and len(candidates) == 1 and next(iter(candidates)) in phys:
+            target[k] = next(iter(candidates))
+    return target
+
+
 async def poll_switch(switch_id: int) -> dict:
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
@@ -237,10 +382,12 @@ async def poll_switch(switch_id: int) -> dict:
         # Walks, ohne die es kein Ergebnis gibt: sysName und ifName, dazu ifType, wo select_ports nach ihm waehlt (ohne ifType
         # stuende der Switch sonst bis zum naechsten Poll ohne Ports da)
         needed = ("sysName", "ifName", "ifType") if by_iftype(driver_name) else ("sysName", "ifName")
+        # Dazu die PoE-Walks des Treibers mit der Leistung, nachsichtig wie jeder andere hier (ohne snmp_poe keiner)
+        walks = {**O, **poe_walks(drivers.driver_for(row), power=True)}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
-            keys = list(O)
-            results = await asyncio.gather(*(snmp.walk(host, cred, O[k], hex_values=k in HEX) for k in keys), return_exceptions=True)
+            keys = list(walks)
+            results = await asyncio.gather(*(snmp.walk(host, cred, walks[k], hex_values=k in HEX) for k in keys), return_exceptions=True)
             W = {}
             for k, r in zip(keys, results):
                 if isinstance(r, Exception):
@@ -270,9 +417,11 @@ async def poll_switch(switch_id: int) -> dict:
             await conn.execute("DELETE FROM vlans WHERE switch_id = ?", (switch_id,))
             await conn.execute("DELETE FROM macs WHERE switch_id = ?", (switch_id,))
             await conn.executemany(
-                "INSERT INTO ports(switch_id, ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, mac_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [(switch_id, p["if"], p["name"], p["alias"], p["oper"], p["admin"], p["speed"], p["pvid"], json.dumps(p["untagged"]), json.dumps(p["tagged"]),
-                  p["trunk"], json.dumps(p["members"]), json.dumps(p["lldp"]), p["mac_count"]) for p in data["ports"]],
+                "INSERT INTO ports(switch_id, ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, mac_count, "
+                "poe_admin, poe_status, poe_power) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(switch_id, p["if"], p["name"], p["alias"], p["oper"], p["admin"], p["speed"], p["pvid"], json.dumps(p["untagged"]),
+                  json.dumps(p["tagged"]), p["trunk"], json.dumps(p["members"]), json.dumps(p["lldp"]), p["mac_count"], p["poe_admin"],
+                  p["poe_status"], p["poe_power"]) for p in data["ports"]],
             )
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
             await conn.executemany(
@@ -284,8 +433,9 @@ async def poll_switch(switch_id: int) -> dict:
 
 
 def _build(W: dict, driver_name: str = "procurve") -> dict:
-    """Die Anzeige-Daten aus den Walks W (Schluessel wie O). Welche Interfaces Ports und Trunks sind, entscheidet select_ports nach
-    dem Treiber; ifType wird nur gelesen, wenn er danach waehlt."""
+    """Die Anzeige-Daten aus den Walks W (Schluessel wie O, dazu die von poe_walks des Treibers; ein fehlender PoE-Walk ist leer). Welche
+    Interfaces Ports und Trunks sind, entscheidet select_ports nach dem Treiber; ifType wird nur gelesen, wenn er danach waehlt. PoE je
+    Port (poe_admin, poe_status, poe_power in mW) nur, wo poe_ports ihm einen Eintrag sicher zuordnet, nachsichtig: sonst None."""
     sysName = (W["sysName"][0][1] if W["sysName"] else "")
     sysDescr = (W["sysDescr"][0][1] if W["sysDescr"] else "")
     model, fw = parse_descr(sysDescr)
@@ -323,11 +473,15 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
 
     iftype = _tbl(W["ifType"], O["ifType"]) if by_iftype(driver_name) else {}
     port_ifis, member_of, members = select_ports(ifname, iftype, _tbl(W["ifStack"], O["ifStack"]), driver_name)
+    # Trunk: bei ProCurve jedes Trk-Interface (auch ohne Mitglieder), sonst jeder LAG-Port (select_ports fuehrt ihn in members)
+    trunks = trunk_ports(ifname, port_ifis, members, driver_name)
+    driver = drivers.driver_for({"driver": driver_name})
+    poe, _ = poe_ports(driver, {k: _tbl(W.get(k, []), base) for k, base in poe_walks(driver, power=True).items()},
+                       [ifi for ifi in port_ifis if ifi not in trunks])
     ports, macs = [], []
     for ifi in port_ifis:
         name = ifname[ifi]
-        # Trunk: bei ProCurve jedes Trk-Interface (auch ohne Mitglieder), sonst jeder LAG-Port (select_ports fuehrt ihn in members)
-        is_trk = ifi in members if by_iftype(driver_name) else name.startswith("Trk")
+        is_trk = ifi in trunks
         trk = member_of.get(ifi)
         eff = if2bp.get(trk) if trk else if2bp.get(ifi)
         b = int(eff) if eff else None
@@ -336,6 +490,7 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
         fdb = fdb_by_bp.get(eff, []) if eff else []
         if not trk:  # MACs nur einmal ablegen (am Trunk bzw. am Einzelport)
             macs += [(name, m, v) for m, v in fdb]
+        pe = poe.get(ifi, {})
         ports.append({
             "if": int(ifi), "name": name, "alias": alias.get(ifi, ""),
             "oper": 1 if oper.get(ifi) == "1" else 0, "admin": 1 if admin.get(ifi) == "1" else 0,
@@ -344,6 +499,7 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
             "trunk": ifname.get(trk, "") if trk else (name if is_trk else ""),
             "members": [ifname.get(m, m) for m in members.get(ifi, [])] if is_trk else [],
             "lldp": lldp.get(ifi, []), "mac_count": len(fdb),
+            "poe_admin": pe.get("admin"), "poe_status": pe.get("status"), "poe_power": pe.get("power"),
         })
     return {"sysName": sysName, "sysDescr": sysDescr, "model": model, "firmware": fw, "uptime": uptime, "baseMac": base,
             "vlans": {k: vname[k] for k in sorted(vname, key=int)}, "ports": ports, "macs": macs}
