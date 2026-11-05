@@ -425,10 +425,13 @@
     try { [r, row] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveRow(s)]); }
     catch (e) { modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
     const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp", caps = (row && row.caps) || s.caps || [];
-    // Per SNMP gibt es kein Staging: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das selbst tut
-    // (snmp_autosave, R26); sonst bleibt das Speichern am Switch. Geht der SET fälschbar hinaus (snmp_rw_insecure), sagt es die Vorschau laut.
-    const way = !can || !snmp ? "" : (caps.includes("snmp_autosave") ? `<div class="banner"><b>Wird per SNMP sofort angewendet und automatisch gespeichert.</b></div>`
-      : `<div class="banner warn"><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b></div>`)
+    // Per SNMP gibt es kein Staging und kein Backup: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das
+    // selbst tut (snmp_autosave, R26), und der speichert dabei die gesamte laufende Konfiguration (welche SSH-Änderungen das mitspeichert,
+    // sagt eine Warnung des Servers); sonst bleibt das Speichern am Switch. Geht der SET fälschbar hinaus (snmp_rw_insecure), sagt es die
+    // Vorschau laut.
+    const way = !can || !snmp ? "" : (caps.includes("snmp_autosave")
+      ? `<div class="banner"><span><b>Wird per SNMP sofort angewendet und automatisch gespeichert – der Switch speichert dabei die gesamte laufende Konfiguration.</b> Kein gestuftes write memory, kein Backup über diesen Weg.</span></div>`
+      : `<div class="banner warn"><span><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b> Kein Backup über diesen Weg.</span></div>`)
       + (row ? insecureBanner(row) : "");
     const poeNote = snmp && caps.includes("cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
     const body = `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>

@@ -961,6 +961,121 @@ async def test_unmanaged_port_off_on_and_name_round_trip(env, W, port, reason):
     assert env.ssh == []
 
 
+# ── R42: a ProCurve SNMP SET saves the whole running config, earlier unsaved SSH changes included ───────────────────────────────────
+ALSO_SAVED = "der Switch speichert bei jedem SNMP-SET die gesamte laufende Konfiguration"
+
+
+def unsaved_warning(refs: str, many: bool = False) -> str:
+    return (f"Achtung: {'Änderungen' if many else 'Änderung'} {refs} {'sind' if many else 'ist'} absichtlich nicht gespeichert. Ein SNMP-SET "
+            f"lässt den Switch die gesamte laufende Konfiguration speichern – {refs} {'wären' if many else 'wäre'} danach dauerhaft. "
+            f"Vorher {refs} zurücknehmen oder bewusst speichern.")
+
+
+async def old_change(sid: int, *, status: str = "unclear", mechanism: str | None = "ssh", saved: int = 0, kind: str = "ports",
+                     reverted_by: int | None = None) -> int:
+    """A finished change of the switch as an earlier run left it (mechanism NULL: a row from before the column)."""
+    async with db.db() as conn:
+        cur = await conn.execute(
+            "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, saved, steps, expert, "
+            "mechanism, reverted_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, USER, kind, "Port 6: VLAN 20", "{}", "[]", "{}", "{}", "[]", status, saved, json.dumps([["2026-11-01 10:00:00", "Gesendet",
+             "info"]]), 0, mechanism, reverted_by))
+        await conn.commit()
+        return cur.lastrowid
+
+
+async def test_snmp_preview_warns_of_the_unsaved_ssh_changes_it_would_save(env):
+    """R42: the preview of an SNMP change on a driver with snmp_autosave names, loudly and first, every change of the switch that ran
+    over SSH (or before the mechanism column) and was left unsaved on purpose: saved 0, not reverted, status ok / unclear / failed. Not
+    a block: the SNMP way is used exactly when SSH is down, and the SSH change can then be neither reverted nor saved."""
+    sid = await env.switch("procurve")
+    listed = [await old_change(sid), await old_change(sid, status="failed", mechanism=None), await old_change(sid, status="ok"),
+              await old_change(sid, kind="prepare", status="failed")]
+    for kw in ({"saved": 1}, {"reverted_by": 99}, {"status": "aborted"}, {"status": "queued"}, {"status": "running"},
+               {"mechanism": "snmp"}, {"kind": "save", "status": "failed"}):
+        await old_change(sid, **kw)
+    await sql("INSERT INTO switches(name, host, driver) VALUES ('SW-EK-02', '203.0.113.22', 'procurve')")
+    [(other,)] = await sql("SELECT id FROM switches WHERE host = '203.0.113.22'")
+    await old_change(other)                 # another switch's unsaved change says nothing about this one
+    _, plan = await apply(sid, PC_PROBE)
+    refs = "#{}, #{}, #{} und #{}".format(*listed)
+    assert (plan["mechanism"], plan["blocked"], plan["warnings"]) == ("snmp", [], [unsaved_warning(refs, many=True)])
+    await sql("UPDATE changes SET saved = 1 WHERE id IN (?, ?, ?)", tuple(listed[1:]))
+    _, plan = await apply(sid, PC_PROBE)
+    assert plan["warnings"] == [unsaved_warning(f"#{listed[0]}")]
+
+
+async def test_snmp_revert_preview_warns_too_and_the_fallback_warning_stays_first(env):
+    """The SNMP revert is an SNMP SET as well; and on the SSH fallback the SSH warning stays in front."""
+    sid, cid = await forward_port3(env)
+    old = await old_change(sid)
+    _, plan = await apply(sid, {"mode": "revert", "of": cid})
+    assert plan["warnings"] == [unsaved_warning(f"#{old}")]
+    await sql("UPDATE switches SET ssh_user = 'manager', ssh_pass = ? WHERE id = ?", (crypto.encrypt("ssh-s3cret"), sid))
+    env.allow_ssh()
+    env.ssh_fails = "connect"
+    _, plan = await apply(sid, PC_PROBE)
+    assert plan["warnings"] == [f"SSH nicht verfügbar ({SSH_DOWN}), die Änderung geht per SNMP", unsaved_warning(f"#{old}")]
+
+
+@pytest.mark.parametrize("drv, W, payload", [(GENERIC, VIEWS["generic"], GI_PROBE), (CLI_UNSAVED, SAMPLE_BY_IFTYPE, PC_PROBE)],
+                         ids=["generic", "cli-without-autosave"])
+async def test_no_warning_and_no_marking_without_autosave(env, drv, W, payload):
+    """A driver without snmp_autosave keeps a SET in the running config only: it saves nothing, earlier unsaved changes stay unsaved."""
+    env.mp.setitem(drivers.DRIVERS, drv.name, drv)
+    sid = await env.switch(drv.name, W)
+    old = await old_change(sid)
+    cid, plan = await apply(sid, payload)
+    assert plan["warnings"] == []
+    assert (await run(env, cid))["status"] == "ok"
+    assert (await change(old))["saved"] == 0 and len((await change(old))["steps"]) == 1
+    assert not any(ALSO_SAVED in text for text, _ in steps(await change(cid)))
+
+
+async def test_a_successful_snmp_set_marks_the_unsaved_ssh_changes_saved(env):
+    """R42: once apply_ops returned without error on an autosaving switch, the switch has saved its whole running config: exactly the
+    listed changes get saved = 1 and a step that says why, and the SNMP change a step naming them. Every other change stays as it was."""
+    sid = await env.switch("procurve")
+    first, second = await old_change(sid), await old_change(sid, status="failed", mechanism=None)
+    keep = [await old_change(sid, saved=1), await old_change(sid, reverted_by=99), await old_change(sid, status="aborted")]
+    before = {i: await change(i) for i in keep}
+    cid, _ = await apply(sid, PC_PROBE)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"]) == ("ok", 1)
+    for i in (first, second):
+        old = await change(i)
+        assert old["saved"] == 1 and steps(old) == [("Gesendet", "info"),
+                                                    (f"Mitgespeichert durch SNMP-Änderung #{cid}: {ALSO_SAVED}.", "warn")]
+        assert old["status"] == ("unclear" if i == first else "failed")
+    assert steps(ch) == [*READ_STEPS, (setting(5), "info"), (f"Mitgespeichert: Änderung #{first} und #{second} ({ALSO_SAVED})", "warn"),
+                         ("Zustand nachher gelesen", "info"), ("Prüfung ok", "info"), (AUTOSAVED, "ok")]
+    assert {i: await change(i) for i in keep} == before
+
+
+async def test_an_unclear_verify_after_a_set_without_error_marks_them_all_the_same(env):
+    """The SET came back without error, so the switch saved: the marks do not wait for the verify (here: the switch took nothing)."""
+    sid = await env.switch("procurve")
+    old = await old_change(sid)
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.set_mode = "ignore"
+    assert (await run(env, cid))["status"] == "unclear"
+    assert (await change(old))["saved"] == 1
+
+
+@pytest.mark.parametrize("mode, status", [("lost", "ok"), ("timeout", "unclear")])
+async def test_an_erroring_snmp_set_marks_nothing(env, mode, status):
+    """A SET that errored marks nothing (R42), whatever the read-back finds afterwards: the switch took it but the answer was lost
+    ("lost": the change itself verifies ok), or it took nothing ("timeout")."""
+    sid = await env.switch("procurve")
+    old = await old_change(sid)
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.set_mode = mode
+    ch = await run(env, cid)
+    assert ch["status"] == status
+    assert (await change(old))["saved"] == 0 and len((await change(old))["steps"]) == 1
+    assert not any(ALSO_SAVED in text for text, _ in steps(ch))
+
+
 # ── R43: status "on" ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async def test_procurve_without_ssh_switches_a_port_off_and_on_again_over_snmp(env):
     """R43: on a ProCurve without SSH a port switched off over SNMP comes back on with "on" (before it, only "Protected" re-enabled a

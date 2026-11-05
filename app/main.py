@@ -799,6 +799,21 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     return plan, req, "ports", _summary(body)
 
 
+async def _warn_unsaved(row, driver: drivers.Driver, plan: dict):
+    """R42: ein SNMP-SET auf einem Treiber mit snmp_autosave laesst den Switch seine gesamte laufende Konfiguration speichern, auch jede
+    per SSH absichtlich nicht gespeicherte Aenderung (changes.unsaved_ssh_changes). Das sagt die Vorschau laut, vor den Hinweisen zu den
+    Ports. Keine Sperre: per SNMP geht es gerade dann, wenn SSH weg ist und sich die SSH-Aenderung weder zuruecknehmen noch speichern laesst."""
+    if not drivers.can(driver, "snmp_autosave"):
+        return
+    ids = await changes.unsaved_ssh_changes(row["id"])
+    if not ids:
+        return
+    refs, one = changes.change_refs(ids), len(ids) == 1
+    plan["warnings"] = [f"Achtung: {'Änderung' if one else 'Änderungen'} {refs} {'ist' if one else 'sind'} absichtlich nicht gespeichert. Ein "
+                        f"SNMP-SET lässt den Switch die gesamte laufende Konfiguration speichern – {refs} {'wäre' if one else 'wären'} danach "
+                        f"dauerhaft. Vorher {refs} zurücknehmen oder bewusst speichern.", *plan["warnings"]]
+
+
 async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str | None) -> tuple[dict, dict, str, str]:
     """Eine neue Port-Aenderung per SNMP (_choose_mechanism hat schon abgelehnt, was dort nicht geht): gegen einen Live-Read geplant,
     jeder Port muss in ihm stehen. ssh_error: SNMP springt fuer diesen gescheiterten SSH-Read ein, das sagt eine Warnung vorne."""
@@ -813,6 +828,7 @@ async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str |
                                   raw=raw)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    await _warn_unsaved(row, driver, plan)
     if ssh_error is not None:    # nie still per SNMP (L19)
         plan["warnings"] = [f"SSH nicht verfügbar ({ssh_error}), die Änderung geht per SNMP", *plan["warnings"]]
     return plan, req, "ports", _summary(body)
@@ -896,6 +912,8 @@ async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict
         plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, **way)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    if mech == "snmp":
+        await _warn_unsaved(row, driver, plan)
     return plan, req, "ports", f"Rückgängig #{ch['id']}: {ch['summary']}"
 
 
