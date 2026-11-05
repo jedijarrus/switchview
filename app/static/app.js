@@ -825,7 +825,7 @@
     if (!list) return;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Konfigurationssicherungen</h2><span class="sub">nächtlich 02:30, gespeichert nur bei Änderung</span>
       <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.name === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
-      <button class="btn small" type="button" id="b-now" aria-describedby="b-why">Jetzt sichern</button></div></div><p class="note gate" id="b-why" hidden></p><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
+      <button class="btn small" type="button" id="b-now" aria-describedby="b-why">Jetzt sichern</button></div></div><p class="note gate" id="b-why" style="margin:12px 16px 0" hidden></p><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
     if (!list.length) return;
     const selected = () => list.find(x => String(x.id) === $("#b-sw").value);
     // Sichern geht nur über die SSH-CLI (Treiber mit backup, ProCurve): sonst ist „Jetzt sichern“ gesperrt, mit dem Grund daneben
