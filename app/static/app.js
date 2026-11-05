@@ -617,6 +617,20 @@
     modal(`SNMP-Schreiben prüfen: ${row.name}`, `<p style="margin:0">Gespeichert. SNMP-Schreiben an diesem Switch, wie der Server es jetzt sieht:</p>${writeState(row)}`,
       [{ label: "Zugang bearbeiten", onClick: () => editSwitch(row) }, { label: "Verstanden", cls: "primary", onClick: closeModal }]);
   }
+  // F2: a stored secret only goes to the address it was entered for. Saving a new address deletes each one not entered anew, and the
+  // server names them in "cleared" (PUT /api/switches/{id} and PUT /api/settings); these are their names in the toast after saving.
+  const SECRET_NAMES = { snmp_community: "Lese-Community", snmp_auth_pass: "Lese-Auth-Kennwort", snmp_priv_pass: "Lese-Priv-Kennwort", ssh_pass: "SSH-Kennwort",
+    snmp_rw_community: "Schreib-Community", snmp_rw_auth_pass: "RW-Auth-Kennwort", snmp_rw_priv_pass: "RW-Priv-Kennwort",
+    opnsense_key: "OPNsense-API-Key", opnsense_secret: "OPNsense-API-Secret", radius_key: "Shared Secret", pf_pass: "PacketFence-Kennwort" };
+  const savedTxt = cleared => cleared && cleared.length ? `Gespeichert. Gelöscht wegen neuer Adresse: ${cleared.map(k => SECRET_NAMES[k] || k).join(", ")}` : "Gespeichert";
+  // An address as the server compares it (main.same_destination, less its IP rule): trimmed, without a trailing "/", in any case
+  const destTxt = v => String(v == null ? "" : v).trim().replace(/\/+$/, "").toLowerCase();
+  // Shows the warning noteId under the input inputId while show holds, and only then makes it the input's description (a hidden
+  // element that aria-describedby names would still be read out)
+  function syncNote(inputId, noteId, show) {
+    $("#" + noteId).hidden = !show;
+    if (show) $("#" + inputId).setAttribute("aria-describedby", noteId); else $("#" + inputId).removeAttribute("aria-describedby");
+  }
   async function editSwitch(s) {
     const isNew = !s; s = s || { snmp_version: "2c", enabled: 1, sort: 0, zone: "", driver: "procurve", snmp_write: false };
     if (!DRIVERS) { try { DRIVERS = await api("GET", "/api/drivers"); } catch (e) { /* dann bleibt der Treiber, wie er ist */ } }
@@ -637,6 +651,7 @@
     const rwStored = !!(s.snmp_rw_user || s.snmp_rw_community_set || s.snmp_rw_auth_pass_set || s.snmp_rw_priv_pass_set);
     const body = `<div class="grid2"><label class="field"><span>Name</span><input id="f-name" value="${esc(s.name || "")}" required maxlength="64"></label>
       <label class="field"><span>Adresse (IP oder Hostname)</span><input id="f-host" value="${esc(s.host || "")}" required maxlength="64"></label>
+      <p class="note warn" id="f-host-note" style="margin:0;grid-column:1/-1" hidden>Neue Adresse: Gespeicherte Kennwörter und Communities gelten nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>
       <label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>
       <label class="field"><span>Reihenfolge</span><input id="f-sort" type="number" value="${esc(s.sort || 0)}"></label></div>
       <div class="field"><label for="f-driver">Treiber</label><select id="f-driver" aria-describedby="f-drv-notes f-drv-caps" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
@@ -696,17 +711,21 @@
       if (!payload.name || !payload.host) { toast("Name und Adresse sind Pflicht"); return; }
       btn.disabled = true;
       try {
-        let id = s.id;
-        if (isNew) id = (await api("POST", "/api/switches", payload)).id; else await api("PUT", `/api/switches/${s.id}`, payload);
+        let id = s.id, cleared = [];
+        if (isNew) id = (await api("POST", "/api/switches", payload)).id; else cleared = (await api("PUT", `/api/switches/${s.id}`, payload)).cleared;
         // Wie SNMP jetzt schreibt, rechnet der Server (write_identity); fälschbar oder ohne Schreib-Zugang: ein Dialog, der stehen bleibt
         const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === id), () => null);
-        closeModal(); toast(isNew ? "Angelegt, wird abgefragt …" : "Gespeichert");
+        closeModal(); toast(isNew ? "Angelegt, wird abgefragt …" : savedTxt(cleared));
         if (writeNeedsAlert(row)) writeAlert(row);
         if (isNew) await api("POST", `/api/switches/${id}/poll`).catch(() => {});
         await loadMap(true); go("switches", payload.name);
       } catch (e) { toast(e.message); btn.disabled = false; }
     } });
     modal(isNew ? "Switch hinzufügen" : `Zugang bearbeiten: ${s.name}`, body, buttons);
+    // A new address deletes every stored secret not entered anew (F2): say so while the address differs from the stored one
+    const anySecret = Object.keys(s).some(k => k.endsWith("_set") && s[k]);
+    const syncHost = () => syncNote("f-host", "f-host-note", !isNew && anySecret && destTxt($("#f-host").value) !== destTxt(s.host));
+    $("#f-host").addEventListener("input", syncHost); syncHost();
     const sync = () => { const v3 = $("#f-snmpv").value === "3"; $("#snmp2").hidden = v3; $("#snmp3").hidden = !v3; };
     $("#f-snmpv").addEventListener("change", sync); sync();
     const syncDrv = () => {
@@ -867,10 +886,12 @@
     const v = $("#view");
     const s = await api("GET", "/api/settings").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!s) return;
+    const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
         <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table"</span></label>
+        ${destNote("s-url")}
         <div class="grid2"><label class="field"><span>API-Key</span><input id="s-key" type="password" autocomplete="new-password" placeholder="${s.opnsense_key_set ? "gesetzt – leer lassen = unverändert" : ""}"></label>
         <label class="field"><span>API-Secret</span><input id="s-secret" type="password" autocomplete="new-password" placeholder="${s.opnsense_secret_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
         <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
@@ -878,16 +899,23 @@
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
         <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten" eines Switches eingetragen</span></label>
         <label class="field"><span>Shared Secret der Switches</span><input id="s-rk" type="password" autocomplete="new-password" placeholder="${s.radius_key_set ? "gesetzt – leer lassen = unverändert" : ""}"><span class="hint">wie in PacketFence beim Switch hinterlegt</span></label></div>
+        ${destNote("s-rs")}
         <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
+        ${destNote("s-pfu")}
         <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"></label>
         <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
       <div><button class="btn primary" type="button" id="s-save">Speichern</button></div></div></section>`;
+    // A new address deletes the secret bound to it unless it is entered anew in the same save (F2, main.DESTINATION_SECRETS)
+    [["s-url", s.opnsense_url, s.opnsense_key_set || s.opnsense_secret_set], ["s-rs", s.radius_server, s.radius_key_set], ["s-pfu", s.pf_url, s.pf_pass_set]].forEach(([id, was, set]) => {
+      const sync = () => syncNote(id, id + "-note", !!set && destTxt($("#" + id).value) !== destTxt(was));
+      $("#" + id).addEventListener("input", sync); sync();
+    });
     $("#s-save").addEventListener("click", async e => {
       e.target.disabled = true; const pw = id => { const x = $("#" + id).value; return x === "" ? null : x; };
-      try { await api("PUT", "/api/settings", { poll_minutes: +$("#s-poll").value || 15, opnsense_url: $("#s-url").value.trim(), opnsense_key: pw("s-key"), opnsense_secret: pw("s-secret"), opnsense_verify_tls: $("#s-tls").checked,
-        radius_server: $("#s-rs").value.trim(), radius_key: pw("s-rk"), pf_url: $("#s-pfu").value.trim(), pf_user: $("#s-pfuser").value.trim(), pf_pass: pw("s-pfpass"), pf_verify_tls: $("#s-pftls").checked }); toast("Gespeichert"); renderSettings(); }
+      try { const r = await api("PUT", "/api/settings", { poll_minutes: +$("#s-poll").value || 15, opnsense_url: $("#s-url").value.trim(), opnsense_key: pw("s-key"), opnsense_secret: pw("s-secret"), opnsense_verify_tls: $("#s-tls").checked,
+        radius_server: $("#s-rs").value.trim(), radius_key: pw("s-rk"), pf_url: $("#s-pfu").value.trim(), pf_user: $("#s-pfuser").value.trim(), pf_pass: pw("s-pfpass"), pf_verify_tls: $("#s-pftls").checked }); toast(savedTxt(r.cleared)); renderSettings(); }
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });

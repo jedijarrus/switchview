@@ -4,6 +4,7 @@ import difflib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 from collections import defaultdict
@@ -31,7 +32,7 @@ import sshcli
 import throttle
 from config import settings
 from crypto import encrypt
-from db import audit, db, get_setting, init_db, set_setting
+from db import audit, db, get_setting, init_db, read_settings, write_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("switchview")
@@ -237,12 +238,31 @@ def _without_secrets(value):
     return value
 
 
+# A lone surrogate: a JSON string can escape one ("\ud800"), UTF-8 cannot encode it.
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def _renderable(value):
+    """value as a JSON answer can carry it, in dicts (keys too) and lists as well: a float that is not finite as its text (Python's json
+    reads NaN and Infinity, JSON has neither), a lone surrogate as U+FFFD. Without this a 422 that echoes such an input failed to
+    render: a 500 with a traceback in the log, for any client."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, str):
+        return _SURROGATE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {_renderable(k): _renderable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_renderable(v) for v in value]
+    return value
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
-    """FastAPIs Standard-422 ({"detail": [Fehler]}), nur ohne zurueckgesendete Geheimnisse (fuer die ganze App): ein Fehler AN einem
-    Feld aus SECRET_INPUTS verliert "input" und "ctx" (type, loc, msg bleiben). Jedes andere "input" verliert die Schluessel aus
-    SECRET_INPUTS, denn ein "missing"-Fehler traegt den ganzen Body. Ist der ganze Body kein Objekt (loc nur "body"), faellt sein
-    "input" weg, er kann alles enthalten. Alle anderen Fehler bleiben, wie FastAPI sie liefert."""
+    """FastAPI's default 422 ({"detail": [errors]}) without an echoed secret, for the whole app: an error AT a field in SECRET_INPUTS
+    loses "input" and "ctx" (type, loc and msg stay). An error at the whole body (loc just "body") whose input is no object loses that
+    input: a list or a scalar can hold anything. Any other "input" loses the keys in SECRET_INPUTS, nested ones too, since a "missing"
+    error carries the whole body. Everything else stays as FastAPI has it, made renderable (_renderable)."""
     errors = []
     for err in exc.errors():
         err = dict(err)
@@ -251,12 +271,12 @@ async def validation_error(request: Request, exc: RequestValidationError):
             err.pop("input", None)
             err.pop("ctx", None)
         elif "input" in err:
-            if isinstance(err["input"], (dict, list)):
-                err["input"] = _without_secrets(err["input"])
-            elif len(loc) <= 1:
+            if len(loc) <= 1 and not isinstance(err["input"], dict):
                 del err["input"]
+            elif isinstance(err["input"], (dict, list)):
+                err["input"] = _without_secrets(err["input"])
         errors.append(err)
-    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+    return JSONResponse(status_code=422, content={"detail": _renderable(jsonable_encoder(errors))})
 
 
 def _validate(body: SwitchIn):
@@ -293,16 +313,20 @@ def _on_off(value) -> str:
     return "an" if value else "aus"
 
 
-# Felder ohne Geheimnis, die entscheiden, mit welcher Identitaet SNMP-SETs hinausgehen (poller.write_identity): der RW-Benutzer und seine
-# Verfahren, ohne RW-Benutzer die Lese-Identitaet (snmp_version, snmp_user). Das Audit haelt ihre Aenderung mit Wert fest.
-IDENTITY_FIELDS = ("snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto", "snmp_version", "snmp_user")
+# Fields without a secret that decide which identity SNMP SETs go out with (poller.write_identity): the RW user and its protocols,
+# without an RW user the read identity (snmp_version, snmp_user, and its protocols, R48: audited always, not only while the read
+# identity writes, so switching the writing identity leaves no gap). The audit records each change with its values.
+IDENTITY_FIELDS = ("snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto", "snmp_version", "snmp_user", "snmp_auth_proto",
+                   "snmp_priv_proto")
 
 
 def _update_detail(fields: dict, old) -> str:
-    """Audit-Detail eines PUT: die geaenderten Geheimnisse beim Namen (nie mit Wert), dann Treiber, SNMP-Schreiben und die Felder der
-    Schreib-Identitaet (IDENTITY_FIELDS) als "alt → neu" (leer: "–"), wenn sie mitkamen und sich aendern. SNMP-Schreiben einzuschalten
-    ist eine Rechte-Aenderung, und wer ohne RW-Benutzer schreibt, haengt an der Lese-Identitaet."""
-    parts = [k for k in fields if k in SECRET_FIELDS]
+    """The audit detail of a PUT: a new host first ("host: old → new"), then the changed secrets by name, never with a value (one that
+    the new host deleted counts as changed), then driver, SNMP writing and the identity fields (IDENTITY_FIELDS) as "old → new"
+    (empty: "–") when they were sent and change. Switching SNMP writing on is a privilege change, and whoever writes without an RW
+    user depends on the read identity."""
+    parts = [f"host: {old['host']} → {fields['host']}"] if fields["host"] != old["host"] else []
+    parts += [k for k in fields if k in SECRET_FIELDS]
     if "driver" in fields and fields["driver"] != old["driver"]:
         parts.append(f"driver: {old['driver']} → {fields['driver']}")
     if "snmp_write" in fields and bool(fields["snmp_write"]) != bool(old["snmp_write"]):
@@ -367,27 +391,44 @@ async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
     return {"id": sid}
 
 
+def same_destination(old: str | None, new: str | None) -> bool:
+    """Whether old and new name the same destination of a secret (a switch's host, a URL or the RADIUS server of the settings): the
+    same IP address when both parse as one, otherwise the same text ignoring case, surrounding whitespace and a trailing "/". Another
+    spelling is no new destination (E9)."""
+    try:
+        return ipaddress.ip_address(old or "") == ipaddress.ip_address(new or "")
+    except ValueError:
+        return (old or "").strip().rstrip("/").casefold() == (new or "").strip().rstrip("/").casefold()
+
+
 @app.put("/api/switches/{sid}")
 async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user)):
+    """A secret (SECRET_FIELDS) changes only when the PUT carries a value for it ("" deletes it), except that it is bound to the host
+    it was entered for (F2): a new host (same_destination) deletes every stored secret the PUT does not carry anew, so none of them
+    ever reaches the new host; "cleared" names them, in SECRET_FIELDS order. Reading the old row and writing the new one is one write
+    transaction (BEGIN IMMEDIATE): a concurrent PUT waits, so the host rule and the audit's "old → new" see the row as it is (E11)."""
     _validate(body)
     fields = _columns(body, update=True)
-    # Geheimnisse nur ueberschreiben, wenn ein neuer Wert mitkommt ("" = loeschen)
-    for k in SECRET_FIELDS:
-        v = getattr(body, k)
-        if v is not None:
-            fields[k] = encrypt(v) if v != "" else None
-    sets = ", ".join(f"{k} = ?" for k in fields)
     async with db() as conn:
-        async with conn.execute(f"SELECT driver, snmp_write, {', '.join(IDENTITY_FIELDS)} FROM switches WHERE id = ?", (sid,)) as cur:
-            old = await cur.fetchone()    # fuer das Audit: Treiber, SNMP-Schreiben und Schreib-Identitaet vorher
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute(f"SELECT host, driver, snmp_write, {', '.join(IDENTITY_FIELDS + SECRET_FIELDS)} FROM switches WHERE id = ?",
+                                (sid,)) as cur:
+            old = await cur.fetchone()
         if not old:
-            raise HTTPException(404, "Switch nicht gefunden")
-        cur = await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
+            raise HTTPException(404, "Switch nicht gefunden")    # closing the connection rolls the transaction back
+        moved, cleared = not same_destination(old["host"], body.host), []
+        for k in SECRET_FIELDS:
+            v = getattr(body, k)
+            if v is not None:
+                fields[k] = encrypt(v) if v != "" else None
+            elif moved and old[k]:
+                fields[k] = None
+                cleared.append(k)
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
         await conn.commit()
-        if cur.rowcount == 0:
-            raise HTTPException(404, "Switch nicht gefunden")
     await audit(user["username"], "switch_update", body.host, _update_detail(fields, old))
-    return {"ok": True}
+    return {"ok": True, "cleared": cleared}
 
 
 @app.delete("/api/switches/{sid}")
@@ -500,6 +541,12 @@ class SettingsIn(BaseModel):
     pf_verify_tls: bool = False
 
 
+# The secrets of the settings by the destination each one is sent to (F2): a PUT that changes a destination deletes each of its stored
+# secrets that it does not carry anew. The order is that of "cleared" in the answer.
+DESTINATION_SECRETS: dict[str, tuple[str, ...]] = {"opnsense_url": ("opnsense_key", "opnsense_secret"), "radius_server": ("radius_key",),
+                                                   "pf_url": ("pf_pass",)}
+
+
 @app.get("/api/settings")
 async def get_settings(user=Depends(auth.current_user)):
     return {"poll_minutes": int(await get_setting("poll_minutes", "15") or 15),
@@ -517,35 +564,51 @@ async def get_settings(user=Depends(auth.current_user)):
 
 @app.put("/api/settings")
 async def put_settings(body: SettingsIn, user=Depends(auth.current_user)):
+    """A secret changes only when the PUT carries a value for it ("" deletes it), except that it is bound to its destination (F2,
+    DESTINATION_SECRETS): a new destination (same_destination) deletes each of its stored secrets the PUT does not carry anew;
+    "cleared" names them. One write transaction as in update_switch. The RADIUS server is stored canonical and without a zone id
+    (§6 (a)): it lands in a CLI line on every switch prepared for RADIUS. The audit names each destination whose stored text changes
+    ("old → new") and what the change deleted."""
     if body.opnsense_url and not re.fullmatch(r"https?://[A-Za-z0-9.\-:]+(/[\w\-./]*)?", body.opnsense_url):
         raise HTTPException(422, "OPNsense-Adresse ungültig")
     if body.pf_url and not re.fullmatch(r"https?://[A-Za-z0-9.\-:]+(/[\w\-./]*)?", body.pf_url):
         raise HTTPException(422, "PacketFence-Adresse ungültig")
-    if body.radius_server:
+    radius_server = body.radius_server
+    if radius_server:
         try:
-            ipaddress.ip_address(body.radius_server)
+            ip = ipaddress.ip_address(radius_server)
         except ValueError:
             raise HTTPException(422, "RADIUS-Server muss eine IP-Adresse sein")
+        if getattr(ip, "scope_id", None) is not None:
+            raise HTTPException(422, "RADIUS-Server muss eine IP-Adresse ohne Zonen-Angabe sein")
+        radius_server = str(ip)
     if body.radius_key and not changes.RADIUS_KEY_RE.fullmatch(body.radius_key):
         raise HTTPException(422, "Shared Secret: 8–64 Zeichen, ohne Leerzeichen, Anführungszeichen, Backslash, ? und ~ (die versteht die Switch-CLI nicht)")
-    await set_setting("poll_minutes", str(body.poll_minutes))
-    await set_setting("radius_server", body.radius_server)
-    await set_setting("pf_url", body.pf_url.rstrip("/"))
-    await set_setting("pf_user", body.pf_user)
-    await set_setting("pf_verify_tls", "1" if body.pf_verify_tls else "0")
-    for k in ("radius_key", "pf_pass"):
+    new = {"poll_minutes": str(body.poll_minutes), "opnsense_url": body.opnsense_url.rstrip("/"),
+           "opnsense_verify_tls": "1" if body.opnsense_verify_tls else "0", "radius_server": radius_server,
+           "pf_url": body.pf_url.rstrip("/"), "pf_user": body.pf_user, "pf_verify_tls": "1" if body.pf_verify_tls else "0"}
+    secrets = [k for keys in DESTINATION_SECRETS.values() for k in keys]
+    for k in secrets:
         v = getattr(body, k)
         if v is not None:
-            await set_setting(k, encrypt(v) if v else None)
-    await set_setting("opnsense_url", body.opnsense_url.rstrip("/"))
-    await set_setting("opnsense_verify_tls", "1" if body.opnsense_verify_tls else "0")
-    for k in ("opnsense_key", "opnsense_secret"):
-        v = getattr(body, k)
-        if v is not None:
-            await set_setting(k, encrypt(v) if v else None)
+            new[k] = encrypt(v) if v else None
+    async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        old = await read_settings(conn, [*DESTINATION_SECRETS, *secrets])
+        changed, cleared = [], []
+        for dest, keys in DESTINATION_SECRETS.items():
+            if (old[dest] or "") != new[dest]:
+                changed.append(f"{dest}: {old[dest] or '–'} → {new[dest] or '–'}")
+            if not same_destination(old[dest], new[dest]):
+                for k in keys:
+                    if old[k] and getattr(body, k) is None:
+                        new[k] = None
+                        cleared.append(k)
+        await write_settings(conn, new)
+        await conn.commit()
     await _schedule()
-    await audit(user["username"], "settings_update")
-    return {"ok": True}
+    await audit(user["username"], "settings_update", "", ", ".join(changed + ([f"gelöscht: {', '.join(cleared)}"] if cleared else [])))
+    return {"ok": True, "cleared": cleared}
 
 
 @app.post("/api/names/refresh")

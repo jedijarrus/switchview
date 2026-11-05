@@ -353,3 +353,5 @@ details.adv[open] summary { margin-bottom: 4px; }
 .opt:has(input:disabled) { opacity: .55; cursor: not-allowed; background: var(--surface-2); }
 .opt:has(input:disabled):hover { border-color: var(--border-strong); }
 .note.gate { margin: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--fg-2); }
+/* A warning next to a field (a new address deletes stored secrets, F2) */
+.note.warn { color: var(--warn); }

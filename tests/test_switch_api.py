@@ -3,7 +3,7 @@
 
 What an operator relies on:
 - the RW secrets (snmp_rw_community, snmp_rw_auth_pass, snmp_rw_priv_pass) are stored Fernet-encrypted like the read secrets, and a
-  PUT that leaves one None keeps it ("" clears it);
+  PUT that leaves one None keeps it ("" clears it), as long as the host stays (a new host: tests/test_secret_destination.py);
 - GET never serves a secret column, old or new, in any form: the serialization is an allowlist, of each secret only a *_set flag;
 - a row from before this work is served as before, plus additions only (the current frontend keeps working), and a PUT from the
   current frontend, which knows none of the new fields, leaves them as they are;
@@ -446,8 +446,8 @@ def test_audit_records_driver_and_snmp_write(api, tmp_path):
         "SW-VK-02, driver: procurve, snmp_write: aus",
         "snmp_rw_community, driver: procurve → cisco, snmp_write: aus → an",
         "",
-        "",
-        "snmp_write: an → aus",
+        "snmp_auth_proto: – → SHA, snmp_priv_proto: – → AES",     # R48: the form always sends the read identity's protocols
+        "snmp_write: an → aus, snmp_auth_proto: SHA → –, snmp_priv_proto: AES → –",
         "ssh_pass, driver: cisco → juniper, snmp_write: aus → an",
         "SW-VK-02, driver: arista, snmp_write: an",
     ]
@@ -495,6 +495,36 @@ def too_long(limit: int) -> str:
     return (MARK * 20)[:limit + 1]
 
 
+@pytest.mark.parametrize("raw", [[MARK], [[MARK]], MARK])                     # Phase 1 leftover: an array or scalar body
+def test_422_for_a_body_that_is_no_object_echoes_nothing(api, raw):
+    r = api.post("/api/switches", json=raw)
+    assert r.status_code == 422 and MARK not in r.text
+
+
+def test_secret_inputs_cover_every_secret_field():                            # Phase 1 leftover: SECRET_INPUTS
+    for model in (main.SwitchIn, main.SettingsIn, main.LocalLogin, main.AzureLogin):
+        for name in model.model_fields:
+            if name.endswith(("_pass", "_key", "_secret", "community")) or name in ("password", "id_token"):
+                assert name in main.SECRET_INPUTS, name
+
+
+# (method, url, raw JSON body, an input the 422 echoes): a body Python's json reads but a JSON answer cannot carry as it is
+UNRENDERABLE = [
+    ("POST", "/api/auth/local", '{"username": "\\ud800admin", "password": "x"}', "\ufffdadmin"),   # a lone surrogate (T1-f)
+    ("POST", "/api/switches", '{"\\udfff": 1, "host": "\\ud800"}', {"\ufffd": 1, "host": "\ufffd"}),   # in a key, in the whole body
+    ("POST", "/api/switches", '{"name": "a", "host": "203.0.113.42", "sort": NaN}', "nan"),           # JSON has no NaN ...
+    ("PUT", "/api/settings", '{"poll_minutes": -Infinity}', "-inf"),                                 # ... and no Infinity
+]
+
+
+@pytest.mark.parametrize("method, url, raw, echoed", UNRENDERABLE, ids=["surrogate", "surrogate-key", "nan", "infinity"])
+def test_422_renders_whatever_the_body_held(api, method, url, raw, echoed):
+    """Before, the 422 handler failed to encode such an echo: an unauthenticated 500 with a traceback in the log."""
+    r = api.request(method, url, content=raw, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert echoed in [e.get("input") for e in r.json()["detail"]]
+
+
 # (secret field, a value pydantic rejects): too long, or not a string at all
 SECRET_REJECTS = [(f, too_long(64)) for f in ("snmp_community", "snmp_rw_community")] + \
     [(f, too_long(128)) for f in ("snmp_auth_pass", "snmp_priv_pass", "ssh_pass", "snmp_rw_auth_pass", "snmp_rw_priv_pass")] + \
@@ -540,6 +570,8 @@ def test_422_echoing_the_whole_body_drops_its_secrets(api):
     ("PUT", "/api/settings", {"radius_key": too_long(64)}, "radius_key"),
     ("PUT", "/api/settings", {"pf_pass": too_long(200)}, "pf_pass"),
     ("PUT", "/api/settings", {"opnsense_secret": too_long(200)}, "opnsense_secret"),
+    ("POST", "/api/auth/azure", {"id_token": MARK + "x" * 20000}, "id_token"),
+    ("PUT", "/api/settings", {"opnsense_key": too_long(200)}, "opnsense_key"),
 ])
 def test_422_does_not_echo_the_secrets_of_other_forms(api, method, url, sent, field):
     """The handler serves the whole app: the login password and the settings secrets are not echoed either."""

@@ -1,5 +1,6 @@
 """SQLite-Zugriff. Immer ueber db() verbinden (PRAGMAs pro Connection)."""
 import os
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -229,6 +230,22 @@ async def set_setting(key: str, value: str | None):
             (key, value),
         )
         await conn.commit()
+
+
+async def read_settings(conn, keys: Iterable[str]) -> dict[str, str | None]:
+    """The value of each settings key in keys (None without a row), read on conn: inside the caller's transaction, if one is open."""
+    keys = list(keys)
+    if not keys:
+        return {}
+    async with conn.execute(f"SELECT key, value FROM settings WHERE key IN ({', '.join('?' * len(keys))})", keys) as cur:
+        found = {row[0]: row[1] for row in await cur.fetchall()}
+    return {k: found.get(k) for k in keys}
+
+
+async def write_settings(conn, items: dict[str, str | None]) -> None:
+    """Stores each key → value of items on conn, without a commit: the caller commits (or not) its transaction as a whole."""
+    await conn.executemany("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                           list(items.items()))
 
 
 async def audit(username: str | None, action: str, target: str = "", detail: str = ""):
