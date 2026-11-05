@@ -347,7 +347,7 @@ details.adv[open] summary { margin-bottom: 4px; }
 .field > label { color: var(--fg-2); font-weight: 500; }
 .field .sec { display: flex; gap: 6px; align-items: center; }
 .field .sec input { flex: 1 1 auto; min-width: 0; }
-.field .sec .btn[aria-pressed="true"] { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 45%, var(--border-strong)); }
+.field .sec .btn[aria-pressed="true"] { color: var(--crit); background: var(--crit-bg); border-color: var(--crit); box-shadow: 0 0 0 1px var(--crit) inset; }
 .field .sec.clr input { border-color: var(--crit); background: var(--crit-bg); }
 .field input:disabled, .field select:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
 .opt:has(input:disabled) { opacity: .55; cursor: not-allowed; background: var(--surface-2); }

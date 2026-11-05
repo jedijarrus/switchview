@@ -362,16 +362,16 @@
     // PoE nur bei einem Treiber mit snmp_poe und nur, wenn jeder gewählte Port einen zugeordneten PoE-Eintrag hat (netmap: poe)
     const poeCap = has(s, "snmp_poe"), noPoe = ps.filter(p => !p.poe), poeAll = poeCap && !noPoe.length;
     const poeNow = [...new Set(ps.map(p => p.poe && p.poe.on))];
-    const poeHtml = poeAll ? `<div class="grid2"><label class="field"><span>PoE</span><select id="f-poe" ${s.snmp_write ? "" : "disabled"}><option value="">unverändert</option><option value="on" ${f.poe === "on" ? "selected" : ""}>an</option><option value="off" ${f.poe === "off" ? "selected" : ""}>aus</option></select>
-        <span class="hint">jetzt: ${esc(ps.length === 1 ? poeTxt(ps[0].poe) : poeNow.length === 1 ? onTxt(poeNow[0]) : "gemischt")}</span></label></div>
-      ${!s.snmp_write ? `<p class="note gate">PoE schaltet SwitchView nur per SNMP: dafür im Zugang „SNMP darf schreiben“ einschalten.</p>`
+    const poeHtml = poeAll ? `<div class="grid2"><div class="field"><label for="f-poe">PoE</label><select id="f-poe" aria-describedby="f-poe-hint${s.snmp_write ? "" : " f-gate-poe"}" ${s.snmp_write ? "" : "disabled"}><option value="">unverändert</option><option value="on" ${f.poe === "on" ? "selected" : ""}>an</option><option value="off" ${f.poe === "off" ? "selected" : ""}>aus</option></select>
+        <span class="hint" id="f-poe-hint">jetzt: ${esc(ps.length === 1 ? poeTxt(ps[0].poe) : poeNow.length === 1 ? onTxt(poeNow[0]) : "gemischt")}</span></div></div>
+      ${!s.snmp_write ? `<p class="note gate" id="f-gate-poe">PoE schaltet SwitchView nur per SNMP: dafür im Zugang „SNMP darf schreiben“ einschalten.</p>`
         : has(s, "cli") ? `<p class="note" style="margin:0">PoE geht immer per SNMP, auch wenn SSH geht. Zusammen mit RADIUS, Bekannte Geräte, Protected, Geräte pro Port oder Gast-VLAN geht es nicht: bitte getrennt ändern.</p>` : ""}`
       : poeCap && noPoe.length < ps.length ? `<p class="note gate">PoE nur, wenn jeder gewählte Port PoE hat (ohne PoE: ${esc(noPoe.map(p => p.n).join(", "))}).</p>` : "";
     const chipBtns = (ids, sel, attr) => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
     const lims = LIMITS.filter(n => n <= (s.limitMax || 2));
     const body = `<p class="note" style="margin:0">${ports.length === 1 ? "Port" : ports.length + " Ports"}: <span class="mono">${esc(ports.join(", "))}</span></p>
-      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""} ${stOff[k] ? "disabled" : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div>
-        ${nacWhy ? `<p class="note gate">${esc(nacWhy)}</p>` : ""}</fieldset>
+      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""} ${stOff[k] ? 'disabled aria-describedby="f-gate-nac"' : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div>
+        ${nacWhy ? `<p class="note gate" id="f-gate-nac">${esc(nacWhy)}</p>` : ""}</fieldset>
       <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-u-hint"></span></label>
         <label class="field"><span>Beschreibung</span><input id="f-name" value="${esc(f.name)}" maxlength="64" placeholder="unverändert" autocomplete="off"><span class="hint">ohne Leerzeichen, z. B. Drucker-EK</span></label></div>
       <label class="check"><input type="checkbox" id="f-nclear" ${f.nameClear ? "checked" : ""}> Beschreibung entfernen</label>
@@ -379,8 +379,8 @@
       <details class="adv"><summary>Getaggte VLANs, Geräte pro Port, Gast-VLAN</summary><div style="display:grid;gap:12px;margin-top:10px">
         <div class="field"><span>Getaggt hinzufügen</span>${chipBtns(vl, f.add, "ta")}</div>
         <div class="field"><span>Getaggt entfernen</span>${chipBtns(tagUnion, f.rem, "tr")}</div>
-        <div class="grid2"><label class="field"><span>Geräte pro Port</span><select id="f-lim" ${nac ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></label>
-          <label class="field"><span>Gast-VLAN für Unbekannte</span><select id="f-guest" ${nac ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></label></div>
+        <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint" ${nac ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
+          <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint" ${nac ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
       </div></details>
       ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>` : ""}`;
     const collect = () => {
@@ -414,14 +414,15 @@
   async function previewChange(s, payload, back) {
     const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
     modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
-    let r, caps;
-    try { [r, caps] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveCaps(s)]); }
+    let r, row;
+    try { [r, row] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveRow(s)]); }
     catch (e) { modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
-    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp";
+    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp", caps = (row && row.caps) || s.caps || [];
     // Per SNMP gibt es kein Staging: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das selbst tut
-    // (snmp_autosave, R26); sonst bleibt das Speichern am Switch.
-    const way = !can || !snmp ? "" : caps.includes("snmp_autosave") ? `<div class="banner"><b>Wird per SNMP sofort angewendet und automatisch gespeichert.</b></div>`
-      : `<div class="banner warn"><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b></div>`;
+    // (snmp_autosave, R26); sonst bleibt das Speichern am Switch. Geht der SET fälschbar hinaus (snmp_rw_insecure), sagt es die Vorschau laut.
+    const way = !can || !snmp ? "" : (caps.includes("snmp_autosave") ? `<div class="banner"><b>Wird per SNMP sofort angewendet und automatisch gespeichert.</b></div>`
+      : `<div class="banner warn"><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b></div>`)
+      + (row ? insecureBanner(row) : "");
     const poeNote = snmp && caps.includes("cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
     const body = `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>
       ${r.blocked.length ? `<div class="error"><b>Nicht möglich:</b><ul class="blist">${r.blocked.map(b => `<li>${b.port === "*" ? "" : "Port " + esc(b.port) + ": "}${esc(b.reason)}</li>`).join("")}</ul></div>` : ""}
@@ -435,39 +436,38 @@
     if (can) btns.push({ label: r.kind === "save" ? "Speichern" : "Ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
       // genau der Schreibweg dieser Vorschau (nie eine eigene Wahl): geht er nicht mehr, lehnt der Server ab statt still den anderen zu nehmen
-      try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, mechanism: r.mechanism, token: r.token }); runProgress(s, res.id, caps); }
+      try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, mechanism: r.mechanism, token: r.token }); runProgress(s, res.id); }
       catch (e) { toast(e.message); b.disabled = false; }
     } });
     modal(title, body, btns);
   }
-  // Die Treiber-Fähigkeiten, wie der Server sie jetzt kennt (der Netzplan im Browser kann älter sein), für die Hinweise zum Speichern
-  async function liveCaps(s) {
-    try { const row = (await api("GET", "/api/switches")).find(x => x.id === s.id); if (row && row.caps) return row.caps; } catch (e) { /* dann der Netzplan */ }
-    return s.caps || [];
+  // Die Switch-Zeile, wie der Server sie jetzt kennt (Treiber-Fähigkeiten, Schreib-Identität; der Netzplan im Browser kann älter sein),
+  // oder null: dann gelten die Fähigkeiten aus dem Netzplan
+  async function liveRow(s) {
+    try { return (await api("GET", "/api/switches")).find(x => x.id === s.id) || null; } catch (e) { return null; }
   }
 
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };
   const chPill = c => `<span class="pill ${CH[c.status] ? CH[c.status][1] : "neutral"}">${CH[c.status] ? CH[c.status][0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
   const stepsHtml = c => `<ul class="steps">${(c.steps || []).map(x => `<li class="${esc(x[2])}"><span class="t">${esc(fmtTime(x[0]).split(", ").pop())}</span><span>${esc(x[1])}</span></li>`).join("")}</ul>`;
-  // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. Bei "unklar" hängt es am Weg: per SSH speichert erst write memory nach der
-  // Prüfung; per SNMP wirkt, was der Switch übernommen hat, schon, gespeichert ist es nur bei einem Treiber mit snmp_autosave.
-  function resultHead(c, caps) {
-    const snmp = c.mechanism === "snmp";
-    const kept = snmp ? (caps.includes("snmp_autosave") ? "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst)."
-      : "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert – am Switch speichern.")
-      : c.saved ? "Die Änderung ist gespeichert." : "Der Switch läuft mit der Änderung, sie ist aber nicht gespeichert.";
+  // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. "unklar" per SNMP in den Worten des Servers: sein letzter Fehlerschritt ist
+  // der Fehler plus, ob das Übernommene schon gespeichert ist (nach dem Treiber zur Laufzeit). Beginnt er nicht mit dem Fehler der Änderung
+  // (etwa nach einem Neustart, der nur den Fehler setzt), gilt der Fehler allein. Per SSH speichert erst write memory nach der Prüfung.
+  function resultHead(c) {
+    const lastErr = [...(c.steps || [])].reverse().find(x => x[2] === "error"), err = c.error || "";
+    const unclear = c.mechanism === "snmp" ? (lastErr && lastErr[1].startsWith(err) ? lastErr[1] : err)
+      : `${sentence(c.error || "")} ${c.saved ? "Die Änderung ist gespeichert." : "Der Switch läuft mit der Änderung, sie ist aber nicht gespeichert."}`;
     return { ok: c.saved ? `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>` : `<div class="banner warn"><b>Erledigt, aber nicht dauerhaft gespeichert – am Switch speichern.</b></div>`,
-      unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(sentence(c.error || ""))} ${esc(kept)}</span></div>`,
+      unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(unclear)}</span></div>`,
       failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(c.error || "")}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(c.error || "")}</span></div>` }[c.status] || "";
   }
-  async function runProgress(s, id, caps) {
-    caps = caps || s.caps || [];
+  async function runProgress(s, id) {
     modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
     for (;;) {
       if (!$("#prog")) return;
       let c; try { c = await api("GET", `/api/changes/${id}`); } catch (e) { $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
       const done = ["ok", "unclear", "failed", "aborted"].includes(c.status);
-      const head = resultHead(c, caps);
+      const head = resultHead(c);
       if (!$("#prog")) return;
       $("#prog").innerHTML = `<p style="margin:0 0 10px"><b>${esc(c.summary)}</b></p>${head}<div style="margin-top:10px">${stepsHtml(c)}</div>${done && c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`;
       if (done) {
@@ -578,6 +578,13 @@
   const capsTxt = caps => [caps.includes("cli") ? "SSH-CLI" + (caps.includes("nac") ? " mit RADIUS/802.1X" : "") + (caps.includes("backup") ? " und Sicherung" : "") : "keine SSH-CLI",
     "SNMP: " + (Object.keys(CAP_TXT).filter(c => caps.includes(c)).map(c => CAP_TXT[c]).join(", ") || "nichts"),
     caps.includes("snmp_autosave") ? "speichert SNMP-Änderungen selbst" : "speichert SNMP-Änderungen nicht selbst"].join(" · ");
+  // Laut, wenn SNMP-SETs an diesen Switch fälschbar hinausgehen (snmp_rw_insecure vom Server: v2c-Community im Klartext oder SNMPv3 ohne
+  // Authentifizierung). Für das Formular, den Dialog nach dem Speichern und die SNMP-Vorschau.
+  function insecureBanner(s) {
+    if (!s.snmp_rw_insecure) return "";
+    const v3 = s.snmp_write_via === "rw" ? !!s.snmp_rw_user : s.snmp_version === "3";
+    return `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${v3 ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>`;
+  }
   // Mit welcher Identität SNMP-SETs an diesen Switch gehen, gespeicherter Stand (der Server rechnet es mit poller.write_identity)
   function writeState(s) {
     if (!s.snmp_write) return "";
@@ -585,7 +592,14 @@
     const rw = s.snmp_write_via === "rw", v3 = rw ? !!s.snmp_rw_user : s.snmp_version === "3";
     const who = v3 ? `SNMPv3-Benutzer „${esc(rw ? s.snmp_rw_user : s.snmp_user)}“` : "v2c-Community";
     return `<p class="note" style="margin:0">Zurzeit: <span class="pill ${s.snmp_rw_insecure ? "crit" : "ok"}">${rw ? "schreibt mit eigenem Schreib-Zugang" : "schreibt mit Lese-Zugang"}</span> ${who}${rw ? "" : ", braucht dafür am Switch Schreibrechte"}</p>`
-      + (s.snmp_rw_insecure ? `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${v3 ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>` : "");
+      + insecureBanner(s);
+  }
+  // Nach dem Speichern: schreibt SNMP an diesem Switch fälschbar oder gar nicht, bleibt dieser Dialog stehen, statt nur einer kurzen
+  // Meldung. Die Quelle ist allein der Server (GET /api/switches, poller.write_identity).
+  const writeNeedsAlert = row => !!row && !!row.snmp_write && (!!row.snmp_rw_insecure || !row.snmp_write_via || !!row.snmp_write_error);
+  function writeAlert(row) {
+    modal(`SNMP-Schreiben prüfen: ${row.name}`, `<p style="margin:0">Gespeichert. SNMP-Schreiben an diesem Switch, wie der Server es jetzt sieht:</p>${writeState(row)}`,
+      [{ label: "Zugang bearbeiten", onClick: () => editSwitch(row) }, { label: "Verstanden", cls: "primary", onClick: closeModal }]);
   }
   async function editSwitch(s) {
     const isNew = !s; s = s || { snmp_version: "2c", enabled: 1, sort: 0, zone: "", driver: "procurve", snmp_write: false };
@@ -596,7 +610,9 @@
       : drv.some(d => d.name === curDrv) ? drv : [...drv, { name: curDrv, caps: s.caps || [], notes: "Unbekannter Treiber, wirkt wie generic (nur Standard-MIBs)." }];
     const KEEP = "gesetzt – leer lassen = unverändert";
     // Geheimnis: leer = unverändert (null), „Löschen“ schickt "" (main.SECRET_FIELDS). Einen Wert liefert der Server nie, nur *_set.
-    const secret = (id, label, set) => `<div class="field"><label for="${id}">${label}</label><div class="sec"><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? KEEP : ""}">${set ? `<button class="btn small" type="button" data-clr="${id}" aria-pressed="false" aria-label="${label} löschen">Löschen</button>` : ""}</div></div>`;
+    // „Löschen“ ist ein Umschalter (aria-pressed), sein Text bleibt; der Name nennt das Feld eindeutig (Lese- und RW-Kennwörter heißen
+    // sichtbar gleich) und beginnt mit dem sichtbaren Text (WCAG 2.5.3).
+    const secret = (id, label, set, what) => `<div class="field"><label for="${id}">${label}</label><div class="sec"><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? KEEP : ""}">${set ? `<button class="btn small" type="button" data-clr="${id}" aria-pressed="false" aria-label="Löschen: ${what}">Löschen</button>` : ""}</div></div>`;
     // Ein gespeicherter Wert, den die Auswahl nicht kennt, bleibt als eigene Option stehen (sonst nähme ein Speichern still die erste)
     const sel = (id, opts, val) => `<select id="${id}">${(opts.includes(val) ? opts : [...opts, val]).map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o || "–")}</option>`).join("")}</select>`;
     const AUTH = ["SHA", "SHA-256", "SHA-512", "MD5"], PRIV = ["AES", "AES-256", "DES", ""];
@@ -607,34 +623,34 @@
       <label class="field"><span>Adresse (IP oder Hostname)</span><input id="f-host" value="${esc(s.host || "")}" required maxlength="64"></label>
       <label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>
       <label class="field"><span>Reihenfolge</span><input id="f-sort" type="number" value="${esc(s.sort || 0)}"></label></div>
-      <label class="field"><span>Treiber</span><select id="f-driver" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
-        <span class="hint" id="f-drv-notes"></span><span class="hint" id="f-drv-caps"></span></label>
+      <div class="field"><label for="f-driver">Treiber</label><select id="f-driver" aria-describedby="f-drv-notes f-drv-caps" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
+        <span class="hint" id="f-drv-notes"></span><span class="hint" id="f-drv-caps"></span></div>
       <label class="check"><input id="f-enabled" type="checkbox" ${s.enabled ? "checked" : ""}> Aktiv (wird abgefragt und gesichert)</label>
       <fieldset class="fs"><legend>SNMP (lesen)</legend><label class="field"><span>Version</span>${sel("f-snmpv", ["2c", "3"], s.snmp_version)}</label>
-        <div id="snmp2">${secret("f-comm", "Community", s.snmp_community_set)}</div>
+        <div id="snmp2">${secret("f-comm", "Community", s.snmp_community_set, "Lese-Community")}</div>
         <div id="snmp3" class="grid2"><label class="field"><span>Benutzer</span><input id="f-suser" value="${esc(s.snmp_user || "")}"></label>
           <label class="field"><span>Auth-Verfahren</span>${sel("f-aproto", AUTH, s.snmp_auth_proto || "SHA")}</label>
-          ${secret("f-apass", "Auth-Kennwort", s.snmp_auth_pass_set)}<label class="field"><span>Verschlüsselung</span>${sel("f-pproto", PRIV, s.snmp_priv_proto || "AES")}</label>
-          ${secret("f-ppass", "Priv-Kennwort", s.snmp_priv_pass_set)}</div></fieldset>
+          ${secret("f-apass", "Auth-Kennwort", s.snmp_auth_pass_set, "Lese-Auth-Kennwort")}<label class="field"><span>Verschlüsselung</span>${sel("f-pproto", PRIV, s.snmp_priv_proto || "AES")}</label>
+          ${secret("f-ppass", "Priv-Kennwort", s.snmp_priv_pass_set, "Lese-Priv-Kennwort")}</div></fieldset>
       <fieldset class="fs"><legend>SNMP (schreiben)</legend>
-        <label class="check"><input id="f-sw" type="checkbox" ${s.snmp_write ? "checked" : ""}> SNMP darf schreiben</label>
+        <label class="check"><input id="f-sw" type="checkbox" aria-describedby="f-sw-hint" ${s.snmp_write ? "checked" : ""}> SNMP darf schreiben</label>
         <p class="note" id="f-sw-hint" style="margin:0"></p>
         ${isNew ? "" : writeState(s)}
         <div id="f-rw" style="display:grid;gap:12px">
           <p class="eyebrow" style="margin:0">Eigener Schreib-Zugang · empfohlen: SNMPv3 mit Auth und Verschlüsselung (authPriv)</p>
           <div class="grid2"><label class="field"><span>v3-Benutzer</span><input id="f-rwuser" value="${esc(s.snmp_rw_user || "")}" maxlength="64" autocomplete="off"></label>
             <label class="field"><span>Auth-Verfahren</span>${sel("f-rwaproto", AUTH, rwAp)}</label>
-            ${secret("f-rwapass", "Auth-Kennwort", s.snmp_rw_auth_pass_set)}<label class="field"><span>Verschlüsselung</span>${sel("f-rwpproto", PRIV, rwPp)}</label>
-            ${secret("f-rwppass", "Priv-Kennwort", s.snmp_rw_priv_pass_set)}</div>
+            ${secret("f-rwapass", "Auth-Kennwort", s.snmp_rw_auth_pass_set, "RW-Auth-Kennwort")}<label class="field"><span>Verschlüsselung</span>${sel("f-rwpproto", PRIV, rwPp)}</label>
+            ${secret("f-rwppass", "Priv-Kennwort", s.snmp_rw_priv_pass_set, "RW-Priv-Kennwort")}</div>
           <details class="adv" ${s.snmp_rw_community_set ? "open" : ""}><summary>Statt v3: v2c-Schreib-Community (unsicher)</summary><div style="display:grid;gap:10px;margin-top:10px">
             <div class="banner crit"><span><b>v2c ist unsicher:</b> die Community geht im Klartext übers Netz. Wer sie mitliest, kann damit an diesem Switch schreiben. Nur, wenn der Switch kein SNMPv3 kann.</span></div>
-            ${secret("f-rwcomm", "Schreib-Community", s.snmp_rw_community_set)}</div></details>
+            ${secret("f-rwcomm", "Schreib-Community", s.snmp_rw_community_set, "Schreib-Community")}</div></details>
           <p class="note" style="margin:0">Es schreibt der v3-Benutzer, ohne ihn die v2c-Community, ohne beide der Lese-Zugang oben (er braucht dann am Switch Schreibrechte). Die Community „public“ schreibt nie.</p>
         </div></fieldset>
       <fieldset class="fs"><legend>SSH (Sicherung und Änderungen)</legend><p class="note" id="f-ssh-hint" style="margin:0" hidden></p>
-        <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set)}</div></fieldset>`;
+        <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set, "SSH-Kennwort")}</div></fieldset>`;
     const buttons = [];
-    if (!isNew) buttons.push({ label: "Löschen", cls: "danger", onClick: async () => {
+    if (!isNew) buttons.push({ label: "Switch löschen", cls: "danger", onClick: async () => {
       closeModal();
       if (!(await confirmModal("Switch löschen", `<b>${esc(s.name)}</b> mit allen Port-Daten und Sicherungen löschen?`, "Löschen", true))) return editSwitch(s);
       try { await api("DELETE", `/api/switches/${s.id}`); toast("Gelöscht"); await loadMap(true); selSwitch = null; go("switches"); } catch (e) { toast(e.message); }
@@ -643,15 +659,20 @@
     buttons.push({ label: isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async btn => {
       const val = id => $("#" + id).value;
       const pw = id => { const x = $("#" + id); return x.closest(".sec").classList.contains("clr") ? "" : x.value === "" ? null : x.value; };
+      // Ein verborgener RW-Block (SNMP-Schreiben aus, nichts RW gespeichert) schickt nichts, auch nicht, was vorher darin getippt wurde
+      const rwOn = !$("#f-rw").hidden;
       const payload = { name: val("f-name").trim(), host: val("f-host").trim(), zone: val("f-zone").trim(), sort: +val("f-sort") || 0, enabled: $("#f-enabled").checked, snmp_version: val("f-snmpv"),
         snmp_community: pw("f-comm"), snmp_user: val("f-suser").trim() || null, snmp_auth_proto: val("f-aproto") || null, snmp_auth_pass: pw("f-apass"), snmp_priv_proto: val("f-pproto") || null,
         snmp_priv_pass: pw("f-ppass"), ssh_user: val("f-ssh-user").trim() || null, ssh_pass: pw("f-ssh-pass"),
-        snmp_rw_community: pw("f-rwcomm"), snmp_rw_auth_pass: pw("f-rwapass"), snmp_rw_priv_pass: pw("f-rwppass") };
+        snmp_rw_community: rwOn ? pw("f-rwcomm") : null, snmp_rw_auth_pass: rwOn ? pw("f-rwapass") : null, snmp_rw_priv_pass: rwOn ? pw("f-rwppass") : null };
       // Treiber, SNMP-Schreiben, RW-Benutzer und seine Protokolle lässt ein PUT ohne sie stehen (main.UPDATE_IF_SENT): beim Anlegen alle,
       // beim Bearbeiten nur, was sich gegenüber dem gespeicherten Stand ändert. Die RW-Protokolle nur zu einem RW-Benutzer (ohne ihn unbenutzt).
-      const rwUser = val("f-rwuser").trim() || null, upd = { snmp_write: $("#f-sw").checked, snmp_rw_user: rwUser };
+      const upd = { snmp_write: $("#f-sw").checked };
       if (drv) upd.driver = val("f-driver");
-      if (rwUser) { upd.snmp_rw_auth_proto = val("f-rwaproto") || null; upd.snmp_rw_priv_proto = val("f-rwpproto") || null; }
+      if (rwOn) {
+        const rwUser = val("f-rwuser").trim() || null; upd.snmp_rw_user = rwUser;
+        if (rwUser) { upd.snmp_rw_auth_proto = val("f-rwaproto") || null; upd.snmp_rw_priv_proto = val("f-rwpproto") || null; }
+      }
       const was = { driver: curDrv, snmp_write: !!s.snmp_write, snmp_rw_user: s.snmp_rw_user || null, snmp_rw_auth_proto: s.snmp_rw_auth_proto || null, snmp_rw_priv_proto: s.snmp_rw_priv_proto || null };
       Object.entries(upd).forEach(([k, v]) => { if (isNew || v !== was[k]) payload[k] = v; });
       if (!payload.name || !payload.host) { toast("Name und Adresse sind Pflicht"); return; }
@@ -659,7 +680,10 @@
       try {
         let id = s.id;
         if (isNew) id = (await api("POST", "/api/switches", payload)).id; else await api("PUT", `/api/switches/${s.id}`, payload);
+        // Wie SNMP jetzt schreibt, rechnet der Server (write_identity); fälschbar oder ohne Schreib-Zugang: ein Dialog, der stehen bleibt
+        const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === id), () => null);
         closeModal(); toast(isNew ? "Angelegt, wird abgefragt …" : "Gespeichert");
+        if (writeNeedsAlert(row)) writeAlert(row);
         if (isNew) await api("POST", `/api/switches/${id}/poll`).catch(() => {});
         await loadMap(true); go("switches", payload.name);
       } catch (e) { toast(e.message); btn.disabled = false; }
@@ -668,21 +692,26 @@
     const sync = () => { const v3 = $("#f-snmpv").value === "3"; $("#snmp2").hidden = v3; $("#snmp3").hidden = !v3; };
     $("#f-snmpv").addEventListener("change", sync); sync();
     const syncDrv = () => {
-      const d = drvs.find(x => x.name === $("#f-driver").value) || drvs[0], caps = d.caps || [], cli = caps.includes("cli");
-      $("#f-drv-notes").textContent = d.notes || ""; $("#f-drv-caps").textContent = capsTxt(caps);
-      $("#f-sw-hint").textContent = (cli ? "Dieser Treiber ändert sonst per SSH: SNMP schreibt nur, wenn SSH nicht geht, und für PoE (PoE geht immer per SNMP)."
+      const d = drvs.find(x => x.name === $("#f-driver").value) || drvs[0];
+      $("#f-drv-notes").textContent = d.notes || "";
+      // Ohne Treiberliste sind die Fähigkeiten unbekannt: dann kein Hinweis aus ihnen (ein leerer Ersatz hieße „keine SSH-CLI“ & Co.)
+      const caps = drv ? d.caps || [] : null, cli = !!caps && caps.includes("cli");
+      $("#f-drv-caps").textContent = caps ? capsTxt(caps) : "";
+      $("#f-sw-hint").hidden = !caps;
+      $("#f-sw-hint").textContent = !caps ? "" : (cli ? "Dieser Treiber ändert sonst per SSH: SNMP schreibt nur, wenn SSH nicht geht, und für PoE (PoE geht immer per SNMP)."
         : "Ohne SSH-CLI gehen alle Änderungen an diesem Switch per SNMP; ohne SNMP-Schreiben kann SwitchView hier nur lesen.")
         + (caps.includes("snmp_autosave") ? "" : " SNMP-Änderungen speichert dieser Switch nicht selbst: danach am Switch speichern.");
-      $("#f-ssh-hint").hidden = cli; $("#f-ssh-hint").textContent = cli ? "" : `Treiber ${d.name} hat keine SSH-CLI: SwitchView braucht hier keinen SSH-Zugang.`;
+      $("#f-ssh-hint").hidden = !caps || cli; $("#f-ssh-hint").textContent = caps && !cli ? `Treiber ${d.name} hat keine SSH-CLI: SwitchView braucht hier keinen SSH-Zugang.` : "";
     };
     $("#f-driver").addEventListener("change", syncDrv); syncDrv();
     const syncRw = () => { $("#f-rw").hidden = !$("#f-sw").checked && !rwStored; };
     $("#f-sw").addEventListener("change", syncRw); syncRw();
-    // „Löschen“ je gespeichertem Geheimnis: markiert es, beim Speichern geht "" hinaus; noch einmal klicken nimmt es zurück
+    // „Löschen“ je gespeichertem Geheimnis: markiert es (aria-pressed, rot), beim Speichern geht "" hinaus; noch einmal klicken nimmt es
+    // zurück. Der Text des Knopfs bleibt gleich.
     $("#m-body").onclick = e => {
       const b = e.target.closest("[data-clr]"); if (!b) return;
       const inp = $("#" + b.dataset.clr), on = b.getAttribute("aria-pressed") !== "true";
-      b.setAttribute("aria-pressed", String(on)); b.textContent = on ? "Nicht löschen" : "Löschen";
+      b.setAttribute("aria-pressed", String(on));
       inp.value = ""; inp.disabled = on; inp.placeholder = on ? "wird beim Speichern gelöscht" : KEEP; inp.closest(".sec").classList.toggle("clr", on);
     };
   }
