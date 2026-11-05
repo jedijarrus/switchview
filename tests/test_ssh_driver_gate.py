@@ -59,14 +59,19 @@ class Session:
 
 
 class Sessions:
-    """sshcli.ConnectHandler: records the host of every session it is asked to open."""
+    """sshcli.ConnectHandler: records the host of every session it is asked to open. repolls: the re-polls run_change scheduled."""
 
     def __init__(self):
         self.hosts: list[str] = []
+        self.repolls: list[int] = []
 
     def __call__(self, **device):
         self.hosts.append(device["host"])
         return Session()
+
+    def repoll(self, sid: int):
+        self.repolls.append(sid)    # recorded on the call; the task it becomes has nothing to do (no SNMP poll in these tests)
+        return asyncio.sleep(0)
 
 
 @pytest.fixture
@@ -78,8 +83,7 @@ def world(tmp_path, monkeypatch) -> Sessions:
     monkeypatch.setattr(sshcli, "ConnectHandler", sessions)
     monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
     monkeypatch.setattr(changes, "_cfg_stale", set())
-    sessions.repolls = []
-    monkeypatch.setattr(changes, "_repoll", lambda sid: sessions.repolls.append(sid) or asyncio.sleep(0))
+    monkeypatch.setattr(changes, "_repoll", sessions.repoll)
     return sessions
 
 

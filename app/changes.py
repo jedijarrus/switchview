@@ -878,6 +878,8 @@ async def _mark_saved_by_snmp(cid: int, ids: list[int]):
         for i in ids:
             async with conn.execute("SELECT steps FROM changes WHERE id = ?", (i,)) as cur:
                 r = await cur.fetchone()
+            if r is None:    # inzwischen geloescht
+                continue
             steps = json.loads(r["steps"] or "[]") + [[_now(), text, "warn"]]
             await conn.execute("UPDATE changes SET saved = 1, steps = ? WHERE id = ?", (json.dumps(steps), i))
         await conn.commit()
