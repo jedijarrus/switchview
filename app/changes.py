@@ -74,8 +74,12 @@ def status_of(st: dict) -> str:
 
 # ── Inventar (aus der SNMP-Abfrage) ───────────────────────────────────────────
 async def inventory(sid: int) -> dict:
-    """Ports des Switches plus Uplinks (LLDP-Nachbar ist ein bekannter Switch oder MAC-Link)."""
-    from main import build_map  # spaete Bindung, vermeidet Zyklus
+    """Ports des Switches plus Uplinks: die Ports seiner Verbindungen (LLDP oder MAC-Link, main._links), mit Trunk und dessen Mitgliedern.
+    Bei einem Treiber, der seine Ports nach ifType waehlt (poller.by_iftype, jeder ausser ProCurve), dazu jeder Port, dessen LLDP-Nachbar
+    ein anderer verwalteter Switch ist (dieselbe Zuordnung wie in _links, main.switch_keys), auch ohne erkannte Verbindung (R40): dort
+    kann ein Nachbar einen Port nennen, den _links nicht findet, und ohne Uplink-Schutz koennte jeder den einzigen Uplink abschalten.
+    Lieber zu viele Uplinks als einer zu wenig. ProCurve bleibt, wie es war."""
+    from main import build_map, switch_keys  # spaete Bindung, vermeidet Zyklus
     m = await build_map()
     sw = next((s for s in m["switches"] if s["id"] == sid), None)
     if not sw:
@@ -87,6 +91,13 @@ async def inventory(sid: int) -> dict:
                 uplinks |= set(side["ports"])
                 if side["trunk"]:
                     uplinks.add(side["trunk"])
+    if poller.by_iftype(sw["driver"] or "procurve"):
+        keys = switch_keys(m["switches"])
+        for p in sw["ports"]:
+            if any(keys.get(entry[0]) not in (None, sw["k"]) for entry in p["l"]):
+                uplinks.add(p["n"])
+                if p["tr"]:
+                    uplinks.add(p["tr"])
     for p in sw["ports"]:
         if p["tr"] and p["tr"] in uplinks:
             uplinks.add(p["n"])

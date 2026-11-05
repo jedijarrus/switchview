@@ -1232,23 +1232,36 @@ async def build_map() -> dict:
     return {"generated": datetime.now(timezone.utc).isoformat(), "vlans": vlans, "switches": switches, "links": links}
 
 
-def _links(switches: list[dict], all_macs: dict) -> list[dict]:
-    by_name = {s["k"]: s for s in switches}
-    sys2 = {}
+def switch_keys(switches: list[dict]) -> dict[str, str]:
+    """sysName und Name (k) jedes Switches -> sein k: woran _links einen LLDP-Nachbarn als verwalteten Switch erkennt. changes.inventory
+    nimmt fuer seinen Uplink-Schutz dieselbe Zuordnung (R40)."""
+    keys = {}
     for s in switches:
-        sys2[s["sys"]] = s["k"]; sys2[s["k"]] = s["k"]
+        keys[s["sys"]] = s["k"]; keys[s["k"]] = s["k"]
+    return keys
+
+
+def _links(switches: list[dict], all_macs: dict) -> list[dict]:
+    """Die Verbindungen zwischen den Switches. Ein LLDP-Eintrag eines Ports ist [sysName, PortDesc (sonst PortId), PortId] (R40; eine
+    Zeile von vor dem Upgrade hat nur die ersten beiden). Gesucht wird der Port des Nachbarn erst nach der PortDesc, dann nach der PortId:
+    bei anderen Herstellern ist die PortDesc oft der lange Name oder die Beschreibung des Ports, die PortId sein ifName. Ein Paar, das erst
+    die PortId findet, kommt nach den Paaren aus den Basis-MACs dazu und verdraengt keins davon: es fuegt nur Verbindungen hinzu."""
+    by_name = {s["k"]: s for s in switches}
+    sys2 = switch_keys(switches)
     base2 = {s["baseMac"]: s["k"] for s in switches if s["baseMac"]}
 
     def port(k, n):
         return next((p for p in by_name[k]["ports"] if p["n"] == n), None)
 
     pairs: dict[tuple, str] = {}
+    by_port_id: dict[tuple, str] = {}    # Paare, die erst die PortId findet
     lldp_ports = set()
     for s in switches:
         for p in s["ports"]:
             if p["n"].startswith("Trk"):
                 continue
-            for nsys, nport in p["l"]:
+            for entry in p["l"]:
+                nsys, nport = entry[0], entry[1]
                 nk = sys2.get(nsys)
                 np_ = port(nk, nport.strip()) if nk else None
                 if nk and nk != s["k"] and np_:
@@ -1257,6 +1270,8 @@ def _links(switches: list[dict], all_macs: dict) -> list[dict]:
                         lldp_ports.add((kk, pp["n"]))
                         if pp["tr"]:
                             lldp_ports.add((kk, pp["tr"]))
+                elif nk and nk != s["k"] and len(entry) > 2 and entry[2].strip() and port(nk, entry[2].strip()):
+                    by_port_id[tuple(sorted([(s["k"], p["n"]), (nk, entry[2].strip())]))] = "lldp"
     # Ohne LLDP: Port, an dem die Basis-MAC eines anderen Switches gelernt wird, und umgekehrt
     seen_at: dict[tuple, str] = {}
     for (k, pname), macset in all_macs.items():
@@ -1273,6 +1288,8 @@ def _links(switches: list[dict], all_macs: dict) -> list[dict]:
         if any({a, b} == {x[0][0], x[1][0]} for x in pairs):
             continue
         pairs[tuple(sorted([(a, pa), (b, pb)]))] = "mac"
+    for key, src in by_port_id.items():
+        pairs.setdefault(key, src)
 
     groups: dict[tuple, dict] = {}
     for (x, y), src in pairs.items():

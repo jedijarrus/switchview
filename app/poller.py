@@ -37,6 +37,10 @@ O = {
     "lldpPortId": "1.0.8802.1.1.2.1.4.1.1.7",
 }
 HEX = {"baseMac", "vlanEgress", "vlanUntagged"}
+# LLDP-MIB lldpLocPortTable (lldpLocalSystemData .7, Eintrag .1), Index lldpLocPortNum: welcher eigene Port hinter einer lokalen
+# LLDP-Portnummer steht, als PortId und PortDesc, wie der Switch sie sendet. Nicht in O: gewalkt nur fuer einen Treiber, der seine Ports
+# nach ifType waehlt (by_iftype), siehe lldp_ports; ProCurve zaehlt LLDP-Ports nach ifIndex.
+LLDP_LOC = {"lldpLocPortId": "1.0.8802.1.1.2.1.3.7.1.3", "lldpLocPortDesc": "1.0.8802.1.1.2.1.3.7.1.4"}
 
 # Portauswahl nach ifType (IANAifType; der Walk liefert die Zahl), siehe select_ports
 PHYS_IFTYPES = frozenset({"6", "117"})  # ethernetCsmacd, gigabitEthernet: physische Ports
@@ -373,6 +377,24 @@ def _poe_entities(rows: dict[str, tuple[int, int]], tables: dict[str, dict[str, 
     return target
 
 
+def lldp_ports(num: str, ports: list[str], ifname: dict[str, str], bp2if: dict[str, str], loc: dict[str, dict[str, str]]) -> set[str]:
+    """Zu welchen Ports (ifIndex aus ports, select_ports) ein LLDP-Eintrag mit der lokalen Portnummer num (lldpRemLocalPortNum) gehoert,
+    bei einem Treiber, der seine Ports nach ifType waehlt (R40). LLDP-MIB zaehlt lokale Ports nach LldpPortNumber, bei einer Bridge der
+    dot1dBasePort; nur ProCurve nimmt dafuer den ifIndex (dort gilt num = ifIndex, wie seit jeher, ohne diese Funktion). Weil Hersteller
+    das eine wie das andere tun, und manche eine eigene Zaehlung, die lldpLocPortTable aufloest (loc: _tbl-Tabellen von LLDP_LOC), gehoert
+    der Eintrag zu ALLEN Ports, die num meinen kann:
+      - bp2if[num], wenn num ein Bridge-Port ist,
+      - dem Port mit dem ifIndex num,
+      - dem Port, dessen ifName lldpLocPortId[num] oder lldpLocPortDesc[num] ist, nur wenn genau ein Port passt.
+    Derselbe Nachbar kann so an mehr als einem Port stehen: im Zweifel mehr Uplinks (mehr Schutz), nie einer zu wenig."""
+    out = {ifi for ifi in (bp2if.get(num), num) if ifi in ports}
+    names = {v.strip() for v in (loc.get("lldpLocPortId", {}).get(num), loc.get("lldpLocPortDesc", {}).get(num)) if v and v.strip()}
+    named = [ifi for ifi in ports if ifname[ifi] in names]
+    if len(named) == 1:
+        out.add(named[0])
+    return out
+
+
 async def poll_switch(switch_id: int) -> dict:
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
@@ -386,8 +408,9 @@ async def poll_switch(switch_id: int) -> dict:
         # Walks, ohne die es kein Ergebnis gibt: sysName und ifName, dazu ifType, wo select_ports nach ihm waehlt (ohne ifType
         # stuende der Switch sonst bis zum naechsten Poll ohne Ports da)
         needed = ("sysName", "ifName", "ifType") if by_iftype(driver_name) else ("sysName", "ifName")
-        # Dazu die PoE-Walks des Treibers mit der Leistung, nachsichtig wie jeder andere hier (ohne snmp_poe keiner)
-        walks = {**O, **poe_walks(drivers.driver_for(row), power=True)}
+        # Dazu die PoE-Walks des Treibers mit der Leistung, nachsichtig wie jeder andere hier (ohne snmp_poe keiner), und wo die Ports nach
+        # ifType gewaehlt werden die LLDP-Tabelle der eigenen Ports (lldp_ports)
+        walks = {**O, **poe_walks(drivers.driver_for(row), power=True), **(LLDP_LOC if by_iftype(driver_name) else {})}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             keys = list(walks)
@@ -437,9 +460,11 @@ async def poll_switch(switch_id: int) -> dict:
 
 
 def _build(W: dict, driver_name: str = "procurve") -> dict:
-    """Die Anzeige-Daten aus den Walks W (Schluessel wie O, dazu die von poe_walks des Treibers; ein fehlender PoE-Walk ist leer). Welche
-    Interfaces Ports und Trunks sind, entscheidet select_ports nach dem Treiber; ifType wird nur gelesen, wenn er danach waehlt. PoE je
-    Port (poe_admin, poe_status, poe_power in mW) nur, wo poe_ports ihm einen Eintrag sicher zuordnet, nachsichtig: sonst None."""
+    """Die Anzeige-Daten aus den Walks W (Schluessel wie O, dazu die von poe_walks des Treibers und LLDP_LOC; ein fehlender ist leer).
+    Welche Interfaces Ports und Trunks sind, entscheidet select_ports nach dem Treiber; ifType wird nur gelesen, wenn er danach waehlt. PoE je
+    Port (poe_admin, poe_status, poe_power in mW) nur, wo poe_ports ihm einen Eintrag sicher zuordnet, nachsichtig: sonst None. LLDP je
+    Port als [sysName, PortDesc oder PortId, PortId]: bei ProCurve am Port mit dem ifIndex der lokalen LLDP-Portnummer, sonst an jedem
+    Port, den sie meinen kann (lldp_ports)."""
     sysName = (W["sysName"][0][1] if W["sysName"] else "")
     sysDescr = (W["sysDescr"][0][1] if W["sysDescr"] else "")
     model, fw = parse_descr(sysDescr)
@@ -454,15 +479,17 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
     untag = {k: snmp.bitmap_ports(v) for k, v in _tbl(W["vlanUntagged"], O["vlanUntagged"]).items()}
     pvid = _tbl(W["pvid"], O["pvid"])
 
-    lldp: dict[str, list[list[str]]] = {}
+    # LLDP-Nachbarn: [sysName, PortDesc (sonst PortId), PortId] (R40: PortId ab jetzt immer dabei, die Stelle 1 wie seit jeher), je
+    # lokaler Portnummer (lldpRemLocalPortNum, der mittlere Teil des Index); zu welchem Port sie gehoert, steht unten nach select_ports
+    entries: list[tuple[str, list[str]]] = []
     l_desc = _tbl(W["lldpPortDesc"], O["lldpPortDesc"]); l_id = _tbl(W["lldpPortId"], O["lldpPortId"])
     for k, v in _tbl(W["lldpSys"], O["lldpSys"]).items():
         parts = k.split(".")
         if len(parts) < 3 or not v.strip():
             continue
-        lp = parts[1]
-        pd = l_desc.get(k, "") or l_id.get(k, "")
-        lldp.setdefault(lp, []).append([v.strip(), pd.strip()])
+        pid = l_id.get(k, "")
+        pd = l_desc.get(k, "") or pid
+        entries.append((parts[1], [v.strip(), pd.strip(), pid.strip()]))
 
     fid2vlan = {}
     for k, v in _tbl(W["fid"], O["fid"]).items():
@@ -477,6 +504,15 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
 
     iftype = _tbl(W["ifType"], O["ifType"]) if by_iftype(driver_name) else {}
     port_ifis, member_of, members = select_ports(ifname, iftype, _tbl(W["ifStack"], O["ifStack"]), driver_name)
+    lldp: dict[str, list[list[str]]] = {}    # ifIndex -> LLDP-Eintraege
+    if by_iftype(driver_name):
+        loc = {k: _tbl(W.get(k, []), base) for k, base in LLDP_LOC.items()}
+        for num, entry in entries:
+            for ifi in lldp_ports(num, port_ifis, ifname, bp2if, loc):
+                lldp.setdefault(ifi, []).append(entry)
+    else:    # ProCurve: die lokale Portnummer ist der ifIndex, wie seit jeher
+        for num, entry in entries:
+            lldp.setdefault(num, []).append(entry)
     # Trunk: bei ProCurve jedes Trk-Interface (auch ohne Mitglieder), sonst jeder LAG-Port (select_ports fuehrt ihn in members)
     trunks = trunk_ports(ifname, port_ifis, members, driver_name)
     driver = drivers.driver_for({"driver": driver_name})

@@ -1266,13 +1266,14 @@ async def test_poll_cisco_poe_through_the_entity_tables(world, monkeypatch):
 
 @pytest.mark.parametrize("name", ["mikrotik", "generic", "arista"])
 async def test_poll_of_a_driver_without_snmp_poe_walks_no_poe(world, monkeypatch, name):
-    """R31 / R35: the display poller walks no PoE table for such a switch and shows no PoE state, whatever its agent would answer."""
+    """R31 / R35: the display poller walks no PoE table for such a switch and shows no PoE state, whatever its agent would answer. (Its
+    other walks: poller.O and, its ports being selected by ifType, LLDP-MIB's lldpLocPortTable, R40.)"""
     W = {**W_POE, "ifType": IFTYPE_SAMPLE}
     row = await world.switch(name, W)
     poll = PollAgent(recording(W) | {HP_POE_POWER: HP_POWER_SAMPLE})
     monkeypatch.setattr(snmp, "walk", poll.walk)
     await poller.poll_switch(row["id"])
-    assert sorted(poll.oids) == sorted(poller.O.values())
+    assert sorted(poll.oids) == sorted([*poller.O.values(), "1.0.8802.1.1.2.1.3.7.1.3", "1.0.8802.1.1.2.1.3.7.1.4"])
     assert {r[1:] for r in await stored_poe(row["id"])} == {(None, None, None)}
 
 
