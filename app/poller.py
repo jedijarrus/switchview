@@ -427,7 +427,8 @@ async def poll_switch(switch_id: int) -> dict:
                 # Kein Fehler, aber keine einzige Zeile (leere oder verbotene View): ohne ifType kaemen keine Ports heraus, und das
                 # Speichern unten loeschte die des letzten guten Polls. Also wie ein gescheiterter Pflicht-Walk.
                 raise snmp.SnmpError("ifType-Walk lieferte keine Zeile, ifName schon: ohne ifType lassen sich die Ports nicht bestimmen")
-            data = _build(W, driver_name)
+            # In a worker thread: a big (or hostile) switch must not hold up the event loop, the UI and the other polls meanwhile
+            data = await asyncio.to_thread(_build, W, driver_name)
         except Exception as e:  # noqa: BLE001
             async with db() as conn:
                 await conn.execute("UPDATE switches SET last_poll = ?, last_poll_ok = 0, last_error = ? WHERE id = ?", (now, str(e)[:300], switch_id))
@@ -475,8 +476,9 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
     speed = _tbl(W["ifHighSpeed"], O["ifHighSpeed"]); oper = _tbl(W["ifOper"], O["ifOper"]); admin = _tbl(W["ifAdmin"], O["ifAdmin"])
     bp2if = _tbl(W["bp2if"], O["bp2if"]); if2bp = {v: k for k, v in bp2if.items()}
     vname = _tbl(W["vlanName"], O["vlanName"])
-    egress = {k: snmp.bitmap_ports(v) for k, v in _tbl(W["vlanEgress"], O["vlanEgress"]).items()}
-    untag = {k: snmp.bitmap_ports(v) for k, v in _tbl(W["vlanUntagged"], O["vlanUntagged"]).items()}
+    # PortList bytes per VLAN, at most snmp.MAX_PORTLIST_BYTES each (ValueError beyond); membership below is a bit test, no set per VLAN
+    egress = {k: snmp.portlist_bytes(v) for k, v in _tbl(W["vlanEgress"], O["vlanEgress"]).items()}
+    untag = {k: snmp.portlist_bytes(v) for k, v in _tbl(W["vlanUntagged"], O["vlanUntagged"]).items()}
     pvid = _tbl(W["pvid"], O["pvid"])
 
     # LLDP-Nachbarn: [sysName, PortDesc (sonst PortId), PortId] (R40: PortId ab jetzt immer dabei, die Stelle 1 wie seit jeher), je
@@ -524,9 +526,10 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
         is_trk = ifi in trunks
         trk = member_of.get(ifi)
         eff = if2bp.get(trk) if trk else if2bp.get(ifi)
-        b = int(eff) if eff else None
-        un = sorted([v for v in vname if b and b in untag.get(v, set())], key=int)
-        tg = sorted([v for v in vname if b and b in egress.get(v, set()) and b not in untag.get(v, set())], key=int)
+        b = int(eff) if eff else 0    # 0: no bridge port (PortList bits start at bridge port 1)
+        un = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
+        tg = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(egress.get(v, b""), b)
+                     and not snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
         fdb = fdb_by_bp.get(eff, []) if eff else []
         if not trk:  # MACs nur einmal ablegen (am Trunk bzw. am Einzelport)
             macs += [(name, m, v) for m, v in fdb]

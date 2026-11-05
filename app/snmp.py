@@ -11,6 +11,12 @@ AUTH_PROTOS = {"SHA", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "MD5"}
 PRIV_PROTOS = {"AES", "AES-192", "AES-256", "DES"}
 # snmpset: 5 s je Versuch, eine Wiederholung (siehe set_vars)
 SET_TIMING = ("-t", "5", "-r", "1")
+# What one SNMP call may hand to the app, whatever the agent sends (a hostile or broken one must not fill the memory):
+MAX_STDOUT = 8 * 1024 * 1024    # bytes of stdout per call; 64 000 MACs are about 4 MB (see _run)
+MAX_STDERR = 64 * 1024          # bytes of stderr kept per call; the rest is read and dropped (see _run)
+MAX_ROWS = 100_000              # values per walk, rows with an OID (see _parse)
+MAX_PORTLIST_BYTES = 8192       # a PortList over bridge ports 1..65535 (dot1dBasePort) needs no more (see portlist_bytes)
+READ_CHUNK = 64 * 1024          # _run reads stdout and stderr in pieces of this size
 
 
 class SnmpError(Exception):
@@ -34,23 +40,66 @@ def _auth_args(cred: dict) -> list[str]:
 
 
 async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
-    """Startet cmd ohne Shell und liefert stdout. SnmpError bei Zeitueberschreitung und bei einem Exit-Code != 0 ohne Ausgabe;
-    mit strict bei JEDEM Exit-Code != 0, auch wenn stdout schon Zeilen hat (siehe walk)."""
+    """Start cmd without a shell and return its stdout. stdout and stderr are read together, READ_CHUNK bytes at a time, up to EOF, then
+    the exit is awaited, all under the one timeout. SnmpError on a timeout; when stdout grows beyond MAX_STDOUT (the process is killed,
+    see _collect); and on an exit code != 0 without output, with strict on EVERY exit code != 0, even when stdout has rows already (see
+    walk). The message of a failed call is the last line of stderr, of which only the first MAX_STDERR bytes are kept."""
     env = dict(os.environ, MIBS="")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err, returncode = await asyncio.wait_for(_collect(proc), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        _kill(proc)
         raise SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
     text = out.decode("utf-8", "replace")
-    if proc.returncode != 0 and (strict or not text.strip()):
+    if returncode != 0 and (strict or not text.strip()):
         msg = err.decode("utf-8", "replace").strip().splitlines()
         msg = [m for m in msg if "Cannot find module" not in m and "MIB search path" not in m]
-        raise SnmpError(msg[-1] if msg else f"snmp Exit-Code {proc.returncode}")
+        raise SnmpError(msg[-1] if msg else f"snmp Exit-Code {returncode}")
     return text
+
+
+async def _collect(proc) -> tuple[bytearray, bytes, int]:
+    """(stdout, the first MAX_STDERR bytes of stderr, exit code) of proc, read the way _run says. Once stdout grows beyond MAX_STDOUT,
+    proc is killed and, after its exit, SnmpError raised. Both pipes are read to EOF in every case, stderr alongside stdout: a process
+    blocked on a full stderr pipe would never finish its stdout, and asyncio closes the process transport only once both pipes have
+    closed. A pipe whose reader has paused because nobody reads it any more never does, not even after the kill: its transport would
+    leak, and a wait() that came before the exit was noticed would hang."""
+    stderr = asyncio.create_task(_drain(proc.stderr, MAX_STDERR))
+    try:
+        out = bytearray()
+        while chunk := await proc.stdout.read(READ_CHUNK):
+            out += chunk
+            if len(out) > MAX_STDOUT:
+                _kill(proc)
+                await _drain(proc.stdout, 0)    # what the killed process left in the pipe, dropped
+                break
+        err = await stderr
+        returncode = await proc.wait()
+    finally:
+        stderr.cancel()    # still running only when the timeout cancels the call: the reader must not outlive it
+    if len(out) > MAX_STDOUT:
+        raise SnmpError(f"SNMP-Antwort zu groß (über {MAX_STDOUT // (1024 * 1024)} MiB), Abfrage abgebrochen")
+    return out, err, returncode
+
+
+async def _drain(stream, keep: int) -> bytes:
+    """Read stream up to EOF, READ_CHUNK bytes at a time, and return its first `keep` bytes."""
+    kept = bytearray()
+    while chunk := await stream.read(READ_CHUNK):
+        if len(kept) < keep:
+            kept += chunk[:keep - len(kept)]
+    return bytes(kept)
+
+
+def _kill(proc) -> None:
+    """Kill proc; one that has exited in the meantime is no error."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
 
 
 def _host(host: str) -> str:
@@ -62,59 +111,85 @@ def _host(host: str) -> str:
 
 
 _HEX_VALUE = re.compile(r"[0-9A-Fa-f\s]*")
+# The inside of a quoted string as net-snmp prints it: any character but a quote or a backslash, or a backslash with the character
+# after it (\" and \\ are the escapes net-snmp writes). Possessive, so a match runs once over the text, never back.
+_STRING_BODY = re.compile(r'(?:[^"\\]++|\\.)*+', re.DOTALL)
 
 
-def _string_open(oid: str, val: str) -> bool:
-    """Ist val ein String in Anfuehrungszeichen, dessen schliessendes Anfuehrungszeichen noch fehlt? net-snmp schreibt \\" und \\\\ im
-    String mit Backslash, die schliessen ihn nicht. SnmpError, wenn hinter dem schliessenden Anfuehrungszeichen noch etwas steht: das
-    gibt net-snmp nie aus. Ein Wert ohne fuehrendes Anfuehrungszeichen (Zahl, Hex, OID) ist nie offen."""
-    if not val.startswith('"'):
-        return False
-    i = 1
-    while i < len(val):
-        if val[i] == "\\":
-            i += 2
-        elif val[i] == '"':
-            if i != len(val) - 1:
-                raise SnmpError(f"Text hinter dem Ende des Strings in {oid}: {val[:80]!r}")
-            return False
-        else:
-            i += 1
-    return True
+def _quote_end(segment: str, start: int) -> int:
+    """Where a quoted string that is open at segment[start] ends: the index of its closing quote in segment, or -1 when segment ends
+    inside the string. An escaped quote closes nothing; a backslash at the very end takes the line break behind it, and the next line
+    goes on inside the string, unescaped."""
+    end = _STRING_BODY.match(segment, start).end()
+    return end if end < len(segment) and segment[end] == '"' else -1
+
+
+def _head(value: str, tail: list[str]) -> str:
+    """The first 80 characters of value with its continuation lines tail (for a message)."""
+    for line in tail:
+        if len(value) >= 80:
+            break
+        value += "\n" + line[:80]
+    return value[:80]
 
 
 def _parse(text: str, hex_strict: bool = False, text_strict: bool = False) -> list[tuple[str, str]]:
-    """Zeilen "OID Wert" -> [(oid, wert)]; eine Zeile ohne OID gehoert als Fortsetzung zum Wert davor (lange Werte bricht net-snmp
-    um). Leerzeilen und Zeilen vor der ersten OID gehoeren zu keinem Wert. Die beiden strikten Modi aendern an den Zeilen nichts, sie
-    lehnen nur ab (SnmpError), was nicht zu einem Wert gehoeren kann:
+    """Lines "OID value" -> [(oid, value)]. A line without an OID belongs to the value before it as a continuation (net-snmp wraps long
+    values and prints a line break inside a string as it is); blank lines, and lines before the first OID, belong to no value. More than
+    MAX_ROWS values (lines with an OID; continuation lines do not count) are an SnmpError. Time and memory stay linear in the output:
+    continuation lines are joined once, each string is scanned once.
 
-    hex_strict (ein strikter Hex-Walk, mit -Ox): jeder Wert, mit seinen Fortsetzungszeilen, muss reines Hex sein. Eine fremde Zeile
-    hinter einer PortList (etwa "End of MIB") wuerde sonst angehaengt, und hex_to_bytes machte aus ihren Buchstaben a-f Bits fuer
-    Bridge-Ports, die es nicht gibt.
+    Lenient (neither strict mode: the display poller, get): a quoted string goes on up to its closing quote, and as long as it is open,
+    a line that starts with "." is a continuation too, not a new row. net-snmp prints every printable OCTET STRING in quotes, with \\"
+    and \\\\ escaped, so a value such as an LLDP system name "evilhost<line break>.<oid> FORGED" stays one value and injects no row. Text
+    behind a closing quote ends the string there, no error; a string that never ends keeps every line behind it.
 
-    text_strict (ein strikter Walk ohne -Ox): umbrechen kann nur ein String in Anfuehrungszeichen, Zahlen und andere nackte Werte
-    nie. Eine Fortsetzungszeile gilt also nur, solange ein String offen ist; jede andere (hinter einer Zahl, hinter einem
-    geschlossenen String) ist eine fremde Zeile, die sonst im letzten Wert landete, etwa in einem ifAlias, den ein Revert auf den
-    Switch zurueckschriebe. Ein String muss vor der naechsten Zeile mit OID und vor dem Ende der Ausgabe geschlossen sein, und
-    hinter seinem schliessenden Anfuehrungszeichen darf nichts mehr stehen (siehe _string_open)."""
+    The two strict modes change nothing about the rows, they only refuse (SnmpError) what cannot belong to a value:
+
+    hex_strict (a strict hex walk, with -Ox): every value, with its continuation lines, must be pure hex. A stray line behind a PortList
+    (such as "End of MIB") would otherwise be appended, and hex_to_bytes would turn its letters a-f into bits for bridge ports that do
+    not exist. Every line that starts with "." is a row here (with -Ox nothing is quoted text).
+
+    text_strict (a strict walk without -Ox): only a quoted string wraps, numbers and other bare values never. A continuation line counts
+    only while a string is open; any other (behind a number, behind a closed string) is a stray line that would otherwise end up in the
+    last value, say in an ifAlias that a revert would write back to the switch. A string must be closed before the next line with an
+    OID and before the end of the output, and nothing may follow its closing quote (net-snmp never prints that)."""
+    lenient = not (hex_strict or text_strict)
+    track = lenient or text_strict    # follow quoted strings
     rows: list[tuple[str, str]] = []
-    open_string = False  # nur text_strict: der Wert der letzten Zeile ist ein String, dessen Ende noch fehlt
+    tail: list[str] = []    # the continuation lines of rows[-1], joined to its value once the row is complete
+    open_string = False     # (track) the value of rows[-1] is a quoted string whose closing quote is still missing
     for line in text.splitlines():
-        if line.startswith("."):
+        if line.startswith(".") and not (lenient and open_string):
             if open_string:
-                raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {rows[-1][1][:80]!r}")
+                raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {_head(rows[-1][1], tail)!r}")
+            if len(rows) >= MAX_ROWS:
+                raise SnmpError(f"SNMP-Antwort mit mehr als {MAX_ROWS} Zeilen, Abfrage abgebrochen")
+            if tail:
+                rows[-1] = (rows[-1][0], rows[-1][1] + "\n" + "\n".join(tail))
+                tail = []
             oid, _, val = line.partition(" ")
-            rows.append((oid.lstrip("."), val.strip()))
-            open_string = text_strict and _string_open(*rows[-1])
+            oid, val = oid.lstrip("."), val.strip()
+            rows.append((oid, val))
+            open_string = False
+            if track and val.startswith('"'):
+                end = _quote_end(val, 1)
+                if text_strict and end not in (-1, len(val) - 1):
+                    raise SnmpError(f"Text hinter dem Ende des Strings in {oid}: {val[:80]!r}")
+                open_string = end == -1
         elif rows and line.strip():
             if text_strict and not open_string:
                 raise SnmpError(f"Unerwartete Zeile hinter dem Wert von {rows[-1][0]}: {line[:80]!r}")
-            # Fortsetzung eines mehrzeiligen Strings
-            oid, val = rows[-1]
-            rows[-1] = (oid, val + "\n" + line)
-            open_string = text_strict and _string_open(*rows[-1])
-    if open_string:
-        raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {rows[-1][1][:80]!r}")
+            tail.append(line)
+            if open_string and '"' in line:    # a line without a quote cannot close the string
+                end = _quote_end(line, 0)
+                if text_strict and end not in (-1, len(line) - 1):
+                    raise SnmpError(f"Text hinter dem Ende des Strings in {rows[-1][0]}: {_head(rows[-1][1], tail)!r}")
+                open_string = end == -1
+    if open_string and text_strict:
+        raise SnmpError(f"String ohne Ende in {rows[-1][0]}: {_head(rows[-1][1], tail)!r}")
+    if tail:
+        rows[-1] = (rows[-1][0], rows[-1][1] + "\n" + "\n".join(tail))
     out = []
     for oid, val in rows:
         if "No Such Object" in val or "No Such Instance" in val or "No more variables" in val:
@@ -175,9 +250,19 @@ def hex_to_bytes(val: str) -> bytes:
         return b""
 
 
+def portlist_bytes(val: str) -> bytes:
+    """The bytes of a Q-BRIDGE PortList as a walk prints it (hex_to_bytes). ValueError beyond MAX_PORTLIST_BYTES: bridge ports run from
+    1 to 65535 (dot1dBasePort), 8192 bytes hold every one of them, and a longer list is no answer of a switch."""
+    raw = hex_to_bytes(val)
+    if len(raw) > MAX_PORTLIST_BYTES:
+        raise ValueError(f"PortList mit {len(raw)} Bytes ist länger als {MAX_PORTLIST_BYTES} Bytes (Bridge-Ports bis 65535)")
+    return raw
+
+
 def bitmap_ports(val: str) -> set[int]:
-    """Q-BRIDGE PortList: Bit 1 (MSB des ersten Bytes) = Bridge-Port 1."""
-    b = hex_to_bytes(val)
+    """Q-BRIDGE PortList as the set of its bridge ports: bit 1 (MSB of the first byte) = bridge port 1. ValueError beyond
+    MAX_PORTLIST_BYTES (portlist_bytes). The poller and the write path test single bits instead (portlist_has_bit), no set per VLAN."""
+    b = portlist_bytes(val)
     return {i * 8 + j + 1 for i, byte in enumerate(b) for j in range(8) if byte & (0x80 >> j)}
 
 

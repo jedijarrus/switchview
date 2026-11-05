@@ -163,13 +163,14 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     if bad:
         raise snmp.SnmpError(f"vmVlan: Index {bad[0]} ist kein ifIndex (zeigt die OID des Treibers nicht auf die Spalte vmVlan?)")
     if2bp = {v: k for k, v in bp2if.items()}
-    egress = {k: snmp.bitmap_ports(v) for k, v in eg_hex.items()}
-    untag = {k: snmp.bitmap_ports(v) for k, v in un_hex.items()}
+    # PortList bytes per VLAN, at most snmp.MAX_PORTLIST_BYTES each (ValueError beyond, an SnmpError of build_cfg): raw keeps them,
+    # and membership below is a bit test on them, no set per VLAN
+    egress = {k: snmp.portlist_bytes(v) for k, v in eg_hex.items()}
+    untag = {k: snmp.portlist_bytes(v) for k, v in un_hex.items()}
     port_ifis, member_of, members = poller.select_ports(ifname, tbl.get("ifType", {}), tbl["ifStack"], driver_name)
     poe, unmapped = poller.poe_ports(driver, poe_tables, ifname, port_ifis, members, strict=True)
 
-    raw: dict = {"egress": {k: snmp.hex_to_bytes(v) for k, v in eg_hex.items()},
-                 "untagged": {k: snmp.hex_to_bytes(v) for k, v in un_hex.items()},
+    raw: dict = {"egress": egress, "untagged": untag,
                  "pvid": {}, "admin": {}, "alias": {}, "poe": {}, "poe_unmapped": unmapped, "port2bp": {}, "bp2port": {}, "ifindex": {},
                  "unmanaged": {}, "vmvlan": {}}
     ports: dict[str, dict] = {}
@@ -183,9 +184,10 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
             raise snmp.SnmpError(f"Port {name}: ifAdminStatus fehlt oder ist unlesbar ({admin.get(ifi)!r})")
         trk = member_of.get(ifi)
         eff = if2bp.get(trk) if trk else if2bp.get(ifi)
-        b = int(eff) if eff else None
-        un = sorted([v for v in vname if b and b in untag.get(v, set())], key=int)
-        tg = sorted([v for v in vname if b and b in egress.get(v, set()) and b not in untag.get(v, set())], key=int)
+        b = int(eff) if eff else 0    # 0: no bridge port (PortList bits start at bridge port 1)
+        un = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
+        tg = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(egress.get(v, b""), b)
+                     and not snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
         u = un[0] if un else None
         vm = vmvlan.get(ifi)
         if vm is not None:  # cisco_vmps-Access-Port: vmVlan ist sein VLAN, getaggte VLANs hat er nicht

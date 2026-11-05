@@ -18,6 +18,7 @@ Two different things are both spelled "x" in snmpset commands, and the tests kee
 import pytest
 
 import snmp
+from switchfix import FakeProcess
 
 HOST = "203.0.113.21"
 RW = "rw-s3cret"    # not "public": the community in the command must come from the cred that was passed in
@@ -184,21 +185,7 @@ async def test_set_vars_raises_on_error(monkeypatch):
     assert excinfo.value is boom
 
 
-# --- through the real _run: only the process it would start is faked ------------------------------------------------------------
-
-class _FakeProc:
-    """Stands in for the asyncio subprocess that _run starts: it has already finished, with the given output and exit code."""
-
-    def __init__(self, out=b"", err=b"", returncode=0):
-        self.returncode = returncode
-        self._out, self._err = out, err
-
-    async def communicate(self):
-        return self._out, self._err
-
-    def kill(self):    # only reached on a timeout, which these tests do not simulate
-        pass
-
+# --- through the real _run: only the process it would start is faked (switchfix.FakeProcess) ---------------------------------------
 
 def _fake_process(monkeypatch, proc):
     """Let the real snmp._run run, but hand it `proc` instead of starting a program. Returns the argv tuples it was asked to start.
@@ -222,7 +209,7 @@ def _fake_process(monkeypatch, proc):
 async def test_set_vars_through_the_real_run_starts_snmpset_without_a_shell(monkeypatch):
     """The argv list reaches create_subprocess_exec as separate arguments (a value with a space is ONE argument); the output comes back."""
     echo = ".1.3.6.1.2.1.31.1.1.1.18.3 = STRING: Platz 107\n"
-    started = _fake_process(monkeypatch, _FakeProc(out=echo.encode()))
+    started = _fake_process(monkeypatch, FakeProcess(out=echo.encode()))
 
     out = await snmp.set_vars(HOST, V2C, [(IF_ALIAS_3, "s", "Platz 107")])
 
@@ -232,7 +219,7 @@ async def test_set_vars_through_the_real_run_starts_snmpset_without_a_shell(monk
 
 async def test_set_vars_through_the_real_run_failed_snmpset_raises_snmp_error(monkeypatch):
     """snmpset exits nonzero without any output on stdout (no answer, request refused, ...): the real _run turns that into SnmpError."""
-    started = _fake_process(monkeypatch, _FakeProc(err=f"Timeout: No Response from {HOST}.\n".encode(), returncode=1))
+    started = _fake_process(monkeypatch, FakeProcess(err=f"Timeout: No Response from {HOST}.\n".encode(), returncode=1))
 
     with pytest.raises(snmp.SnmpError):
         await snmp.set_vars(HOST, V2C, [(IF_ADMIN_5, "i", "2")])

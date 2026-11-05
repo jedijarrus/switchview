@@ -1,13 +1,15 @@
 """Walk fixtures shared by the SNMP tests (tests/test_snmpwrite_read.py, tests/test_port_discovery.py and the write-path tests
 after them): the base OIDs, hand-written walk rows of sample switches with what they mean, random switch generators that return
-their own truth, small helpers to build and edit walk rows, and the simulated agent the write-path tests set and read back (agent,
-store). W is always walk key -> [(oid, value), ...], as poller.poll_switch collects it and snmpwrite.build_cfg reads it.
+their own truth, small helpers to build and edit walk rows, the simulated agent the write-path tests set and read back (agent,
+store), and FakeProcess, the stand-in for the net-snmp process snmp._run starts. W is always walk key -> [(oid, value), ...], as
+poller.poll_switch collects it and snmpwrite.build_cfg reads it.
 
 A plain module, not a conftest: the tests import it by name (`from switchfix import ...`), which works because pytest puts tests/
 on sys.path for the test modules there (default prepend import mode); pytest.ini forbids a root-level conftest.py. Nothing here
 imports app code: OIDs, expected values and the generators' truth are written out by hand, so they stay independent of the code
 under test.
 """
+import asyncio
 import copy
 import random
 import re
@@ -611,3 +613,85 @@ def store(W: dict, ops) -> dict:
             assert value in ("1", "2"), (oid, value)
         edits[key][index] = value
     return edit_walks(W, **edits)
+
+
+# ── The net-snmp process: what snmp._run starts, faked ───────────────────────────────────────────────────────────────────────────
+# One walk row, repeated for as long as an endless process floods stdout.
+_FLOOD_ROW = f'.{IF_NAME}.1 "1"\n'.encode()
+
+
+class _FakePipe:
+    """stdout or stderr of a FakeProcess: async read(n) hands out up to n bytes, b"" at EOF (asyncio.StreamReader.read, n > 0); eof says
+    whether a read has returned b"" yet."""
+
+    def __init__(self, proc: "FakeProcess", data: bytes, endless: bool = False):
+        self._proc, self._data, self._pos, self._endless = proc, data, 0, endless
+        self.eof = False
+
+    async def read(self, n: int) -> bytes:
+        if self._proc.hang:
+            await self._proc._until(lambda: self._proc.killed)
+        if self._proc.killed:
+            chunk = b""
+        elif self._endless:
+            start = self._pos % len(_FLOOD_ROW)
+            chunk = (_FLOOD_ROW * ((start + n) // len(_FLOOD_ROW) + 1))[start:start + n]
+        else:
+            chunk = self._data[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        if self is self._proc.stdout:
+            self._proc.bytes_served += len(chunk)
+        if not chunk and not self.eof:
+            self.eof = True
+            self._proc._changed()
+        return chunk
+
+
+class FakeProcess:
+    """Stands in for the asyncio subprocess that snmp._run starts (asyncio.subprocess.Process, as far as _run uses it): stdout and
+    stderr with async read(n), async wait() -> exit code, kill(), returncode.
+
+      out, err, returncode  a process that has already finished: its pipes hold out and err, its exit code is returncode.
+      endless=True          stdout never ends (an agent flooding the walk); the process runs until kill().
+      hang=True             neither pipe delivers anything and the process does not exit until kill() (a stalled snmpbulkwalk).
+    A process that runs until kill() exits with -9 (SIGKILL, as asyncio reports it); returncode is None while it runs. After kill()
+    both pipes are at EOF. wait() returns once the process has exited AND both pipes have been read to EOF. That is stricter than
+    asyncio, whose wait() returns as soon as it knows the exit; but asyncio closes the transport only after both pipes have closed, a
+    pipe whose reader has paused (nobody reads it any more) never does, and a wait() that comes before the exit is known hangs. The
+    fake holds _run to the order that is safe either way. killed says whether kill() was called, bytes_served how many stdout bytes
+    were handed out.
+
+    A one-shot object like a real process: what has been read stays read. Whoever hands out the same answer twice calls fresh() for a
+    new, unread copy. Nothing here binds to an event loop when it is made, so a FakeProcess can be built outside a test's loop."""
+
+    def __init__(self, out: bytes = b"", err: bytes = b"", returncode: int = 0, endless: bool = False, hang: bool = False):
+        self._args = (out, err, returncode, endless, hang)
+        self.hang, self.killed, self.bytes_served = hang, False, 0
+        self.returncode = None if endless or hang else returncode
+        self.stdout, self.stderr = _FakePipe(self, out, endless), _FakePipe(self, err)
+        self._change: asyncio.Event | None = None    # set on the next kill() or EOF; made on first use, inside the loop that waits
+
+    def fresh(self) -> "FakeProcess":
+        out, err, returncode, endless, hang = self._args
+        return FakeProcess(out, err, returncode, endless=endless, hang=hang)
+
+    def kill(self) -> None:
+        self.killed = True
+        if self.returncode is None:
+            self.returncode = -9
+        self._changed()
+
+    async def wait(self) -> int:
+        await self._until(lambda: self.returncode is not None and self.stdout.eof and self.stderr.eof)
+        return self.returncode
+
+    def _changed(self) -> None:
+        if self._change is not None:
+            self._change.set()
+            self._change = None
+
+    async def _until(self, done) -> None:
+        while not done():
+            if self._change is None:
+                self._change = asyncio.Event()
+            await self._change.wait()

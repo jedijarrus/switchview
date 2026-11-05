@@ -10,8 +10,8 @@ no stray line can turn into bridge-port bits.
 A strict text walk (every other walk of read_cfg) refuses any line that does not belong to a value: only a quoted string can go on
 over several lines.
 
-These tests keep the real snmp._run and only fake the process it starts. snmp is imported flat (app/ is on sys.path via pytest.ini),
-exactly as the app imports it.
+These tests keep the real snmp._run and only fake the process it starts (switchfix.FakeProcess). snmp is imported flat (app/ is on
+sys.path via pytest.ini), exactly as the app imports it.
 """
 import random
 import re
@@ -19,6 +19,7 @@ import re
 import pytest
 
 import snmp
+from switchfix import FakeProcess
 
 HOST = "203.0.113.21"
 CRED = {"snmp_version": "2c", "snmp_community": "ro-s3cret"}
@@ -29,28 +30,15 @@ ROWS = [(f"{IF_NAME}.1", "1"), (f"{IF_NAME}.2", "2")]
 TIMEOUT = f"Timeout: No Response from {HOST}\n".encode()
 
 
-class _FakeProc:
-    """Stands in for the asyncio subprocess that _run starts: it has already finished, with the given output and exit code."""
-
-    def __init__(self, out=b"", err=b"", returncode=0):
-        self.returncode = returncode
-        self._out, self._err = out, err
-
-    async def communicate(self):
-        return self._out, self._err
-
-    def kill(self):    # only reached on a timeout of _run itself, which these tests do not simulate
-        pass
-
-
 class _Spawner:
-    """What the faked create_subprocess_exec hands to _run next (set with answer), and the argv of every start."""
+    """What the faked create_subprocess_exec hands to _run next (set with answer: a process that has already finished, with the given
+    output and exit code), and the argv of every start. Each start gets a fresh copy, so one answer serves several walks."""
 
     def __init__(self):
-        self.proc, self.started = _FakeProc(), []
+        self.proc, self.started = FakeProcess(), []
 
     def answer(self, out=b"", err=b"", returncode=0):
-        self.proc = _FakeProc(out, err, returncode)
+        self.proc = FakeProcess(out, err, returncode)
 
 
 @pytest.fixture
@@ -60,7 +48,7 @@ def process(monkeypatch):
 
     async def fake_exec(*argv, **kwargs):
         spawner.started.append(argv)
-        return spawner.proc
+        return spawner.proc.fresh()
 
     monkeypatch.setattr(snmp.asyncio, "create_subprocess_exec", fake_exec)
     return spawner
@@ -177,13 +165,15 @@ async def test_strict_text_walk_refuses_a_stray_line(process, out, oid, last):
 
 async def test_lenient_text_walk_keeps_the_old_behaviour(process):
     """The display poller (lenient) still gets the stray line glued to the value before it, exactly as before; and what the strict
-    walk refuses about strings (one without end, text behind the closing quote) still comes through as it is, no error."""
+    walk refuses about strings (one without end, text behind the closing quote) still comes through, no error. One thing changed on
+    purpose (Phase 2, the row injection): a string that is still open keeps the lines behind it, even those that start with "."
+    and would otherwise form new rows, up to its closing quote; text behind that quote ends the string there."""
     process.answer(out=STRAY_AFTER_NUMBER)
     assert await snmp.walk(HOST, CRED, PVID) == [(f"{PVID}.1", "99"), (f"{PVID}.2", "1\nEnd of MIB")]
     process.answer(out=STRAY_AFTER_STRING)
     assert await snmp.walk(HOST, CRED, IF_ALIAS) == [(f"{IF_ALIAS}.1", '"Platz 107"\nEnd of MIB')]
     process.answer(out=f'.{IF_ALIAS}.1 "Raum\n.{IF_ALIAS}.2 "AP" 7\n.{IF_ALIAS}.3 "x\n'.encode())
-    assert await snmp.walk(HOST, CRED, IF_ALIAS) == [(f"{IF_ALIAS}.1", '"Raum'), (f"{IF_ALIAS}.2", '"AP" 7'), (f"{IF_ALIAS}.3", '"x')]
+    assert await snmp.walk(HOST, CRED, IF_ALIAS) == [(f"{IF_ALIAS}.1", f'"Raum\n.{IF_ALIAS}.2 "AP" 7'), (f"{IF_ALIAS}.3", '"x')]
 
 
 async def test_strict_text_walk_takes_a_string_over_several_lines(process):

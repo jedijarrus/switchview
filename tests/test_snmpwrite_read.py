@@ -43,8 +43,8 @@ import snmpwrite
 import sshcli
 from drivers import DRIVERS
 from switchfix import (BASES, EXPECTED_PORTS, FREE_TEXT, HEX_WALKS, HOST, IF_ALIAS, IF_STACK, IF_TYPE, IFTYPE_SAMPLE, NAC, RECORDING,
-                       ROW, VLAN_EGRESS, VLAN_NAME, VLAN_UNTAGGED, VMVLAN, VMVLAN_SAMPLE, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, edit_walks,
-                       hex_text, netsnmp_hex, random_procurve_switch, walk_answer, walk_rows)
+                       ROW, VLAN_EGRESS, VLAN_NAME, VLAN_UNTAGGED, VMVLAN, VMVLAN_SAMPLE, W_CISCO, W_ODD, W_SAMPLE, WALK_BASES, FakeProcess,
+                       edit_walks, hex_text, netsnmp_hex, random_procurve_switch, walk_answer, walk_rows)
 
 DRIVER = DRIVERS["procurve"]
 
@@ -561,20 +561,7 @@ async def test_read_cfg_passes_other_walk_errors_through(monkeypatch):
     assert caught.value is err
 
 
-# ── read_cfg end to end: the real snmp.walk / _run / _parse, only the snmpbulkwalk processes faked ──────────────────────────────
-class _Proc:
-    """A finished snmpbulkwalk: what it printed and how it exited."""
-
-    def __init__(self, out: bytes, err: bytes, returncode: int):
-        self.returncode, self._out, self._err = returncode, out, err
-
-    async def communicate(self):
-        return self._out, self._err
-
-    def kill(self):
-        pass
-
-
+# ── read_cfg end to end: the real snmp.walk / _run / _parse, only the snmpbulkwalk processes faked (switchfix.FakeProcess) ─────────
 def _as_printed(key: str, rows) -> str:
     """Walk rows as snmpbulkwalk prints them for read_cfg with -On -Oq: ifName in quotes, numbers bare; with -Ox the PortLists (hex
     in the fixture already) and the free text (R18: its UTF-8 bytes as hex pairs, 16 to a line)."""
@@ -594,7 +581,7 @@ def net_snmp(monkeypatch):
 
     async def fake_exec(*argv, **kwargs):
         out, rc = answers[argv[-1]]
-        return _Proc(out.encode(), f"Timeout: No Response from {HOST}\n".encode() if rc else b"", rc)
+        return FakeProcess(out.encode(), f"Timeout: No Response from {HOST}\n".encode() if rc else b"", rc)
 
     monkeypatch.setattr(snmp.asyncio, "create_subprocess_exec", fake_exec)
     return answers
