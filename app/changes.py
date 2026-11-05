@@ -31,12 +31,14 @@ from db import audit, db, get_setting
 
 log = logging.getLogger("switchview.changes")
 
-# Port-Zustaende wie bei macmon: aus / protected (festes VLAN) / known (nur bekannte Geraete) / radius
+# Port-Zustaende wie bei macmon: aus / protected (festes VLAN) / known (nur bekannte Geraete) / radius. Dazu "on" (R43): nur einschalten,
+# 802.1X / MAC-Anmeldung bleiben, wie sie sind (per SNMP geht nur das, per SSH ist es die enable-Zeile wie bei jedem anderen Zustand).
 STATUS = {
     "protected": {"x": False, "m": False},
     "known": {"x": False, "m": True},
     "radius": {"x": True, "m": True},
 }
+STATUS_ON = "on"
 PORTNAME_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")
 # Druckbares ASCII ohne Leerzeichen. Ausgeschlossen: ? (startet die CLI-Hilfe), ~ (J.15 kennt es nicht), Quotes, Backslash
 RADIUS_KEY_RE = re.compile(r"""^(?!.*[?~"'\\])[!-~]{8,64}$""")
@@ -109,6 +111,8 @@ def _desired_from_set(cfg: dict, ports: list[str], s: dict) -> dict:
         status = s.get("status")
         if status == "off":
             d["en"] = False
+        elif status == STATUS_ON:
+            d["en"] = True
         elif status in STATUS:
             d["en"] = True
             d.update(STATUS[status])
@@ -177,7 +181,7 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
         s = req.get("set") or {}
         if s.get("name") and not PORTNAME_RE.fullmatch(s["name"]):
             raise ValueError("Beschreibung: 1–64 Zeichen, nur Buchstaben, Ziffern und . _ : @ - (keine Leerzeichen)")
-        if s.get("status") not in (None, "off", *STATUS):
+        if s.get("status") not in (None, "off", STATUS_ON, *STATUS):
             raise ValueError("Unbekannter Port-Status")
         if s.get("limit") is not None and not (1 <= int(s["limit"]) <= limit_max(fw)):
             raise ValueError(f"Geräte pro Port: 1–{limit_max(fw)} auf dieser Firmware")

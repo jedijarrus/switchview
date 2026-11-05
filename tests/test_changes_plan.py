@@ -77,6 +77,9 @@ def test_desired_from_set_untagged(cfg, untagged):
     ("A1", {"status": "protected"}, {"x": False}),
     ("A1", {"status": "off"}, {"en": False}),
     ("A3", {"status": "protected"}, {"en": True}),            # every status except "off" also re-enables a disabled port
+    # "on" (R43) only switches the port on: 802.1X / MAC auth stay as they are (A1 keeps its 802.1X, nothing to do)
+    ("A3", {"status": "on"}, {"en": True}),
+    ("A1", {"status": "on"}, {}),
     # A1 (802.1X) gets MAC auth as well: the MAC limit follows the 802.1X client-limit (2), and since only the MAC
     # authenticator may carry an unauth-vid (observed on a 2520G/J.15) it is taken off 802.1X
     ("A1", {"status": "radius"}, {"m": True, "al": 2, "xuv": None}),
@@ -258,6 +261,7 @@ def test_plan_ports_blocks_uplink(cfg, port, uplinks, status, expert):
     pytest.param("Trk1", {"untagged": "20"}, False, set(), R_EXPERT, id="trunk-needs-expert"),
     pytest.param("Trk1", {"name": "uplink"}, True, set(), "Name und An/Aus nur an den Mitglied-Ports des Trunks", id="trunk-no-name"),
     pytest.param("Trk1", {"status": "off"}, True, set(), "Name und An/Aus nur an den Mitglied-Ports des Trunks", id="trunk-no-off"),
+    pytest.param("A3", {"status": "on"}, False, {"A3"}, R_EXPERT, id="uplink-on-needs-expert"),    # "on" like every other status
     pytest.param("A5", {"untagged": "20"}, False, set(), "gehört zu Trk1, bitte Trk1 wählen", id="trunk-member"),
     pytest.param("A99", {"untagged": "20"}, False, set(), "Port gibt es auf diesem Switch nicht", id="no-such-port"),
     pytest.param("A2", {"untagged": "77"}, False, set(), "VLAN 77 gibt es auf diesem Switch nicht", id="unknown-untagged-vlan"),
@@ -269,6 +273,19 @@ def test_plan_ports_blocks(cfg, port, change, expert, uplinks, reason):
     plan = changes.plan_ports(FW, make_inv(uplinks=uplinks), cfg, {"ports": [port], "set": change, "expert": expert})
     assert plan["blocked"] == [{"port": port, "reason": reason}]
     assert plan["commands"] == []   # a blocked port is dropped from the plan
+
+
+def test_status_on_renders_only_the_enable_line(sample_running_config):
+    """R43: "on" switches a disabled port on and leaves 802.1X / MAC auth as they are: one `interface X enable`, the atom every other
+    status already renders; nothing of `aaa port-access`. Here A3 (disabled) runs 802.1X and MAC auth: "protected" would take both off."""
+    text = sample_running_config.replace("aaa port-access authenticator active\n", "aaa port-access authenticator A3\n"
+                                         "aaa port-access mac-based A3\naaa port-access authenticator active\n")
+    cfg = cfgparse.parse_config(text)
+    on = changes.plan_ports(FW, make_inv(), cfg, {"ports": ["A3"], "set": {"status": "on"}})
+    assert {k: on[k] for k in ("commands", "desired", "before", "blocked", "warnings")} == {
+        "commands": ["interface A3 enable"], "desired": {"A3": {"en": True}}, "before": {"A3": {"en": False}}, "blocked": [], "warnings": []}
+    protected = changes.plan_ports(FW, make_inv(), cfg, {"ports": ["A3"], "set": {"status": "protected"}})
+    assert protected["commands"] == ["no aaa port-access authenticator A3", "no aaa port-access mac-based A3", "interface A3 enable"]
 
 
 def test_plan_ports_expert_allows_uplink_vlan_change(cfg):

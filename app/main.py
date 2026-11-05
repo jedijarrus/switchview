@@ -552,7 +552,7 @@ async def audit_log(user=Depends(auth.current_user)):
 
 
 # ── Aenderungen an Ports (Phase 2) ────────────────────────────────────────────
-STATUS_LABEL = {"off": "Aus", "protected": "Protected", "known": "Bekannte Geräte", "radius": "RADIUS"}
+STATUS_LABEL = {"off": "Aus", "on": "An", "protected": "Protected", "known": "Bekannte Geräte", "radius": "RADIUS"}
 # Portnamen auf dem SSH-Weg: ProCurve, streng, denn sie stehen in den CLI-Zeilen.
 PORT_RE = re.compile(r"^[A-Za-z0-9/]{1,12}$")
 # Portnamen auf dem SNMP-Weg: die jedes Herstellers (Gi1/0/1, ge-0/0/1, 1/1/1, Port-channel1, ...), ohne fuehrendes "-". SNMP setzt sie
@@ -568,7 +568,8 @@ _tasks: set = set()
 
 
 class PortChange(BaseModel):
-    status: str | None = Field(default=None, pattern=r"^(off|protected|known|radius)$")
+    # "on" (R43): nur einschalten, 802.1X / MAC-Anmeldung unveraendert (changes.STATUS_ON); geht auf jedem Treiber, auch per SNMP
+    status: str | None = Field(default=None, pattern=r"^(off|on|protected|known|radius)$")
     untagged: str | None = Field(default=None, pattern=r"^\d{1,4}$")
     tagged_add: list[str] = Field(default_factory=list, max_length=64)
     tagged_remove: list[str] = Field(default_factory=list, max_length=64)

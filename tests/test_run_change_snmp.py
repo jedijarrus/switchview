@@ -932,6 +932,22 @@ async def test_snmp_change_already_in_place_aborts(env):
     assert env.agent.sets == []
 
 
+# ── R43: status "on" ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+async def test_procurve_without_ssh_switches_a_port_off_and_on_again_over_snmp(env):
+    """R43: on a ProCurve without SSH a port switched off over SNMP comes back on with "on" (before it, only "Protected" re-enabled a
+    port, and that is CLI-only on a NAC driver). The change is en alone, 802.1X / MAC auth untouched; afterwards the switch is what it
+    was."""
+    sid = await env.switch("procurve")
+    for status, ops, shown in (("off", "2", "Port 2: an → aus"), ("on", "1", "Port 2: aus → an")):
+        cid, plan = await apply(sid, {"ports": ["2"], "change": {"status": status}})
+        assert (plan["desired"], plan["ops"], plan["shown"]) == ({"2": {"en": status == "on"}}, [(f"{IF_ADMIN}.2", "i", ops)], [shown])
+        ch = await run(env, cid)
+        assert (ch["status"], ch["saved"], ch["summary"], ch["desired"]) == ("ok", 1, f"Port 2: {'An' if status == 'on' else 'Aus'}",
+                                                                             {"2": {"en": status == "on"}})
+    assert env.agent.W == VIEWS["procurve"]
+    assert env.ssh == []
+
+
 # ── M1: Cisco access ports outside VLAN 1 (BRIDGE-MIB per VLAN context) ──────────────────────────────────────────────────────────────
 # Classic IOS serves BRIDGE-MIB per VLAN (community@vlan, v3 context vlan-N): in the default context dot1dBasePortIfIndex lists only the
 # VLAN-1 ports. The Catalyst with PoE so: Gi1/0/1 (ifIndex 10101) an access port in VLAN 20 (vmVlan) and so no bridge port, "Drucker",

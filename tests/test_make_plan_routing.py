@@ -388,7 +388,7 @@ def test_routing_table(api, fake, driver, ssh, ssh_up, snmp_write, creds, want):
 @pytest.mark.parametrize("change, ops", [
     ({}, set()),
     ({"untagged": "20"}, {"snmp_vlan"}), ({"tagged_add": ["20"]}, {"snmp_vlan"}), ({"tagged_remove": ["30"]}, {"snmp_vlan"}),
-    ({"status": "off"}, {"snmp_admin"}), ({"status": "protected"}, {"snmp_admin"}),
+    ({"status": "off"}, {"snmp_admin"}), ({"status": "protected"}, {"snmp_admin"}), ({"status": "on"}, {"snmp_admin"}),
     ({"name": "Drucker"}, {"snmp_name"}), ({"name": ""}, {"snmp_name"}),
     ({"untagged": "20", "tagged_add": ["30"], "status": "off", "name": "x"}, {"snmp_vlan", "snmp_admin", "snmp_name"}),
 ])
@@ -468,6 +468,24 @@ def test_protected_refused_over_snmp_on_a_nac_driver_only(api, fake):
     assert (got["mechanism"], got["commands"]) == ("snmp", ["Port 2: an → aus"])
     got = preview(api, switch(api, "cisco", host="203.0.113.22"), {"ports": ["Gi1/0/2"], "change": {"status": "protected"}})
     assert (got["mechanism"], got["commands"], got["blocked"]) == ("snmp", ["Port Gi1/0/2: aus → an"], [])
+
+
+def test_status_on_is_nac_neutral_on_every_driver_and_way(api, fake):
+    """R43: "on" ("An", 802.1X / MAC auth as they are) needs only snmp_admin: a ProCurve without SSH switches its port 6 back on over
+    SNMP (where "Protected" is refused, see above), a driver without NAC too, and over SSH it is the plain enable line."""
+    got = preview(api, switch(api, "procurve", ssh=False), {"ports": ["6"], "change": {"status": "on"}})
+    assert (got["mechanism"], got["commands"], got["desired"], got["summary"]) == ("snmp", ["Port 6: aus → an"], {"6": {"en": True}},
+                                                                                   "Port 6: An")
+    got = preview(api, switch(api, "cisco", host="203.0.113.22"), {"ports": ["Gi1/0/2"], "change": {"status": "on"}})
+    assert (got["mechanism"], got["commands"], got["blocked"]) == ("snmp", ["Port Gi1/0/2: aus → an"], [])
+    got = preview(api, switch(api, "procurve", host="203.0.113.23"), {"ports": ["6"], "change": {"status": "on"}})
+    assert (got["mechanism"], got["commands"], got["desired"]) == ("ssh", ["interface 6 enable"], {"6": {"en": True}})
+
+
+@pytest.mark.parametrize("status", ["an", "ON", "enable", ""])
+def test_an_unknown_status_is_422(api, fake, status):
+    refused_422 = plan(api, switch(api, "procurve", ssh=False), {"ports": ["6"], "change": {"status": status}})
+    assert refused_422.status_code == 422 and fake.calls == []
 
 
 def test_cli_only_request_without_ssh_creds_names_the_missing_access(api, fake):

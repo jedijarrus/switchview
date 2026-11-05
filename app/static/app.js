@@ -202,8 +202,11 @@
   }
 
   /* ── Switch-Detail (Master-Detail) ── */
-  const ST = { off: ["Aus", "st-off"], protected: ["Protected", "st-prot"], known: ["Bekannte Geräte", "st-known"], radius: ["RADIUS", "st-radius"] };
+  const ST = { off: ["Aus", "st-off"], on: ["An", "st-prot"], protected: ["Protected", "st-prot"], known: ["Bekannte Geräte", "st-known"], radius: ["RADIUS", "st-radius"] };
   const stPill = st => ST[st] ? `<span class="pill ${ST[st][1]}">${ST[st][0]}</span>` : `<span class="muted" title="Konfiguration noch nicht gelesen">–</span>`;
+  // Der Zugang eines Ports, wie die Ansicht ihn zeigt und zählt. Ohne NAC (802.1X/MAC-Anmeldung liest und ändert SwitchView dort nicht)
+  // gibt es nur An oder Aus: ein eingeschalteter Port heißt „An“ statt „Protected“. Nur die Beschriftung, p.st vom Server bleibt der Schlüssel.
+  const stOf = (s, st) => s && !has(s, "nac") ? (st === "off" ? "off" : "on") : st;
   let portIdx = {}, picked = new Set(), pickedFor = null;
   async function renderSwitchDetail() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
@@ -218,19 +221,20 @@
     const vset = [...new Set(ph.flatMap(p => [...p.u, ...p.t]))].sort((a, b) => a - b);
     if (swVlan && !vset.includes(swVlan)) swVlan = null;
     const links = MAP.links.filter(l => l.a === s.k || l.b === s.k);
-    const cnt = st => ph.filter(p => p.st === st).length;
+    const cnt = st => ph.filter(p => stOf(s, p.st) === st).length;
+    const stFacts = (has(s, "nac") ? [["radius", "RADIUS"], ["known", "Bekannte Geräte"], ["protected", "Protected"]] : [["on", "An"]]).concat([["off", "Aus"]]);
     // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
     // geht (Sicherung, Konfiguration lesen, RADIUS), zeigt die Ansicht nur bei einem Treiber, der es kann.
     const cli = has(s, "cli"), canW = writable(s), edit = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
     const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${edit}</div>`
-      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports abschalten. RADIUS, Bekannte Geräte und Protected (auch das Wiedereinschalten) brauchen SSH. ${edit}</div>`
+      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports aus- und wieder einschalten („An“, die Anmeldung bleibt, wie sie ist). RADIUS, Bekannte Geräte und Protected brauchen SSH. ${edit}</div>`
       : cli && !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
     v.innerHTML = `<div class="md">${side}<div style="display:grid;gap:16px;min-width:0">
       <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
         <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${edit}</div></div>
       ${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
       ${banner}
-      <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span><span class="fact"><b>${cnt("radius")}</b> RADIUS</span><span class="fact"><b>${cnt("known")}</b> Bekannte Geräte</span><span class="fact"><b>${cnt("protected")}</b> Protected</span><span class="fact"><b>${cnt("off")}</b> Aus</span><span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
+      <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
       <section class="card"><div class="card-h"><h2>Ports</h2><span class="sub">VLAN wählen, um es hervorzuheben</span></div>
         <div class="card-b" style="display:grid;gap:12px">
           <div class="vlans" id="sw-vlans">${vset.map(id => `<button type="button" class="vchip" aria-pressed="${id === swVlan}" data-v="${esc(id)}" style="--vc:${vcol(id)}"><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>
@@ -290,7 +294,7 @@
   function renderPlate(s) {
     const ph = physOf(s), main = ph.filter(p => isNum(p.n) && +p.n <= 48).sort((a, b) => +a.n - +b.n), extra = ph.filter(p => !isNum(p.n) || +p.n > 48);
     const tile = p => {
-      const u = p.u[0] || "", lab = `Port ${p.n}, ${ST[p.st] ? ST[p.st][0] + ", " : ""}${p.o ? "aktiv, " + speedTxt(p.s) : "kein Link"}, ungetaggt ${u ? "VLAN " + u : "keins"}${p.t.length ? ", " + p.t.length + " VLANs getaggt" : ""}${p.tr ? ", " + p.tr : ""}${p.a ? ", " + p.a : ""}`;
+      const u = p.u[0] || "", st = ST[stOf(s, p.st)], lab = `Port ${p.n}, ${st ? st[0] + ", " : ""}${p.o ? "aktiv, " + speedTxt(p.s) : "kein Link"}, ungetaggt ${u ? "VLAN " + u : "keins"}${p.t.length ? ", " + p.t.length + " VLANs getaggt" : ""}${p.tr ? ", " + p.tr : ""}${p.a ? ", " + p.a : ""}`;
       const sb = p.st === "radius" ? `<span class="sb r">R</span>` : p.st === "known" ? `<span class="sb k">K</span>` : "";
       return `<button type="button" class="port ${p.o ? "up" : "down"} ${p.ad ? "" : "adown"} ${isPeer(p) ? "link" : ""}" style="--vc:${u ? vcol(u) : "transparent"}" data-p="${esc(p.n)}" aria-label="${esc(lab)}" title="${esc(lab)}">${p.o ? '<i class="st"></i>' : ""}${p.tr ? `<span class="tk">${esc(p.tr.replace("Trk", "T"))}</span>` : ""}${sb}<span class="pn">${esc(p.n)}</span>${p.t.length ? `<span class="tg">+${p.t.length}</span>` : ""}</button>`;
     };
@@ -322,7 +326,7 @@
     });
     const dev = p => p.l.length ? p.l.map(x => `${esc(x[0])} <span class="mono muted">${esc(x[1])}</span>`).join(", ") : p.tr && !p.n.startsWith("Trk") ? `<span class="muted">über ${esc(p.tr)}</span>` : p.mc > 3 ? `<span class="muted">${p.mc} Geräte</span>` : p.d.map(d => esc(d[3] || d[2] || d[4] || d[0])).join(", ") || `<span class="muted">–</span>`;
     const ck = p => writable(s) && !p.tr ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
-    $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(p.st)}${isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : ""}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
+    $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(stOf(s, p.st))}${isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : ""}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="muted">Keine Ports für diesen Filter.</td></tr>`;
     if ($("#pick-all")) $("#pick-all").checked = false;
   }
@@ -348,17 +352,20 @@
     if (!ports.length) return;
     const ps = ports.map(n => portIdx[n]), f = prev || { status: "", untagged: "", add: [], rem: [], name: "", nameEdited: false, nameClear: false, limit: "", guest: "-", poe: "", expert: false };
     const vl = (s.vl && s.vl.length ? s.vl : Object.keys(MAP.vlans)), tagUnion = [...new Set(ps.flatMap(p => p.t))].sort((a, b) => a - b);
-    const curSt = [...new Set(ps.map(p => p.st))], anyProt = ps.some(p => isUplink(p) || p.n.startsWith("Trk"));
+    const curSt = [...new Set(ps.map(p => stOf(s, p.st)))], anyProt = ps.some(p => isUplink(p) || p.n.startsWith("Trk"));
     // 802.1X / MAC-Anmeldung (RADIUS, Bekannte Geräte, Geräte pro Port, Gast-VLAN) gibt es nur über die SSH-CLI; Protected auf einem
     // Treiber mit NAC auch (es heißt dort Anmeldung aus). Ohne CLI-Treiber oder ohne SSH-Zugang gesperrt, mit dem Grund im Formular.
+    // „An“ schaltet nur ein, die Anmeldung bleibt, wie sie ist: das geht auf jedem Treiber und auf beiden Wegen.
     const nacCap = has(s, "cli") && has(s, "nac"), nac = nacCap && s.ssh, protOk = nac || !has(s, "nac");
     const nacWhy = nac ? "" : nacCap
-      ? "Ohne SSH-Zugang gehen RADIUS, Bekannte Geräte und Protected (auch das Wiedereinschalten eines Ports), Geräte pro Port und Gast-VLAN nicht: per SNMP gibt es keine 802.1X-/MAC-Anmeldung."
+      ? "Ohne SSH-Zugang gehen RADIUS, Bekannte Geräte und Protected, Geräte pro Port und Gast-VLAN nicht: per SNMP gibt es keine 802.1X-/MAC-Anmeldung. Einschalten geht mit „An“."
       : `Treiber ${s.driver} schreibt per SNMP: RADIUS, Bekannte Geräte, Geräte pro Port und Gast-VLAN gehen nur über die SSH-CLI (ProCurve).`;
     const stOff = { radius: !nac, known: !nac, protected: !protOk };
+    // Ohne NAC nur An und Aus: RADIUS und Bekannte Geräte gibt es dort nicht, und Protected hieße nichts anderes als An
     const opts = [["", "Unverändert", curSt.length > 1 ? "gemischt" : ST[curSt[0]] ? "jetzt: " + ST[curSt[0]][0] : "jetzt: unbekannt"],
-      ["radius", "RADIUS", "Zertifikat (802.1X), sonst bekannte Geräte"], ["known", "Bekannte Geräte", "nur Geräte aus der Geräte-DB, per MAC"],
-      ["protected", "Protected", "festes VLAN, egal wer steckt"], ["off", "Aus", "Port abgeschaltet"]];
+      ...(has(s, "nac") ? [["radius", "RADIUS", "Zertifikat (802.1X), sonst bekannte Geräte"], ["known", "Bekannte Geräte", "nur Geräte aus der Geräte-DB, per MAC"],
+        ["protected", "Protected", "festes VLAN, egal wer steckt"]] : []),
+      ["on", "An", "einschalten, Anmeldung (802.1X/MAC) bleibt, wie sie ist"], ["off", "Aus", "Port abgeschaltet"]];
     // PoE nur bei einem Treiber mit snmp_poe und nur, wenn jeder gewählte Port einen zugeordneten PoE-Eintrag hat (netmap: poe)
     const poeCap = has(s, "snmp_poe"), noPoe = ps.filter(p => !p.poe), poeAll = poeCap && !noPoe.length;
     const poeNow = [...new Set(ps.map(p => p.poe && p.poe.on))];
@@ -522,7 +529,7 @@
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
     const canEdit = writable(s) && !p.tr;
     $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">Port bearbeiten</button></div>` : ""}
-      <dl class="kv"><dt>Zugang</dt><dd>${stPill(p.st)}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd><dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
+      <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd><dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
       <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
@@ -754,7 +761,7 @@
       if (!$("#ulist")) return;
       $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th></th></tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}</td><td>${stPill(d.st)}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}</td><td>${stPill(stOf(MAP && MAP.switches.find(x => x.k === d.sw), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
