@@ -191,6 +191,10 @@ ADDED_COLUMNS = (
     # the switch may have taken something (right before send_config_set / write memory over SSH, right before the SET over SNMP).
     # Existing rows have NULL: unknown, and counted as sent (changes.may_have_sent), so they keep revert and save as before.
     ("changes", "sent", "INTEGER"),
+    # Whether the switch may have changed since its read of the running-config (switch_cfg): 1 once an SNMP SET or SSH lines may have
+    # gone out (changes.mark_cfg_stale), 0 again with the next read (changes.store_cfg). taken_at stays the time of the read. fresh_cfg
+    # reads anew for a stale entry, and the map takes a port's on / off from the poll then. Existing rows have 0.
+    ("switch_cfg", "stale", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

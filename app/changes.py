@@ -17,7 +17,7 @@ import logging
 import re
 import traceback
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from netmiko.exceptions import ConfigInvalidException
 
@@ -61,6 +61,8 @@ SNMP_KEPT = {True: "Was der Switch davon übernommen hat, wirkt schon und ist ge
 SSH_KEPT = {"lines": SNMP_KEPT[False], "save": "Ob der Switch gespeichert hat (write memory), ist offen."}
 # The error of a run whose task was cancelled (the app shut down): unclear once something went out, failed before
 CANCELLED = "Abgebrochen (Prozess beendet)"
+# The error of a change whose switch was disabled while it waited for the lock (run_change, _run_snmp)
+DISABLED_RUN = "Switch ist deaktiviert: nichts gesendet"
 
 
 def _now() -> str:
@@ -603,9 +605,10 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
 # fresh_cfg liest fuer sie wirklich, statt bis zu max_age_s lang aus dem Cache: so merkt die Vorschau, dass SSH weg ist, und kann auf
 # SNMP ausweichen, statt eine SSH-Aenderung zu planen, die beim Ausfuehren scheitert. Die Zeile in switch_cfg bleibt (die Karte zeigt
 # daraus NAC-Zustand und RADIUS-Bereitschaft); ein erfolgreicher Read (store_cfg) hebt die Marke auf. Im Prozess gehalten wie die Locks
-# (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch. Nur der SNMP-SET muss den Neustart
-# ueberstehen (sonst zeigte eine SSH-Vorschau den Stand von vor ihm): er altert dazu taken_at (age_cfg). So do lines over SSH, before
-# they go out: an unclear change could not be taken back otherwise, its revert would plan against the read from before it.
+# (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch. What changed the switch must outlast a
+# restart (else an SSH preview would show the state from before it): the column switch_cfg.stale (mark_cfg_stale), set before an SNMP
+# SET and before SSH lines go out, cleared by the next read (store_cfg). fresh_cfg treats a stale entry as expired; taken_at stays the
+# time of the read, which the RADIUS card shows, marked "veraltet", and the map takes a port's on / off from the poll meanwhile.
 _cfg_stale: set[int] = set()
 CFG_MAX_AGE_S = 600    # so lange nimmt fresh_cfg einen SSH-Read aus switch_cfg
 
@@ -615,49 +618,50 @@ def invalidate_cfg(sid: int):
     _cfg_stale.add(sid)
 
 
-async def age_cfg(sid: int):
-    """taken_at des SSH-Reads von Switch sid ueber das Fenster von fresh_cfg hinaus altern lassen, parsed bleibt (M3): wie invalidate_cfg,
-    aber in der DB, also auch nach einem Neustart. Nie juenger als vorher."""
-    aged = (datetime.now(timezone.utc) - timedelta(seconds=CFG_MAX_AGE_S + 1)).strftime("%Y-%m-%d %H:%M:%S")
+async def mark_cfg_stale(sid: int):
+    """Mark the SSH read of switch sid stale in the database (switch_cfg.stale = 1): the switch may have changed since (an SNMP SET, or
+    SSH lines going out). Like invalidate_cfg, but it outlasts a restart; parsed and taken_at stay (M3). store_cfg clears it."""
     async with db() as conn:
-        await conn.execute("UPDATE switch_cfg SET taken_at = MIN(taken_at, ?) WHERE switch_id = ?", (aged, sid))
+        await conn.execute("UPDATE switch_cfg SET stale = 1 WHERE switch_id = ?", (sid,))
         await conn.commit()
 
 
 async def store_cfg(sid: int, content: str) -> dict:
     parsed = cfgparse.parse_config(content)
     async with db() as conn:
-        await conn.execute("INSERT INTO switch_cfg(switch_id, taken_at, parsed) VALUES (?,?,?) ON CONFLICT(switch_id) DO UPDATE "
-                           "SET taken_at = excluded.taken_at, parsed = excluded.parsed", (sid, _now(), json.dumps(parsed)))
+        await conn.execute("INSERT INTO switch_cfg(switch_id, taken_at, parsed, stale) VALUES (?,?,?,0) ON CONFLICT(switch_id) DO UPDATE "
+                           "SET taken_at = excluded.taken_at, parsed = excluded.parsed, stale = 0", (sid, _now(), json.dumps(parsed)))
         await conn.commit()
     _cfg_stale.discard(sid)
     return parsed
 
 
-async def cached_cfg(sid: int) -> tuple[dict | None, str | None]:
+async def cached_cfg(sid: int) -> tuple[dict | None, str | None, bool]:
+    """The stored SSH read of switch sid: (parsed, taken_at, stale); (None, None, False) without one."""
     async with db() as conn:
-        async with conn.execute("SELECT taken_at, parsed FROM switch_cfg WHERE switch_id = ?", (sid,)) as cur:
+        async with conn.execute("SELECT taken_at, parsed, stale FROM switch_cfg WHERE switch_id = ?", (sid,)) as cur:
             row = await cur.fetchone()
-    return (json.loads(row["parsed"]), row["taken_at"]) if row else (None, None)
+    return (json.loads(row["parsed"]), row["taken_at"], bool(row["stale"])) if row else (None, None, False)
 
 
 async def fresh_cfg(sid: int, max_age_s: int = CFG_MAX_AGE_S) -> dict:
-    """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und nicht verworfen (R27, invalidate_cfg), sonst
-    per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen. RuntimeError ohne Read und ohne Cache fuer
-    einen Switch, dessen Treiber keine SSH-CLI hat (R39): ein Eintrag in switch_cfg waere dort eine Fehldeutung oder von vor einem
-    Treiberwechsel. Die Aufrufer fragen das schon vorher; diese Sperre gilt unabhaengig davon."""
+    """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und weder verworfen (R27, invalidate_cfg) noch
+    veraltet (stale, mark_cfg_stale), sonst per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen.
+    RuntimeError ohne Read und ohne Cache fuer einen Switch, dessen Treiber keine SSH-CLI hat (R39): ein Eintrag in switch_cfg waere
+    dort eine Fehldeutung oder von vor einem Treiberwechsel. Die Aufrufer fragen das schon vorher; diese Sperre gilt unabhaengig davon."""
     row = await _switch_row(sid)
     reason = sshcli.cli_refusal(row) if row is not None else "Switch nicht gefunden"
     if reason:
         raise RuntimeError(reason)
-    cfg, at = (None, None) if sid in _cfg_stale else await cached_cfg(sid)
-    if cfg and at and (datetime.now(timezone.utc) - datetime.strptime(at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds() < max_age_s:
+    cfg, at, stale = (None, None, False) if sid in _cfg_stale else await cached_cfg(sid)
+    taken = datetime.strptime(at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) if at else None
+    if cfg and taken and not stale and (datetime.now(timezone.utc) - taken).total_seconds() < max_age_s:
         return cfg
     res = await sshcli.backup_config(sid, "lesen")
     if not res.get("ok"):
         invalidate_cfg(sid)
         raise RuntimeError(res.get("error") or "Konfiguration konnte nicht gelesen werden")
-    cfg, _ = await cached_cfg(sid)
+    cfg, _, _ = await cached_cfg(sid)
     return cfg
 
 
@@ -678,11 +682,26 @@ async def _step(cid: int, steps: list, text: str, level: str = "info"):
     await _upd(cid, steps=json.dumps(steps))
 
 
+BUSY = "An diesem Switch läuft gerade eine Änderung"
+
+
+class Busy(RuntimeError):
+    """create_change: the switch already has a change that is queued or running (BUSY)."""
+
+
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
     ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
-    and _run_snmp set it to 1 right before anything does)."""
+    and _run_snmp set it to 1 right before anything does).
+
+    One change at a time per switch (Phase 1, review §2): the check for a queued or running change of the switch and the INSERT are one
+    write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed main.apply_change's early check the second
+    waits for the first's commit and then raises Busy(BUSY), nothing inserted."""
     async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT 1 FROM changes WHERE switch_id = ? AND status IN ('queued', 'running') LIMIT 1", (sid,)) as cur:
+            if await cur.fetchone():
+                raise Busy(BUSY)    # closing the connection rolls the transaction back
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
             "mechanism, sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
@@ -704,9 +723,13 @@ async def run_change(cid: int):
     something. An exception after that point ends "unclear", not "failed" (the SNMP way's rule): netmiko's ReadTimeout from
     send_config_set, say, comes after the lines went out; its last step says what that leaves open (SSH_KEPT). A line the switch
     refused (ConfigInvalidException) stays "failed", with sent = 1 (the lines before it can be in effect). A cancelled task (the app
-    shut down) ends the same way with CANCELLED, as on the SNMP way. Before lines go out the cached read is aged and dropped (R27): the
-    end stores the read-back as the fresh read, or the read from before when no line went out; after lines without a read-back it
-    stores neither. A revert that ends ok marks the change it took back (_mark_reverted)."""
+    shut down) ends the same way with CANCELLED, as on the SNMP way. Before lines go out the cached read is marked stale and dropped
+    (R27, mark_cfg_stale): the end stores the read-back as the fresh read, or the read from before when no line went out; after lines
+    without a read-back it stores neither. A revert that ends ok marks the change it took back (_mark_reverted).
+
+    Inside the lock, before anything else, the switch row of then: a switch disabled while the change waited ends it failed with
+    DISABLED_RUN, no session. Only then the inventory of a port change (the poll's ports and uplinks): a change before it may have
+    renewed the poll while this one waited."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
             ch = await cur.fetchone()
@@ -735,10 +758,11 @@ async def run_change(cid: int):
 
     async def going_out(what: str):
         """Right before `what` ("lines" or "save", SSH_KEPT) goes out to the switch. Lines change the running-config: the cached read
-        is aged first (it then stays so after a hard kill or a restart, as on the SNMP way) and dropped once sent is in the row."""
+        is marked stale first (it then stays so after a hard kill or a restart, as on the SNMP way) and dropped once sent is in the
+        row."""
         nonlocal sent, kept, lines
         if what == "lines":
-            await age_cfg(sid)
+            await mark_cfg_stale(sid)
         if not sent:
             await _upd(cid, sent=1)    # before it goes out: if writing the row fails, nothing is sent
             sent = True
@@ -748,21 +772,25 @@ async def run_change(cid: int):
             invalidate_cfg(sid)
 
     try:
-        inv = await inventory(sid) if kind == "ports" else None
         lock = sshcli.lock(sid)
         if lock.locked():
             await step("Warte auf laufende Aktion an diesem Switch")
         async with lock:
             await _upd(cid, status="running")
-            # R39, das Gegenstueck zu R33 auf dem SNMP-Weg: die Switch-Zeile von jetzt, nach dem Warten auf den Lock. Hat ihr Treiber
-            # (inzwischen) keine SSH-CLI, geht keine Sitzung auf und nichts hinaus.
+            # R39, das Gegenstueck zu R33 auf dem SNMP-Weg: die Switch-Zeile von jetzt, nach dem Warten auf den Lock. Ist der Switch
+            # (inzwischen) deaktiviert oder hat ihr Treiber keine SSH-CLI, geht keine Sitzung auf und nichts hinaus.
             row = await _switch_row(sid)
             secrets.extend(_secrets_of(row, rs))
+            if row is not None and not row["enabled"]:
+                status, error = "failed", DISABLED_RUN
+                await step(error, "error")
+                return
             reason = sshcli.cli_refusal(row) if row is not None else "Switch nicht gefunden"
             if reason:
                 status, error = "failed", f"{reason}: nichts gesendet"
                 await step(error, "error")
                 return
+            inv = await inventory(sid) if kind == "ports" else None    # inside the lock: the poll as it is now
             await step(f"Verbinde mit {row['host']}")
             conn = await asyncio.to_thread(sshcli.connect, row)
             try:
@@ -871,7 +899,8 @@ async def _run_snmp(cid: int, ch, row):
     einem Switch nacheinander laufen, gleich ueber welchen Weg.
       1. Ohne Schreib-Identitaet (poller.creds_of(row, write=True)): failed, nichts gelesen, nichts gesendet. Nach dem Warten auf den
          Lock noch einmal, mit der Switch-Zeile von dann (R33): SNMP-Schreiben kann inzwischen aus sein, die Zugangsdaten weg. Ab da
-         gilt diese Zeile (Zugangsdaten, Treiber).
+         gilt diese Zeile (Zugangsdaten, Treiber). Before that, and before anything else in the lock: a switch disabled meanwhile ends
+         the change failed with DISABLED_RUN. Only then the inventory (the poll's ports and uplinks), inside the lock as on the SSH way.
       2. Live lesen: snmpwrite.read_cfg selbst, nie main._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
          reentrant), die PoE-Tabellen nur, wenn die Aenderung PoE beruehrt (touches_poe, R34; das Zuruecklesen genauso). Scheitert es:
          failed.
@@ -890,8 +919,8 @@ async def _run_snmp(cid: int, ch, row):
     abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". The row gets sent = 1 right
     before the SET is handed over (changes.sent), so a restart (mark_interrupted) and the follow-up actions (actions_of) know it too; a
     revert that ends ok marks the change it took back (_close, _mark_reverted). Nie SSH, keine Sicherung, kein
-    switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg, und age_cfg fuer die
-    Zeit nach einem Neustart)."""
+    switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg, und mark_cfg_stale
+    fuer die Zeit nach einem Neustart)."""
     sid = ch["switch_id"]
     if ch["kind"] != "ports":  # Speichern und RADIUS-Vorbereitung gibt es nur per SSH (main lehnt sie vorher ab)
         return await _refuse(cid, ch, "Per SNMP gibt es nur Port-Änderungen: nichts ausgeführt")
@@ -915,7 +944,6 @@ async def _run_snmp(cid: int, ch, row):
             status, error = "failed", reason
             await step(error, "error")
             return
-        inv = await inventory(sid)
         lock = sshcli.lock(sid)
         if lock.locked():
             await step("Warte auf laufende Aktion an diesem Switch")
@@ -923,11 +951,15 @@ async def _run_snmp(cid: int, ch, row):
             await _upd(cid, status="running")
             row = await _switch_row(sid)
             secrets.extend(_secrets_of(row, rs))
-            reason = _no_write_identity(row) if row is not None else "Switch nicht gefunden"
+            if row is not None and not row["enabled"]:
+                reason = DISABLED_RUN
+            else:
+                reason = _no_write_identity(row) if row is not None else "Switch nicht gefunden"
             if reason:
                 status, error = "failed", reason
                 await step(error, "error")
                 return
+            inv = await inventory(sid)    # inside the lock: the poll as it is now
             driver = drivers.driver_for(row)
             autosave = drivers.can(driver, "snmp_autosave")
             kept = SNMP_KEPT[autosave]
@@ -956,7 +988,7 @@ async def _run_snmp(cid: int, ch, row):
             await _upd(cid, before=json.dumps(plan["before"]))
             n = len(plan["ops"])
             await step(f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
-            await age_cfg(sid)    # vor sent: scheitert das Schreiben in die DB, ist nichts gesendet
+            await mark_cfg_stale(sid)    # vor sent: scheitert das Schreiben in die DB, ist nichts gesendet
             unsaved = await unsaved_ssh_changes(sid) if autosave else []    # R42: was dieses SET mitspeichert, im Lock festgestellt
             await _upd(cid, sent=1)    # changes.sent, before the SET goes out: if writing the row fails, nothing is sent
             sent = True

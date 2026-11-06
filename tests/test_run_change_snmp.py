@@ -944,6 +944,35 @@ async def test_snmp_run_uses_the_switch_row_as_it_is_after_the_wait(env):
     assert [cred for _, cred, _ in env.agent.sets] == [{**RW_CRED, "snmp_community": "rw-neu"}]
 
 
+async def test_the_snmp_branch_skips_a_switch_disabled_while_waiting(env):
+    """The switch was disabled while the change waited for the lock: failed with "Switch ist deaktiviert: nichts gesendet", before
+    anything else (nothing read, no SET, sent stays 0)."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.walks.clear()
+
+    async def meanwhile():
+        await sql("UPDATE switches SET enabled = 0 WHERE id = ?", (sid,))
+    ch = await hold_the_lock_while(env, sid, cid, meanwhile)
+    assert (ch["status"], ch["error"], ch["sent"]) == ("failed", "Switch ist deaktiviert: nichts gesendet", 0)
+    assert steps(ch) == [("Warte auf laufende Aktion an diesem Switch", "info"), ("Switch ist deaktiviert: nichts gesendet", "error")]
+    assert env.agent.walks == [] and env.agent.sets == []
+
+
+async def test_the_snmp_branch_reads_the_inventory_inside_the_lock(env):
+    """As on the SSH way: changes.inventory runs once, inside sshcli.lock(sid), so a change that waited plans against the poll as it is
+    then."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    seen: list[bool] = []
+
+    async def inventory(s):
+        seen.append(sshcli.lock(s).locked())
+        return env.inv
+    env.mp.setattr(changes, "inventory", inventory)
+    assert ((await run(env, cid))["status"], seen) == ("ok", [True])
+
+
 # ── Nothing to write: aborted, never ok without a verify ──────────────────────────────────────────────────────────────────────────
 async def test_snmp_plan_without_ops_aborts(env, monkeypatch):
     """The live plan matches the preview but has no varbinds (here a renderer that loses them): aborted, nothing written, never ok,
@@ -1036,11 +1065,11 @@ async def test_snmp_preview_warns_of_the_unsaved_ssh_changes_it_would_save(env):
     await sql("INSERT INTO switches(name, host, driver) VALUES ('SW-EK-02', '203.0.113.22', 'procurve')")
     [(other,)] = await sql("SELECT id FROM switches WHERE host = '203.0.113.22'")
     await old_change(other)                 # another switch's unsaved change says nothing about this one
-    _, plan = await apply(sid, PC_PROBE)
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(**PC_PROBE)))[0]    # the preview (apply() would refuse: queued)
     refs = "#{}, #{}, #{} und #{}".format(*listed)
     assert (plan["mechanism"], plan["blocked"], plan["warnings"]) == ("snmp", [], [unsaved_warning(refs, many=True)])
     await sql("UPDATE changes SET saved = 1 WHERE id IN (?, ?, ?)", tuple(listed[1:]))
-    _, plan = await apply(sid, PC_PROBE)
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(**PC_PROBE)))[0]
     assert plan["warnings"] == [unsaved_warning(f"#{listed[0]}")]
 
 
@@ -1048,12 +1077,12 @@ async def test_snmp_revert_preview_warns_too_and_the_fallback_warning_stays_firs
     """The SNMP revert is an SNMP SET as well; and on the SSH fallback the SSH warning stays in front."""
     sid, cid = await forward_port3(env)
     old = await old_change(sid)
-    _, plan = await apply(sid, {"mode": "revert", "of": cid})
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(mode="revert", of=cid)))[0]    # previews only: no change created
     assert plan["warnings"] == [unsaved_warning(f"#{old}")]
     await sql("UPDATE switches SET ssh_user = 'manager', ssh_pass = ? WHERE id = ?", (crypto.encrypt("ssh-s3cret"), sid))
     env.allow_ssh()
     env.ssh_fails = "connect"
-    _, plan = await apply(sid, PC_PROBE)
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(**PC_PROBE)))[0]
     assert plan["warnings"] == [f"SSH nicht verfügbar ({SSH_DOWN}), die Änderung geht per SNMP", unsaved_warning(f"#{old}")]
 
 
@@ -1327,17 +1356,17 @@ def age_s(taken_at: str) -> float:
 async def test_r27_ssh_lines_without_a_read_back_leave_no_young_cached_config(env, monkeypatch, restart):
     """send_config_set raises after the switch took the line (netmiko's ReadTimeout, the answer lost): the change ends unclear without
     a read-back. The read from before it must not stand for the switch then. Before the line goes out the cached entry is dropped
-    (the R27 mark) and aged past fresh_cfg's window (so a hard kill mid-send leaves it so too), and run_change's end does not store
-    the read from before as the fresh one: the next fresh_cfg reads for real, also after a restart (the mark is gone), and the revert
-    this unclear change offers previews the line that takes it back instead of "nothing to change"."""
+    (the R27 mark) and marked stale in the database (switch_cfg.stale, so a hard kill mid-send leaves it so too), and run_change's end
+    does not store the read from before as the fresh one: the next fresh_cfg reads for real, also after a restart (the in-process
+    mark is gone), and the revert this unclear change offers previews the line that takes it back instead of "nothing to change"."""
     sid = await env.switch("procurve", ssh=True)
     env.allow_ssh()
     await changes.store_cfg(sid, SSH_CONFIG)                    # the young entry the preview left
     real, at_send = FakeSSH.send_config_set, []
 
     def send_then_time_out(self, cmds, **kwargs):
-        [(taken_at,)] = dbfix.query("SELECT taken_at FROM switch_cfg WHERE switch_id = ?", (sid,))
-        at_send.append((sid in changes._cfg_stale, age_s(taken_at) > changes.CFG_MAX_AGE_S))
+        [(marked,)] = dbfix.query("SELECT stale FROM switch_cfg WHERE switch_id = ?", (sid,))
+        at_send.append((sid in changes._cfg_stale, marked == 1))
         real(self, cmds, **kwargs)                              # the switch takes the line: it now runs SSH_AFTER
         raise ReadTimeout("Pattern not detected")
 
@@ -1389,11 +1418,12 @@ async def test_snmp_set_invalidates_the_cached_ssh_config(env, outcome, stale):
         assert await changes.fresh_cfg(sid) == cfgparse.parse_config(SSH_CONFIG) and env.ssh == []
 
 
-@pytest.mark.parametrize("outcome, aged", [("ok", True), ("unclear", True), ("aborted", False)])
-async def test_snmp_set_ages_the_cached_ssh_config_past_a_restart(env, outcome, aged):
-    """M3: the R27 mark lives in the process only. Once an SNMP SET went out, switch_cfg.taken_at is also aged past fresh_cfg's window
-    (parsed stays: the map shows NAC state and RADIUS readiness from it), so after a restart, which loses the mark, the next SSH preview
-    still reads for real instead of serving the entry from before the SET. A run that wrote nothing leaves the entry young."""
+@pytest.mark.parametrize("outcome, stale", [("ok", True), ("unclear", True), ("aborted", False)])
+async def test_snmp_set_marks_the_cached_ssh_config_stale_past_a_restart(env, outcome, stale):
+    """M3: the R27 mark lives in the process only. Once an SNMP SET went out, switch_cfg.stale is also 1 (changes.mark_cfg_stale;
+    parsed and taken_at stay: the map shows NAC state and RADIUS readiness from the read, and when it was taken), so after a restart,
+    which loses the mark, the next SSH preview still reads for real instead of serving the entry from before the SET. A run that wrote
+    nothing leaves the entry as it was."""
     sid = await env.switch("procurve")
     await put_cfg(sid)
     [(young,)] = await sql("SELECT taken_at FROM switch_cfg WHERE switch_id = ?", (sid,))
@@ -1404,13 +1434,12 @@ async def test_snmp_set_ages_the_cached_ssh_config_past_a_restart(env, outcome, 
         env.agent.W = edit_walks(env.agent.W, pvid={"1": "1"})
     assert (await run(env, cid))["status"] == outcome
     changes._cfg_stale.clear()                          # a restart: the in-process mark is gone
-    [(taken_at, parsed)] = await sql("SELECT taken_at, parsed FROM switch_cfg WHERE switch_id = ?", (sid,))
+    [(taken_at, parsed, marked)] = await sql("SELECT taken_at, parsed, stale FROM switch_cfg WHERE switch_id = ?", (sid,))
     assert json.loads(parsed) == cfgparse.parse_config(SSH_CONFIG)
-    age = datetime.now(timezone.utc) - datetime.strptime(taken_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    assert (age.total_seconds() > 600) is aged and (taken_at == young) is not aged
+    assert (marked, taken_at) == (int(stale), young)
     env.allow_ssh()
     env.ssh_fails = "connect"
-    if aged:
+    if stale:
         with pytest.raises(RuntimeError, match=SSH_DOWN):
             await changes.fresh_cfg(sid)
         assert env.ssh == [("backup_config", sid)]

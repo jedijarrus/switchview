@@ -720,6 +720,8 @@ SNMP_PORT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/._:-]{0,63}$")
 # nimmt er nicht zurueck.
 SSH_FIELDS = frozenset(cfgparse.port_state({}, ""))
 STALE = "Die Vorschau ist veraltet, bitte neu laden"
+# A disabled switch gets no change in any mode (/plan and /apply): "Aktiv" means polled and backed up, the views do not show it
+DISABLED = "Switch ist deaktiviert – Änderungen erst nach dem Aktivieren (Zugang bearbeiten)"
 SSH_NEEDED = "Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearbeiten)"
 NO_SSH = "für diesen Switch ist kein SSH-Zugang hinterlegt (Zugang bearbeiten)"
 _tasks: set = set()
@@ -941,6 +943,15 @@ def _check_request(body: PlanIn, port_re: re.Pattern):
         raise HTTPException(422, f"VLAN {both[0]} steht in „getaggt hinzufügen“ und „getaggt entfernen“")
 
 
+async def _inventory(sid: int) -> dict:
+    """changes.inventory(sid); its LookupError (the switch is not in the map: disabled since the request began, or gone) is 409
+    DISABLED, never a 500."""
+    try:
+        return await changes.inventory(sid)
+    except LookupError:
+        raise HTTPException(409, DISABLED)
+
+
 async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     """-> (plan, request fuer run_change, kind, summary). plan["mechanism"] ist der Schreibweg, "ssh" oder "snmp"."""
     driver = drivers.driver_for(row)
@@ -955,7 +966,7 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     _check_request(body, PORT_RE)
     req = {"ports": body.ports, "set": body.change.model_dump(), "expert": body.expert}
     try:
-        plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req,
+        plan = changes.plan_ports(row["firmware"] or "", await _inventory(row["id"]), cfg, req,
                                   radius_server=(await changes.radius_settings())["server"])
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -988,7 +999,7 @@ async def _plan_snmp(row, driver: drivers.Driver, body: PlanIn, ssh_error: str |
     if missing:
         raise HTTPException(422, f"Port gibt es auf diesem Switch nicht: {', '.join(missing)}")
     try:
-        plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, mechanism="snmp", driver=driver,
+        plan = changes.plan_ports(row["firmware"] or "", await _inventory(row["id"]), cfg, req, mechanism="snmp", driver=driver,
                                   raw=raw)
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -1078,7 +1089,7 @@ async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict
             raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e}")
         way = {"radius_server": (await changes.radius_settings())["server"]}    # a NAC revert needs the configured server, like run_change
     try:
-        plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, **way)
+        plan = changes.plan_ports(row["firmware"] or "", await _inventory(row["id"]), cfg, req, **way)
     except ValueError as e:
         raise HTTPException(422, str(e))
     if mech == "snmp":
@@ -1086,9 +1097,17 @@ async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict
     return plan, req, "ports", f"Rückgängig #{ch['id']}: {ch['summary']}"
 
 
+async def _enabled_row(sid: int):
+    """The switches row of sid for a change (_row), 409 DISABLED for a disabled switch: in every mode, before anything is read."""
+    row = await _row(sid)
+    if not row["enabled"]:
+        raise HTTPException(409, DISABLED)
+    return row
+
+
 @app.post("/api/switches/{sid}/plan")
 async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
-    row = await _row(sid)
+    row = await _enabled_row(sid)
     # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
     plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
     return {"kind": kind, "summary": summary, "mechanism": plan["mechanism"], "commands": plan["shown"], "warnings": plan.get("warnings", []),
@@ -1098,11 +1117,13 @@ async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
 
 @app.post("/api/switches/{sid}/apply")
 async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
-    row = await _row(sid)
+    """The early check for a queued or running change spares the read and the plan; the binding one is changes.create_change's, in one
+    transaction with the INSERT (two requests can both pass this one while they plan): either way 409 changes.BUSY."""
+    row = await _enabled_row(sid)
     async with db() as conn:
         async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND status IN ('queued', 'running')", (sid,)) as cur:
             if await cur.fetchone():
-                raise HTTPException(409, "An diesem Switch läuft gerade eine Änderung")
+                raise HTTPException(409, changes.BUSY)
     plan, req, kind, summary = await _make_plan(row, body)
     if plan["blocked"]:
         raise HTTPException(409, "Nicht ausführbar: " + "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"]))
@@ -1111,8 +1132,11 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
     if not plan["shown"] and kind != "save":
         raise HTTPException(422, "Es gibt nichts zu ändern")
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
-    cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,
-                                      revert_of=body.of if body.mode == "revert" else None)
+    try:
+        cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,
+                                          revert_of=body.of if body.mode == "revert" else None)
+    except changes.Busy:
+        raise HTTPException(409, changes.BUSY)
     t = asyncio.create_task(changes.run_change(cid))
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
@@ -1386,8 +1410,8 @@ async def build_map() -> dict:
         async with conn.execute("SELECT m.switch_id, m.port, m.mac, m.vlan, n.ip, n.name, n.vendor, dv.name AS dname, dv.allowed "
                                 "FROM macs m LEFT JOIN names n ON n.mac = m.mac LEFT JOIN devices dv ON dv.mac = m.mac") as cur:
             mrows = await cur.fetchall()
-        async with conn.execute("SELECT switch_id, taken_at, parsed FROM switch_cfg") as cur:
-            cfgs = {r["switch_id"]: (r["taken_at"], json.loads(r["parsed"])) for r in await cur.fetchall()}
+        async with conn.execute("SELECT switch_id, taken_at, parsed, stale FROM switch_cfg") as cur:
+            cfgs = {r["switch_id"]: (r["taken_at"], json.loads(r["parsed"]), bool(r["stale"])) for r in await cur.fetchall()}
     # R39: ein Read der running-config zaehlt nur fuer einen Treiber mit SSH-CLI. Bei jedem anderen waere er eine Fehldeutung durch den
     # ProCurve-Parser (jeder Port "Protected") oder von vor einem Treiberwechsel: der Switch gilt als nicht gelesen.
     with_cli = {s["id"] for s in sws if drivers.can(drivers.driver_for(s), "cli")}
@@ -1409,8 +1433,10 @@ async def build_map() -> dict:
     for p in prows:
         key = (p["switch_id"], p["trunk"] or p["name"])
         d = sorted(devs.get(key, []), key=lambda x: -x[5])
-        cfg = cfgs.get(p["switch_id"], (None, None))[1]
+        _, cfg, stale = cfgs.get(p["switch_id"], (None, None, False))
         st = cfgparse.port_state(cfg, p["name"]) if cfg else None
+        if st and stale:    # the read is older than the switch's last change (switch_cfg.stale): on / off from the poll
+            st = st | {"en": bool(p["admin"])}
         port = {
             "st": changes.status_of(st) if st else ("off" if not p["admin"] else ""),
             "lim": ((st["cl"] if st["x"] else None) or (st["al"] if st["m"] else None)) if st else None,
@@ -1434,7 +1460,8 @@ async def build_map() -> dict:
                          "zone": s["zone"] or "", "host": s["host"], "lastPoll": s["last_poll"], "ok": bool(s["last_poll_ok"]),
                          "error": s["last_error"] or "", "baseMac": s["base_mac"] or "", "ports": ports_by.get(s["id"], []),
                          "ssh": bool(s["ssh_user"] and s["ssh_pass"]), "driver": s["driver"], "caps": sorted(drivers.driver_for(s).caps),
-                         "snmp_write": bool(s["snmp_write"]), "cfgAt": cfgs.get(s["id"], (None, None))[0],
+                         "snmp_write": bool(s["snmp_write"]), "cfgAt": cfgs.get(s["id"], (None,))[0],
+                         "cfgStale": cfgs.get(s["id"], (None, None, False))[2],
                          "ready": changes.readiness(cfgs[s["id"]][1], server or None) if s["id"] in cfgs else None,
                          "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], []),
                          "credWarnings": poller.credential_warnings(s)})

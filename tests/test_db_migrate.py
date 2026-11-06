@@ -47,7 +47,13 @@ NEW_COLUMNS = {
         "sent": ("INTEGER", 0, None),    # Phase 3 appends sent
     },
 }
-# config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by Task 6's migration test.
+# config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by test_migration_adds_the_phase3_columns.
+# The columns Phase 3 adds, (table, column) -> (declared type, NOT NULL flag, default expression), and what an existing row reads then.
+PHASE3_COLUMNS = {
+    ("changes", "sent"): (("INTEGER", 0, None), None),
+    ("switch_cfg", "stale"): (("INTEGER", 1, "0"), 0),
+    ("config_backups", "raw_mac"): (("TEXT", 0, None), None),
+}
 
 
 async def _table_info(conn, table: str) -> list[tuple]:
@@ -217,3 +223,59 @@ async def test_init_db_upgrades_an_existing_database_and_survives_a_restart(data
     assert (switch["name"], switch["host"]) == ("SW-EK-01", "203.0.113.21")
     assert switch["driver"] == "procurve"
     assert switch["snmp_write"] == 0
+
+
+async def _first_row_plain(conn, table: str) -> dict:
+    """The (only) row of table as a dict, on a connection without a row_factory."""
+    async with conn.execute(f"SELECT * FROM {table}") as cur:
+        names = [d[0] for d in cur.description]
+        return dict(zip(names, await cur.fetchone()))
+
+
+async def _phase3_state(conn) -> dict:
+    """(definition, value in the one row) of each Phase 3 column; a missing column is (None, None)."""
+    out = {}
+    for table, column in PHASE3_COLUMNS:
+        have = {r[0]: r[1:] for r in await _table_info(conn, table)}
+        if column not in have:
+            out[(table, column)] = (None, None)
+            continue
+        async with conn.execute(f"SELECT {column} FROM {table}") as cur:
+            [(value,)] = [tuple(r) for r in await cur.fetchall()]
+        out[(table, column)] = (have[column], value)
+    return out
+
+
+async def test_migration_adds_the_phase3_columns(data_dir):
+    """Review Focus 1: a database as the release before Phase 3 left it (db.SCHEMA, every column added before Phase 3, one row in
+    changes, switch_cfg and config_backups) gets changes.sent (the row: NULL, unknown), switch_cfg.stale (the row: 0, INTEGER NOT NULL
+    DEFAULT 0) and config_backups.raw_mac (the row: NULL) from init_db, the rows keep what they held; a second init_db changes
+    nothing."""
+    path = data_dir / "switchview.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(db.SCHEMA)
+        for table, column, definition in db.ADDED_COLUMNS:
+            if (table, column) not in PHASE3_COLUMNS:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        await conn.execute("INSERT INTO switches (name, host) VALUES ('SW-EK-01', '203.0.113.21')")
+        await conn.execute("INSERT INTO changes (switch_id, kind, summary, status, mechanism) VALUES (1, 'ports', 'A1: VLAN 20', 'failed', 'ssh')")
+        await conn.execute("INSERT INTO switch_cfg (switch_id, taken_at, parsed) VALUES (1, '2026-11-01 10:00:00', '{}')")
+        await conn.execute("INSERT INTO config_backups (switch_id, taken_at, sha, content) VALUES (1, '2026-11-01 10:00:00', 'abc', 'x')")
+        await conn.commit()
+        assert set((await _phase3_state(conn)).values()) == {(None, None)}    # the premise: none of the three columns is there yet
+        before = {t: await _first_row_plain(conn, t) for t in ("changes", "switch_cfg", "config_backups")}
+
+    await db.init_db()
+
+    async with aiosqlite.connect(path) as conn:
+        assert await _phase3_state(conn) == PHASE3_COLUMNS
+        for table, row in before.items():
+            assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row
+        version, rows = await _schema_version(conn), {t: await _first_row_plain(conn, t) for t in before}
+
+    await db.init_db()    # every restart of the app runs it once more
+
+    async with aiosqlite.connect(path) as conn:
+        assert await _schema_version(conn) == version
+        assert {t: await _first_row_plain(conn, t) for t in before} == rows
+
