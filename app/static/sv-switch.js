@@ -364,8 +364,7 @@
       <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
     if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); editPorts(s, [p.n]); });
     $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
-    $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; $("#dr-x").focus();
+    $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();
   }
-  function closeDrawer(silent) { $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true"); $("#scrim").hidden = true; if (selEl) selEl.classList.remove("sel"); if (!silent && drLast && drLast.focus) drLast.focus(); }
+  function closeDrawer(silent) { $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true"); $("#scrim").hidden = true; if (selEl) selEl.classList.remove("sel"); syncLayers(); if (!silent) restoreFocus(drLast); }
   $("#dr-x").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer());
-  document.addEventListener("keydown", e => { if (e.key !== "Escape") return; if (!$("#modal").hidden) closeModal(); else if ($("#drawer").classList.contains("open")) closeDrawer(); $("#results").hidden = true; });

@@ -44,11 +44,11 @@
       <div class="user"><span id="user-name" class="muted"></span><button type="button" class="btn ghost small" id="btn-logout">Abmelden</button></div>
     </div>
   </header>
-  <main class="wrap" id="view"></main>
+  <main class="wrap" id="view" tabindex="-1"></main>
 </div>
 
 <div class="scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="dr-title" role="dialog">
+<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="dr-title" role="dialog" aria-modal="true" tabindex="-1">
   <div class="dr-h">
     <div><h3 id="dr-title"></h3><div class="sub" id="dr-sub"></div></div>
     <button class="icon-btn" id="dr-x" type="button" aria-label="Schließen"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
@@ -56,13 +56,13 @@
   <div id="dr-body"></div>
 </aside>
 <div class="modal-wrap" id="modal" hidden>
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title" tabindex="-1">
     <div class="m-h"><h3 id="m-title"></h3><button class="icon-btn" type="button" data-close aria-label="Schließen"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
     <div class="m-b" id="m-body"></div>
     <div class="m-f" id="m-foot"></div>
   </div>
 </div>
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="/static/msal-browser.min.js"></script>
 <script src="/static/svlogic.js"></script>

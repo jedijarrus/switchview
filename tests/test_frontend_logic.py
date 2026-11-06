@@ -61,6 +61,14 @@ def test_switch_id_of_an_empty_list_is_null():
     assert run("L.switchIdOf([], 1)") is None
 
 
+@pytest.mark.parametrize("n, i, shift, want", [(3, 2, False, 0), (3, 0, True, 2), (3, 1, False, None), (3, 1, True, None), (3, -1, False, 0),
+                                               (3, -1, True, 2), (0, -1, False, -1), (1, 0, False, 0), (1, 0, True, 0)])
+def test_trap_step(n, i, shift, want):
+    """Phase 5 Task 3: where Tab / Shift+Tab goes in a dialog of n focusable controls when control i has the focus (-1: none of
+    them); null leaves the move to the browser, -1 focuses the dialog itself (it has no control)."""
+    assert run(f"L.trapStep({n}, {i}, {json.dumps(shift)})") == want
+
+
 def test_index_loads_svlogic_before_the_app_scripts():
     """Holds unchanged after Task 12 (app.js split into several scripts)."""
     scripts = re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX)

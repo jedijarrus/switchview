@@ -29,24 +29,66 @@
     if (!r.ok) { let m = data && data.detail ? data.detail : (typeof data === "string" ? data : "Fehler " + r.status); if (Array.isArray(m)) m = m.map(x => x.msg).join(", "); throw new Error(m); }
     return data;
   }
-  function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 3200); }
+  // Messages stack in #toasts (one aria-live container keeps the announcements in order), at most TOAST_MAX, each with its own
+  // timer; the same text as the newest one restarts that one's timer instead of adding a second line
+  const TOAST_MAX = 3;
+  function toast(msg, ms = 3200) {
+    const box = $("#toasts"), last = box.children[box.children.length - 1];
+    if (last && last.textContent === msg) { clearTimeout(last._t); last._t = setTimeout(() => last.remove(), ms); return; }
+    const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
+    t._t = setTimeout(() => t.remove(), ms);
+    box.appendChild(t);
+    while (box.children.length > TOAST_MAX) { const old = box.children[0]; clearTimeout(old._t); old.remove(); }
+  }
+
+  /* ── Layers: the modal over the port panel (drawer) over the page. An open layer makes what lies below it inert (out of the tab
+     order and the screen reader), Tab and Shift+Tab wrap at its ends, Escape closes the top one, and focus goes back to a live
+     opener (else the port tile the panel came from, else #view, never body) once the background is live again. ── */
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+  // The controls Tab reaches in root: those shown (an element of a hidden or display:none subtree has no client rects)
+  const focusables = root => [...root.querySelectorAll(FOCUSABLE)].filter(el => el.getClientRects().length > 0);
+  function trapTab(e, root) {
+    const list = focusables(root), to = SVLogic.trapStep(list.length, list.indexOf(document.activeElement), e.shiftKey);
+    if (to === null) return;
+    e.preventDefault(); (to < 0 ? root : list[to]).focus();
+  }
+  // drLast (sv-switch.js): the port tile the panel was opened from; an element in the closed panel is hidden and takes no focus
+  function restoreFocus(el) {
+    const to = [el, drLast].find(x => x && x.isConnected && x !== document.body && typeof x.focus === "function" && !x.closest(".drawer:not(.open)"));
+    (to || $("#view")).focus();
+  }
+  function syncLayers() {
+    const m = !$("#modal").hidden, d = $("#drawer").classList.contains("open");
+    $("#app").inert = m || d; $("#drawer").inert = m;
+  }
+  // Every layer closed without moving the focus (the login page): there is no opener to go back to
+  function dropLayers() { $("#modal").hidden = true; closeDrawer(true); $("#results").hidden = true; syncLayers(); }
+  function onLayerKey(e) {
+    const m = !$("#modal").hidden, d = $("#drawer").classList.contains("open");
+    if (e.key === "Escape") { if (m) closeModal(); else if (d) closeDrawer(); $("#results").hidden = true; }
+    else if (e.key === "Tab") { if (m) trapTab(e, $(".modal")); else if (d) trapTab(e, $("#drawer")); }
+  }
+  document.addEventListener("keydown", onLayerKey);
+
+  // The opener of the first dialog of a chain (form → preview → progress replace the content of the one modal)
   let modalLastFocus = null;
   function modal(title, bodyHtml, buttons = []) {
-    modalLastFocus = document.activeElement;
+    if ($("#modal").hidden) modalLastFocus = document.activeElement;
     $("#m-title").textContent = title; $("#m-body").innerHTML = bodyHtml; $("#m-body").onclick = null; // Klick-Handler gehört zum jeweiligen Dialog
     const foot = $("#m-foot"); foot.innerHTML = "";
     buttons.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
-    $("#modal").hidden = false;
+    $("#modal").hidden = false; syncLayers();
     const f = $("#m-body input, #m-body select, #m-foot .btn"); if (f) f.focus();
   }
-  function closeModal() { $("#modal").hidden = true; if (modalLastFocus && modalLastFocus.focus) modalLastFocus.focus(); }
+  // syncLayers first: a browser does not focus an element inside an inert subtree
+  function closeModal() { $("#modal").hidden = true; syncLayers(); restoreFocus(modalLastFocus); }
   $("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal(); });
   const confirmModal = (title, text, label, danger) => new Promise(res => modal(title, `<p style="margin:0">${text}</p>`,
     [{ label: "Abbrechen", onClick: () => { closeModal(); res(false); } }, { label, cls: danger ? "danger" : "primary", onClick: () => { closeModal(); res(true); } }]));
 
   /* ── Login ── */
   let authCfg = null, msalApp = null, ME = null; // ME: the signed-in user (/api/auth/me), set by start()
-  function showLogin(msg) { $("#app").hidden = true; $("#login").hidden = false; const e = $("#login-error"); e.hidden = !msg; e.textContent = msg || ""; }
+  function showLogin(msg) { dropLayers(); $("#app").hidden = true; $("#login").hidden = false; const e = $("#login-error"); e.hidden = !msg; e.textContent = msg || ""; }
   async function initLogin() {
     authCfg = await api("GET", "/api/auth/config");
     $("#btn-sso").hidden = !authCfg.sso; $("#form-local").hidden = !authCfg.local; $("#sep-local").hidden = !(authCfg.sso && authCfg.local);

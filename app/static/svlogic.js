@@ -21,5 +21,14 @@ const SVLogic = {
     const hit = typeof sel === "number" ? switches.find(s => s.id === sel) : typeof sel === "string" ? switches.find(s => s.k === sel) : undefined;
     return (hit || switches[0]).id;
   },
+  // Where Tab (shift: Shift+Tab) goes in an open dialog of n focusable controls when control i has the focus (-1: none of them):
+  // the index to focus, -1 for the dialog itself (it has no control), null to leave the move to the browser (inside the list)
+  trapStep(n, i, shift) {
+    if (n === 0) return -1;
+    if (i === -1) return shift ? n - 1 : 0;
+    if (!shift && i === n - 1) return 0;
+    if (shift && i === 0) return n - 1;
+    return null;
+  },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;
