@@ -2,7 +2,7 @@
 writes (the per-switch snmp_write switch, the RW credentials, PoE), what stays SSH-only, and the pointer to the German list of known
 limitations and device checks. A driver added to drivers.DRIVERS without a README entry fails here. Phase 2: the README names the
 security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
-with its module map and a row per decision of its plan."""
+with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections."""
 import pathlib
 import re
 
@@ -70,6 +70,15 @@ def test_the_logic_note_has_its_module_map_and_a_row_per_decision_of_the_plan():
         ids = [f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]
         for rid in ids:
             assert f"\n| {rid} |" in note, rid
+
+
+def test_the_ux_note_is_linked_and_has_its_sections():
+    """Phase 5: the README links the German UX note, which has the sections of the earlier notes."""
+    assert "UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md)" in README
+    note = (ROOT / "docs" / "ux-phase5.md").read_text(encoding="utf-8")
+    for heading in ("## Was gebaut wurde", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz", "## Was beim Update zu tun ist",
+                    "## Später", "## Entscheidungen"):
+        assert f"\n{heading}\n" in note, heading
 
 
 def test_ruff_is_pinned_and_no_file_is_exempt():

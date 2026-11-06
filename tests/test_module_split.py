@@ -1,7 +1,8 @@
 """Task 11 of Phase 3 (Phase 1 "main.py, changes.py ... aufteilen"): main.py is split into routers (api_switches, api_settings,
 api_changes, api_devices), the netmap (topology) and the scheduler (jobs); changes.py hands the RADIUS preparation to radiusprep and
 the read-back checks to changeverify. A pure move: the route table is the one recorded before it (tests/data/routes.json), and every
-name the suite or a module reaches as main.X or changes.X still resolves there (re-exported through __all__).
+name the suite or a module reaches as main.X or changes.X still resolves there (re-exported through __all__). Routes added since are
+recorded there too: /static/fonts/{name} (Phase 5, Task 1).
 """
 import json
 from pathlib import Path

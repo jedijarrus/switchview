@@ -100,19 +100,44 @@ async def security_headers(request: Request, call_next):
 
 
 # ── Statische Dateien ─────────────────────────────────────────────────────────
+# index.html is no-store. Scripts, CSS, the icon and the fonts are no-cache with an ETag: the browser asks on every page load, an
+# unchanged file costs a 304 instead of a full download, and an update reaches every browser without a hard reload. Starlette's
+# FileResponse sets the ETag (from mtime and size) but never answers 304 itself, so _static_file compares If-None-Match.
+STATIC_TYPES = {"js": "text/javascript", "css": "text/css", "svg": "image/svg+xml", "woff2": "font/woff2"}
+
+
 @app.get("/", include_in_schema=False)
 async def index():
     return FileResponse(os.path.join(STATIC, "index.html"), headers={"Cache-Control": "no-store"})
 
 
-@app.get("/static/{name}", include_in_schema=False)
-async def static(name: str):
-    if not re.fullmatch(r"[\w.\-]+\.(js|css|svg)", name):
-        raise HTTPException(404)
-    path = os.path.join(STATIC, name)
+def _static_file(path: str, request: Request) -> Response:
+    """The file at path (404 if there is none) as no-cache with its ETag, typed by its extension (STATIC_TYPES); a 304 without a body
+    when If-None-Match names that ETag. If-None-Match is a comma list; each entry counts without surrounding space and without a W/
+    prefix (the weak comparison RFC 9110 asks for here)."""
     if not os.path.isfile(path):
         raise HTTPException(404)
-    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    resp = FileResponse(path, stat_result=os.stat(path), media_type=STATIC_TYPES[path.rsplit(".", 1)[1]],
+                        headers={"Cache-Control": "no-cache"})
+    etag = resp.headers["etag"]
+    if etag in (tag.strip().removeprefix("W/") for tag in request.headers.get("if-none-match", "").split(",")):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    return resp
+
+
+@app.get("/static/{name}", include_in_schema=False)
+async def static(name: str, request: Request):
+    if not re.fullmatch(r"[\w.\-]+\.(js|css|svg)", name):
+        raise HTTPException(404)
+    return _static_file(os.path.join(STATIC, name), request)
+
+
+@app.get("/static/fonts/{name}", include_in_schema=False)
+async def static_font(name: str, request: Request):
+    """Only the .woff2 files of app/static/fonts; OFL.txt lies next to them for the image but is not served."""
+    if not re.fullmatch(r"[\w.\-]+\.woff2", name):
+        raise HTTPException(404)
+    return _static_file(os.path.join(STATIC, "fonts", name), request)
 
 
 # ── Anmeldung ─────────────────────────────────────────────────────────────────

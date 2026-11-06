@@ -77,6 +77,9 @@ Known limitations and required device checks (German): [docs/snmp-multivendor.md
 Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md) (what was built, where the moved code lives now,
 known limits, checks before production use, what to do on an update, decisions)
 
+UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md) (what was built, known limits, checks before production
+use, what to do on an update, decisions)
+
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
 - Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately.
@@ -232,3 +235,6 @@ before you enable `snmp_write` on a production switch.
 ## Stack
 
 FastAPI, aiosqlite, APScheduler, net-snmp CLI tools, netmiko, cryptography (Fernet), PyJWT, vanilla JS frontend.
+
+Fonts: Geist and Geist Mono by Vercel, SIL Open Font License 1.1, served by SwitchView from app/static/fonts/ (license in
+app/static/fonts/OFL.txt).

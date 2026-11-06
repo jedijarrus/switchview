@@ -234,6 +234,12 @@
 ]
 ],
 [
+"/static/fonts/{name}",
+[
+"GET"
+]
+],
+[
 "/static/{name}",
 [
 "GET"
