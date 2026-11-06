@@ -42,7 +42,7 @@ OLD_KEYS = {"id", "name", "host", "zone", "sort", "enabled", "snmp_version", "sn
 # ... and what this work adds to them, nothing else.
 NEW_KEYS = {"driver", "caps", "snmp_write", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto", "snmp_rw_community_set",
             "snmp_rw_auth_pass_set", "snmp_rw_priv_pass_set", "snmp_rw_insecure", "snmp_write_via", "snmp_write_error", "ssh_host_key_fp",
-            "ssh_host_key_md5", "ssh_host_key_at"}
+            "ssh_host_key_md5", "ssh_host_key_at", "cred_warnings"}
 PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine eigene Schreib-Community hinterlegen"
 CISCO_CAPS = ["snmp_admin", "snmp_name", "snmp_poe", "snmp_vlan"]
 PROCURVE_CAPS = ["backup", "cli", "nac", "snmp_admin", "snmp_autosave", "snmp_name", "snmp_poe", "snmp_vlan"]

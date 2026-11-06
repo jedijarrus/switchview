@@ -218,6 +218,9 @@
   // gibt es nur An oder Aus: ein eingeschalteter Port heißt „An“ statt „Protected“. Nur die Beschriftung, p.st vom Server bleibt der Schlüssel.
   const stOf = (s, st) => s && !has(s, "nac") ? (st === "off" ? "off" : "on") : st;
   let portIdx = {}, picked = new Set(), pickedFor = null;
+  // The server's credential warnings (poller.credential_warnings: fallback to "public", SNMPv3 downgrade, secrets that do not decrypt)
+  const warnList = ws => (ws || []).length ? `<div class="banner warn"><ul class="blist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "";
+
   async function renderSwitchDetail() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(!MAP); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
@@ -243,6 +246,7 @@
       <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
         <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${edit}</div></div>
       ${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
+      ${warnList(s.credWarnings)}
       ${banner}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
       <section class="card"><div class="card-h"><h2>Ports</h2><span class="sub">VLAN wählen, um es hervorzuheben</span></div>
@@ -355,7 +359,7 @@
         // unused: ein Weg, den dieser Switch nicht hat (SSH bei einem Treiber ohne CLI), weder erreichbar noch fehlgeschlagen
         const line = (lbl, x) => x.unused ? `<div><span class="st-dot down"></span><b>${lbl}</b> <span class="muted">${esc(x.detail || "")}</span></div>`
           : `<div><span class="st-dot ${x.ok ? "" : "bad"}"></span><b>${lbl}</b> ${x.ok ? "erreichbar" : "fehlgeschlagen"} <span class="muted">${esc(x.detail || x.error || "")}</span></div>`;
-        modal(`Verbindungstest ${s.k}`, `<div class="testres">${line("SNMP", r.snmp)}${line("SSH", r.ssh)}</div>`, [{ label: "Schließen", onClick: closeModal }]);
+        modal(`Verbindungstest ${s.k}`, `<div class="testres">${line("SNMP", r.snmp)}${line("SSH", r.ssh)}</div>${warnList(r.warnings)}`, [{ label: "Schließen", onClick: closeModal }]);
       }
       if (b.dataset.a === "pa") { const r = await api("POST", `/api/switches/${s.id}/port-access`); modal(`Anmeldungen an ${s.k}`, Object.entries(r).map(([c, o]) => `<p class="eyebrow">${esc(c)}</p><pre class="code">${esc(o || "–")}</pre>`).join(""), [{ label: "Schließen", onClick: closeModal }]); }
     } catch (err) { toast(err.message); } finally { b.disabled = false; }
@@ -676,7 +680,7 @@
       <div class="field"><label for="f-driver">Treiber</label><select id="f-driver" aria-describedby="f-drv-notes f-drv-caps" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
         <span class="hint" id="f-drv-notes"></span><span class="hint" id="f-drv-caps"></span></div>
       <label class="check"><input id="f-enabled" type="checkbox" ${s.enabled ? "checked" : ""}> Aktiv (wird abgefragt und gesichert)</label>
-      <fieldset class="fs"><legend>SNMP (lesen)</legend><label class="field"><span>Version</span>${sel("f-snmpv", ["2c", "3"], s.snmp_version)}</label>
+      <fieldset class="fs"><legend>SNMP (lesen)</legend>${(s.cred_warnings || []).map(w => `<p class="note warn" style="margin:0">${esc(w)}</p>`).join("")}<label class="field"><span>Version</span>${sel("f-snmpv", ["2c", "3"], s.snmp_version)}</label>
         <div id="snmp2">${secret("f-comm", "Community", s.snmp_community_set, "Lese-Community")}</div>
         <div id="snmp3" class="grid2"><label class="field"><span>Benutzer</span><input id="f-suser" value="${esc(s.snmp_user || "")}"></label>
           <label class="field"><span>Auth-Verfahren</span>${sel("f-aproto", AUTH, s.snmp_auth_proto || "SHA")}</label>
@@ -918,24 +922,26 @@
     if (!s) return;
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
+    // A stored secret that does not decrypt (GET /api/settings "unreadable", SECRET_KEY changed?): it has to be entered anew
+    const unreadNote = k => (s.unreadable || []).includes(k) ? `<p class="note warn" style="margin:0">lässt sich nicht entschlüsseln – bitte neu eingeben</p>` : "";
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
         <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table"</span></label>
         ${destNote("s-url")}
-        <div class="grid2"><label class="field"><span>API-Key</span><input id="s-key" type="password" autocomplete="new-password" placeholder="${s.opnsense_key_set ? "gesetzt – leer lassen = unverändert" : ""}"></label>
-        <label class="field"><span>API-Secret</span><input id="s-secret" type="password" autocomplete="new-password" placeholder="${s.opnsense_secret_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
+        <div class="grid2"><label class="field"><span>API-Key</span><input id="s-key" type="password" autocomplete="new-password" placeholder="${s.opnsense_key_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("opnsense_key")}</label>
+        <label class="field"><span>API-Secret</span><input id="s-secret" type="password" autocomplete="new-password" placeholder="${s.opnsense_secret_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("opnsense_secret")}</label></div>
         <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
         <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten" eines Switches eingetragen</span></label>
-        <label class="field"><span>Shared Secret der Switches</span><input id="s-rk" type="password" autocomplete="new-password" placeholder="${s.radius_key_set ? "gesetzt – leer lassen = unverändert" : ""}"><span class="hint">wie in PacketFence beim Switch hinterlegt</span></label></div>
+        <label class="field"><span>Shared Secret der Switches</span><input id="s-rk" type="password" autocomplete="new-password" placeholder="${s.radius_key_set ? "gesetzt – leer lassen = unverändert" : ""}"><span class="hint">wie in PacketFence beim Switch hinterlegt</span>${unreadNote("radius_key")}</label></div>
         ${destNote("s-rs")}
         <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
         ${destNote("s-pfu")}
         <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"></label>
-        <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
+        <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("pf_pass")}</label></div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-pftls")}
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>

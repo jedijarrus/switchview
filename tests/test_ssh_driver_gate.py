@@ -172,7 +172,7 @@ def test_connection_test_reports_ssh_unused_for_a_driver_without_cli(api, world,
         return {"1.3.6.1.2.1.1.5.0": "SW-cisco"}
     monkeypatch.setattr(snmp, "get", get)
     r = api.post(f"/api/switches/{add_switch('cisco', CISCO_HOST, ssh=ssh)}/test")
-    assert r.json() == {"snmp": {"ok": True, "detail": "SW-cisco"}, "ssh": UNUSED}
+    assert r.json() == {"snmp": {"ok": True, "detail": "SW-cisco"}, "ssh": UNUSED, "warnings": []}    # a readable community: no warning
     assert world.hosts == []
     r = api.post(f"/api/switches/{add_switch('procurve', PC_HOST)}/test")
     assert r.json()["ssh"] == {"ok": True, "detail": 'hostname "SW-EK-01"'} and world.hosts == [PC_HOST]

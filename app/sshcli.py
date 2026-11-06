@@ -23,7 +23,7 @@ from netmiko import ConnectHandler, NetmikoTimeoutException
 
 import cfgparse
 import drivers
-from crypto import decrypt
+from crypto import decrypt, unreadable
 from db import db, execute_sync, query_sync
 
 log = logging.getLogger("switchview.ssh")
@@ -47,6 +47,11 @@ def clean(text: str) -> str:
 
 class NoCliError(RuntimeError):
     """Fuer diesen Switch geht keine SSH-Sitzung auf: sein Treiber hat keine SSH-CLI (cli_refusal)."""
+
+
+class CredentialError(RuntimeError):
+    """The stored SSH password of the switch does not decrypt (SECRET_KEY changed?): no session (_device), since an empty password in
+    its place is never the one stored, and SSH writes configuration."""
 
 
 # Was der Verbindungstest fuer SSH meldet, wenn der Treiber keine CLI hat: kein Fehler, dieser Switch braucht kein SSH
@@ -105,10 +110,14 @@ def _device(row, known_hosts: str | None = None) -> dict:
     """Die netmiko-Parameter fuer den Switch row. Alles, was ConnectHandler erreicht (connect, _run_show), geht hier durch: ohne CLI im
     Treiber NoCliError statt einer Sitzung. With known_hosts (a file holding the pinned key, _open) paramiko accepts that key only
     (RejectPolicy, ssh_strict); without it a first contact takes the key it is offered (AutoAddPolicy), and _open pins it. The
-    system's known_hosts is never read: only the key SwitchView pinned counts."""
+    system's known_hosts is never read: only the key SwitchView pinned counts. A stored SSH password that does not decrypt is a
+    CredentialError, never an empty password."""
     reason = cli_refusal(row)
     if reason:
         raise NoCliError(reason)
+    if unreadable(row["ssh_pass"]):
+        raise CredentialError("SSH-Kennwort lässt sich nicht entschlüsseln (SECRET_KEY geändert?) – bitte im Switch-Formular neu eingeben, "
+                              "nichts gesendet")
     keys = ({"ssh_strict": True, "system_host_keys": False, "alt_host_keys": True, "alt_key_file": known_hosts} if known_hosts
             else {"ssh_strict": False, "system_host_keys": False, "alt_host_keys": False})
     return {

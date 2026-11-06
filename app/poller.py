@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import drivers
 import snmp
-from crypto import decrypt
+from crypto import decrypt, unreadable
 from db import db
 
 log = logging.getLogger("switchview.poller")
@@ -91,6 +91,42 @@ def creds_of(row, write: bool = False) -> dict:
         "snmp_priv_proto": row["snmp_priv_proto"],
         "snmp_priv_pass": decrypt(row["snmp_priv_pass"]),
     }
+
+
+# How a warning of credential_warnings says that a stored secret does not decrypt
+UNREADABLE = "lässt sich nicht entschlüsseln (SECRET_KEY geändert?)"
+
+
+def credential_warnings(row) -> list[str]:
+    """What the read path of the switch row does in silence, as German sentences for the switch list, the network map, the connection
+    test and the log (poll_switch). creds_of keeps its fallbacks, which keep a switch that answers to them reachable (a community that
+    does not decrypt asks with "public", snmp._conf_lines; a v3 passphrase that does not decrypt or is not used lowers the level,
+    snmp._level); this names each of them. In this order:
+    v2c (every snmp_version but "3", like snmp._auth_args): a stored community that does not decrypt, or none at all;
+    v3: no user; an auth passphrase that does not decrypt, or one that decrypts but is not used (no auth protocol); a priv passphrase that
+    does not decrypt, or one that decrypts but is not used (the level is not authPriv);
+    and for a driver with SSH-CLI an SSH password that does not decrypt (sshcli._device then refuses the session, nothing is sent)."""
+    out = []
+    if row["snmp_version"] == "3":
+        level = snmp._level(creds_of(row))
+        if not row["snmp_user"]:
+            out.append("SNMPv3 ohne Benutzer – die Abfrage geht mit leerem Benutzernamen.")
+        if unreadable(row["snmp_auth_pass"]):
+            out.append(f"SNMPv3-Auth-Kennwort {UNREADABLE} – SwitchView fragt ohne Authentifizierung (noAuthNoPriv). Bitte neu eingeben.")
+        elif row["snmp_auth_pass"] and level == "noAuthNoPriv":
+            out.append("SNMPv3-Auth-Kennwort ohne Auth-Verfahren – SwitchView fragt ohne Authentifizierung (noAuthNoPriv).")
+        if unreadable(row["snmp_priv_pass"]):
+            out.append(f"SNMPv3-Priv-Kennwort {UNREADABLE} – SwitchView fragt ohne Verschlüsselung. Bitte neu eingeben.")
+        elif row["snmp_priv_pass"] and level != "authPriv":
+            out.append("SNMPv3-Priv-Kennwort wird nicht benutzt (ohne Verschlüsselungsverfahren oder ohne Authentifizierung) – SwitchView "
+                       "fragt ohne Verschlüsselung.")
+    elif unreadable(row["snmp_community"]):
+        out.append(f"Lese-Community {UNREADABLE} – SwitchView fragt mit „public“. Bitte neu eingeben.")
+    elif not row["snmp_community"]:
+        out.append("Keine Lese-Community hinterlegt – SwitchView fragt mit „public“.")
+    if drivers.can(drivers.driver_for(row), "cli") and unreadable(row["ssh_pass"]):
+        out.append(f"SSH-Kennwort {UNREADABLE} – SSH geht erst nach neuer Eingabe.")
+    return out
 
 
 def write_identity(row) -> tuple[str, dict]:
@@ -406,6 +442,8 @@ async def poll_switch(switch_id: int) -> dict:
         if not row:
             raise ValueError("Switch nicht gefunden")
         host, cred = row["host"], creds_of(row)
+        for warning in credential_warnings(row):    # the fallbacks creds_of keeps, told once per poll
+            log.warning("%s: %s", host, warning)
         driver_name = row["driver"] or "procurve"
         # Walks, ohne die es kein Ergebnis gibt: sysName und ifName, dazu ifType, wo select_ports nach ihm waehlt (ohne ifType
         # stuende der Switch sonst bis zum naechsten Poll ohne Ports da)

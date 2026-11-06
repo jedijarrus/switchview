@@ -27,8 +27,8 @@ import poller
 import snmp
 import snmpwrite
 import sshcli
-from crypto import decrypt
-from db import audit, db, get_setting
+from crypto import decrypt, unreadable
+from db import audit, db, load_settings
 
 log = logging.getLogger("switchview.changes")
 
@@ -474,7 +474,11 @@ PARK_VLAN = "3999"  # Park-VLAN: ohne IP, ohne Routing, auf keinem Uplink
 
 
 async def radius_settings() -> dict:
-    return {"server": await get_setting("radius_server", "") or "", "key": decrypt(await get_setting("radius_key")) or ""}
+    """The RADIUS server and shared secret of the settings: server and key ("" when not set or not decryptable), and key_unreadable
+    when a stored key does not decrypt (plan_prepare names it instead of "fehlt")."""
+    # target and secret in one SELECT (db.load_settings): a concurrent settings PUT never pairs one with the other's old value (F2)
+    s = await load_settings(["radius_server", "radius_key"])
+    return {"server": s["radius_server"] or "", "key": decrypt(s["radius_key"]) or "", "key_unreadable": unreadable(s["radius_key"])}
 
 
 # Every secret column of a switches row (main.SECRET_FIELDS), in the order _secrets_of lists them
@@ -525,8 +529,11 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
         blocked.append({"port": "*", "reason": "RADIUS-Server (PacketFence-IP) fehlt in den Einstellungen"})
         return {"commands": [], "shown": [], "blocked": blocked, "warnings": [], "expected": {}}
     r = readiness(cfg, server)
-    if not r["host"]:
-        if not key or not RADIUS_KEY_RE.fullmatch(key):
+    if not r["host"]:    # only here the key is needed: a switch with the host line already is prepared without it
+        if rs.get("key_unreadable"):
+            blocked.append({"port": "*", "reason": "Shared Secret lässt sich nicht entschlüsseln (SECRET_KEY geändert?) – in den Einstellungen "
+                                                   "neu eingeben"})
+        elif not key or not RADIUS_KEY_RE.fullmatch(key):
             blocked.append({"port": "*", "reason": "Shared Secret fehlt oder enthält unzulässige Zeichen (8–64 Zeichen, ohne Leerzeichen, "
                                                    "Anführungszeichen, Backslash, ? und ~)"})
         else:

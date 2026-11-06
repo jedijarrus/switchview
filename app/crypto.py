@@ -32,3 +32,9 @@ def decrypt(value: str | None) -> str | None:
         return _f().decrypt(value.encode()).decode()
     except InvalidToken:
         return None
+
+
+def unreadable(value: str | None) -> bool:
+    """Whether value is a stored secret (not empty) that decrypt cannot read (None): a token of another SECRET_KEY, or no token at all.
+    No secret (None, "") is not unreadable, it is just not set."""
+    return bool(value) and decrypt(value) is None

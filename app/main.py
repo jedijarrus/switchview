@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -31,8 +32,8 @@ import snmpwrite
 import sshcli
 import throttle
 from config import Settings, settings
-from crypto import encrypt
-from db import audit, db, get_setting, init_db, read_settings, write_settings
+from crypto import encrypt, unreadable
+from db import audit, db, get_setting, init_db, load_settings, read_settings, write_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("switchview")
@@ -59,7 +60,8 @@ def check_startup_config(s: Settings) -> list[str]:
     """Stops a start that cannot run safely (RuntimeError): a SECRET_KEY under 16 characters, a COOKIE_SECURE other than auto or
     always. Returns the warnings for the log: a SECRET_KEY under 32 characters or with fewer than 8 different characters is weak but
     only warned about (E16: changing it means entering every stored credential anew, a stop would shut out running installations).
-    No message contains the key."""
+    Likewise SSO with neither ENTRA_ALLOWED_ROLES nor ENTRA_ALLOWED_GROUPS: documented behaviour (every user of the tenant may sign
+    in, auth.verify_id_token), so a warning, not a stop. No message contains the key."""
     if len(s.secret_key) < 16:
         raise RuntimeError("SECRET_KEY fehlt oder ist zu kurz")
     if s.cookie_secure not in ("auto", "always"):
@@ -69,6 +71,9 @@ def check_startup_config(s: Settings) -> list[str]:
         messages.append("SECRET_KEY ist schwach (kürzer als 32 Zeichen oder weniger als 8 verschiedene Zeichen). Ein neuer Schlüssel "
                         "(z. B. openssl rand -hex 32) macht die gespeicherten Zugangsdaten unlesbar: danach alle Zugangsdaten der Switches, "
                         "von PacketFence, OPNsense und RADIUS neu eingeben.")
+    if s.sso_active and not s.entra_allowed_roles and not s.entra_allowed_groups:
+        messages.append("ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und "
+                        "alles ändern.")
     return messages
 
 
@@ -395,6 +400,7 @@ def _public(row) -> dict:
     fp = sshcli.fingerprints(row["ssh_host_key"])
     d["ssh_host_key_fp"], d["ssh_host_key_md5"] = (fp["sha256"], fp["md5"]) if fp else (None, None)
     d["ssh_host_key_at"] = row["ssh_host_key_at"] if fp else None
+    d["cred_warnings"] = poller.credential_warnings(row)    # what the read path falls back to in silence, without a secret
     return d
 
 
@@ -464,7 +470,12 @@ async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user
                 fields[k] = None
                 cleared.append(k)
         sets = ", ".join(f"{k} = ?" for k in fields)
-        await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
+        try:
+            await conn.execute(f"UPDATE switches SET {sets} WHERE id = ?", (*fields.values(), sid))
+        except sqlite3.IntegrityError as e:    # the host of another switch (host is UNIQUE), as in create_switch
+            if "UNIQUE" in str(e):
+                raise HTTPException(409, "Ein Switch mit dieser Adresse existiert bereits")    # rolled back like the 404 above
+            raise
         await conn.commit()
     await audit(user["username"], "switch_update", body.host, _update_detail(fields, old))
     return {"ok": True, "cleared": cleared}
@@ -525,6 +536,7 @@ async def test_switch(sid: int, user=Depends(auth.current_user)):
     except Exception as e:  # noqa: BLE001
         res["snmp"] = {"ok": False, "error": str(e)}
     res["ssh"] = await sshcli.test_ssh(row)
+    res["warnings"] = poller.credential_warnings(row)
     return res
 
 
@@ -606,19 +618,28 @@ DESTINATION_SECRETS: dict[str, tuple[str, ...]] = {"opnsense_url": ("opnsense_ke
                                                    "pf_url": ("pf_pass",)}
 
 
+# The secrets of the settings in the order "unreadable" lists them (sorted)
+SETTINGS_SECRETS = ("opnsense_key", "opnsense_secret", "pf_pass", "radius_key")
+
+
 @app.get("/api/settings")
 async def get_settings(user=Depends(auth.current_user)):
-    return {"poll_minutes": int(await get_setting("poll_minutes", "15") or 15),
-            "opnsense_url": await get_setting("opnsense_url", "") or "",
-            "opnsense_key_set": bool(await get_setting("opnsense_key")),
-            "opnsense_secret_set": bool(await get_setting("opnsense_secret")),
-            "opnsense_verify_tls": (await get_setting("opnsense_verify_tls", "1")) == "1",
-            "radius_server": await get_setting("radius_server", "") or "",
-            "radius_key_set": bool(await get_setting("radius_key")),
-            "pf_url": await get_setting("pf_url", "") or "",
-            "pf_user": await get_setting("pf_user", "") or "",
-            "pf_pass_set": bool(await get_setting("pf_pass")),
-            "pf_verify_tls": (await get_setting("pf_verify_tls", "1")) == "1"}
+    """The settings without a secret: of each secret only *_set, and in "unreadable" those stored that do not decrypt (SECRET_KEY
+    changed?), so the view asks for them anew. One SELECT (db.load_settings)."""
+    s = await load_settings(["poll_minutes", "opnsense_url", "opnsense_verify_tls", "radius_server", "pf_url", "pf_user", "pf_verify_tls",
+                             *SETTINGS_SECRETS])
+    return {"poll_minutes": int(s["poll_minutes"] or 15),
+            "opnsense_url": s["opnsense_url"] or "",
+            "opnsense_key_set": bool(s["opnsense_key"]),
+            "opnsense_secret_set": bool(s["opnsense_secret"]),
+            "opnsense_verify_tls": (s["opnsense_verify_tls"] or "1") == "1",
+            "radius_server": s["radius_server"] or "",
+            "radius_key_set": bool(s["radius_key"]),
+            "pf_url": s["pf_url"] or "",
+            "pf_user": s["pf_user"] or "",
+            "pf_pass_set": bool(s["pf_pass"]),
+            "pf_verify_tls": (s["pf_verify_tls"] or "1") == "1",
+            "unreadable": sorted(k for k in SETTINGS_SECRETS if unreadable(s[k]))}
 
 
 @app.put("/api/settings")
@@ -1384,7 +1405,8 @@ async def build_map() -> dict:
                          "ssh": bool(s["ssh_user"] and s["ssh_pass"]), "driver": s["driver"], "caps": sorted(drivers.driver_for(s).caps),
                          "snmp_write": bool(s["snmp_write"]), "cfgAt": cfgs.get(s["id"], (None, None))[0],
                          "ready": changes.readiness(cfgs[s["id"]][1], server or None) if s["id"] in cfgs else None,
-                         "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], [])})
+                         "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], []),
+                         "credWarnings": poller.credential_warnings(s)})
     links = _links(switches, all_macs)
     for link in links:  # Uplink-Ports markieren (inkl. Trunk-Mitglieder)
         for k, side in ((link["a"], link["A"]), (link["b"], link["B"])):

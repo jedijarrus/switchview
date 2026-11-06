@@ -290,6 +290,14 @@ async def read_settings(conn, keys: Iterable[str]) -> dict[str, str | None]:
     return {k: found.get(k) for k in keys}
 
 
+async def load_settings(keys: Iterable[str]) -> dict[str, str | None]:
+    """The value of each settings key in keys (None without a row), on a connection of its own and in one SELECT (read_settings): one
+    state of the table, so a reader that takes a destination and its secret from it never pairs one with the other's old value while a
+    settings PUT commits (F2)."""
+    async with db() as conn:
+        return await read_settings(conn, keys)
+
+
 async def write_settings(conn, items: dict[str, str | None]) -> None:
     """Stores each key → value of items on conn, without a commit: the caller commits (or not) its transaction as a whole."""
     await conn.executemany("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

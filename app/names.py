@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 
 import httpx
 
-from crypto import decrypt
-from db import db, get_setting
+from crypto import decrypt, unreadable
+from db import db, load_settings
 
 log = logging.getLogger("switchview.names")
 
@@ -31,12 +31,20 @@ async def _ptr(ip: str) -> str:
 
 
 async def opnsense_arp() -> list[dict]:
-    url = (await get_setting("opnsense_url") or "").rstrip("/")
-    key = decrypt(await get_setting("opnsense_key"))
-    secret = decrypt(await get_setting("opnsense_secret"))
-    if not (url and key and secret):
+    """The ARP table of the OPNsense, [] without an address or without key and secret. RuntimeError when key or secret is stored but
+    does not decrypt: refresh_names reports it, instead of a silent empty table."""
+    # target and secret in one SELECT (db.load_settings): a concurrent settings PUT never pairs one with the other's old value (F2)
+    s = await load_settings(["opnsense_url", "opnsense_key", "opnsense_secret", "opnsense_verify_tls"])
+    url = (s["opnsense_url"] or "").rstrip("/")
+    if not url:
         return []
-    verify = (await get_setting("opnsense_verify_tls", "1")) == "1"    # on without a stored value (E32), a stored one stays
+    if unreadable(s["opnsense_key"]) or unreadable(s["opnsense_secret"]):
+        raise RuntimeError("OPNsense-API-Key oder -Secret lässt sich nicht entschlüsseln (SECRET_KEY geändert?) – in den Einstellungen neu "
+                           "eingeben")
+    key, secret = decrypt(s["opnsense_key"]), decrypt(s["opnsense_secret"])
+    if not (key and secret):
+        return []
+    verify = (s["opnsense_verify_tls"] or "1") == "1"    # on without a stored value (E32), a stored one stays
     async with httpx.AsyncClient(verify=verify, timeout=20) as c:
         r = await c.get(f"{url}/api/diagnostics/interface/getArp", auth=(key, secret))
         r.raise_for_status()

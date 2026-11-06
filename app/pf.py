@@ -10,8 +10,8 @@ from datetime import date, datetime, timezone
 
 import httpx
 
-from crypto import decrypt
-from db import db, get_setting
+from crypto import decrypt, unreadable
+from db import db, load_settings
 
 log = logging.getLogger("switchview.pf")
 # Besitzer (pid) aller in SwitchView freigegebenen Geraete. Ein VLAN-Filter in PacketFence
@@ -20,21 +20,31 @@ OWNER = "switchview"
 
 
 async def config() -> dict:
-    """The stored PacketFence access. TLS verification without a stored value is on (E32: a new installation), a stored one stays."""
-    return {"url": (await get_setting("pf_url", "") or "").rstrip("/"), "user": await get_setting("pf_user", "") or "",
-            "password": decrypt(await get_setting("pf_pass")) or "", "verify": (await get_setting("pf_verify_tls", "1")) == "1"}
+    """The stored PacketFence access: url, user, password ("" when not set or not decryptable), password_unreadable when a stored one
+    does not decrypt, verify. TLS verification without a stored value is on (E32: a new installation), a stored one stays."""
+    # target and secret in one SELECT (db.load_settings): a concurrent settings PUT never pairs one with the other's old value (F2)
+    s = await load_settings(["pf_url", "pf_user", "pf_pass", "pf_verify_tls"])
+    return {"url": (s["pf_url"] or "").rstrip("/"), "user": s["pf_user"] or "", "password": decrypt(s["pf_pass"]) or "",
+            "password_unreadable": unreadable(s["pf_pass"]), "verify": (s["pf_verify_tls"] or "1") == "1"}
+
+
+def _set_up(c: dict) -> bool:
+    """Whether the access c (config) is set up: a password that does not decrypt counts, so whoever needs PacketFence gets session's
+    reason instead of passing over it in silence."""
+    return bool(c["url"] and c["user"] and (c["password"] or c["password_unreadable"]))
 
 
 async def configured() -> bool:
-    c = await config()
-    return bool(c["url"] and c["user"] and c["password"])
+    return _set_up(await config())
 
 
 @asynccontextmanager
 async def session():
     c = await config()
-    if not (c["url"] and c["user"] and c["password"]):
+    if not _set_up(c):
         raise RuntimeError("PacketFence-API ist nicht eingerichtet")
+    if c["password_unreadable"]:
+        raise RuntimeError("PacketFence-Kennwort lässt sich nicht entschlüsseln (SECRET_KEY geändert?) – in den Einstellungen neu eingeben")
     async with httpx.AsyncClient(base_url=c["url"] + "/api/v1", verify=c["verify"], timeout=15) as cl:
         r = await cl.post("/login", json={"username": c["user"], "password": c["password"]})
         if r.status_code != 200 or "token" not in r.json():
