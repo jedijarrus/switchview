@@ -161,7 +161,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
     Gesperrt wird auf beiden Wegen gleich (Uplink / Trunk nur im Expertenmodus, kein NAC auf Uplinks und Trunks, ein Trunk-Mitglied nur
     ueber seinen Trunk, VLANs muss es geben, ...). Trunk ist TrkN oder jeder Trunk / LAG in cfg["trunks"] (Po1, ae0, ...); Mitglied ist
     ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. Per SSH dazu jeder Port mit PoE (R30: PoE nur per SNMP;
-    _commands kennt das Feld nicht und liesse es still weg). Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
+    _commands kennt das Feld nicht und liesse es still weg). Over SSH also a port whose name in desired (a revert) does not fit
+    PORTNAME_RE: it would land in a CLI line (E28). Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
     snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...). Ein gesperrter
     Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter geplant;
     ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
@@ -219,6 +220,12 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             continue
         if not over_snmp and "poe" in d:
             blocked.append({"port": p, "reason": "PoE geht nur per SNMP, nicht über die SSH-CLI"})
+            continue
+        # §6 Revert-Portname (E28): a name from desired (a revert writes back what a running-config said) lands in a CLI line; per SSH
+        # only one that PORTNAME_RE allows, like a name set by hand (the set branch above refuses the others outright)
+        if not over_snmp and d.get("name") and not (isinstance(d["name"], str) and PORTNAME_RE.fullmatch(d["name"])):
+            blocked.append({"port": p, "reason": f"Name „{d['name']}“ lässt sich per SSH nicht sicher zurückschreiben "
+                                                 "(erlaubt: Buchstaben, Ziffern und . _ : @ -)"})
             continue
         x_new, m_new = d.get("x", cur["x"]), d.get("m", cur["m"])
         if (d.get("x") or d.get("m")) and (is_trk or p in inv["uplinks"]):
@@ -469,6 +476,25 @@ async def radius_settings() -> dict:
     return {"server": await get_setting("radius_server", "") or "", "key": decrypt(await get_setting("radius_key")) or ""}
 
 
+# Every secret column of a switches row (main.SECRET_FIELDS), in the order _secrets_of lists them
+_SWITCH_SECRETS = ("ssh_pass", "snmp_community", "snmp_rw_community", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_auth_pass",
+                   "snmp_rw_priv_pass")
+
+
+def _secrets_of(row, rs: dict) -> list[str]:
+    """What no text of a change may show (cfgparse.mask_secrets(text, _secrets_of(...))): the RADIUS key of rs (radius_settings) and,
+    decrypted, every secret of the switch row (None: no switch), its SSH password, its communities and its SNMPv3 passphrases, read and
+    write. Only the non-empty ones, and no community "public" (any case, outer whitespace ignored, like snmp._secrets): it is no secret,
+    and masking it would garble messages that name it."""
+    out = [rs.get("key") or ""]
+    for col in _SWITCH_SECRETS if row is not None else ():
+        value = decrypt(row[col]) or ""
+        if col.endswith("community") and value.strip().lower() == "public":
+            continue
+        out.append(value)
+    return [s for s in out if s]
+
+
 def readiness(cfg: dict, server: str | None) -> dict:
     hosts = cfg.get("radius") or {}
     h = hosts.get(server) if server else next(iter(hosts.values()), None)
@@ -642,30 +668,38 @@ async def run_change(cid: int):
     req, previewed = json.loads(ch["request"] or "{}"), json.loads(ch["commands"] or "[]")
     steps: list = []
     rs = await radius_settings()
-    secrets = [rs["key"]] if rs["key"] else []
+    secrets = _secrets_of(row, rs)    # plus those of the row of after the lock (below): no text of this change shows one (E25)
+
+    def mask(text: str) -> str:
+        return cfgparse.mask_secrets(text, secrets)
+
+    async def step(text: str, level: str = "info"):
+        await _step(cid, steps, mask(text), level)
+
     pre = post = None
     status, error, saved, output = "failed", None, 0, ""
     try:
         inv = await inventory(sid) if kind == "ports" else None
         lock = sshcli.lock(sid)
         if lock.locked():
-            await _step(cid, steps, "Warte auf laufende Aktion an diesem Switch")
+            await step("Warte auf laufende Aktion an diesem Switch")
         async with lock:
             await _upd(cid, status="running")
             # R39, das Gegenstueck zu R33 auf dem SNMP-Weg: die Switch-Zeile von jetzt, nach dem Warten auf den Lock. Hat ihr Treiber
             # (inzwischen) keine SSH-CLI, geht keine Sitzung auf und nichts hinaus.
             row = await _switch_row(sid)
+            secrets.extend(_secrets_of(row, rs))
             reason = sshcli.cli_refusal(row) if row is not None else "Switch nicht gefunden"
             if reason:
                 status, error = "failed", f"{reason}: nichts gesendet"
-                await _step(cid, steps, error, "error")
+                await step(error, "error")
                 return
-            await _step(cid, steps, f"Verbinde mit {row['host']}")
+            await step(f"Verbinde mit {row['host']}")
             conn = await asyncio.to_thread(sshcli.connect, row)
             try:
                 pre = sshcli.clean(await asyncio.to_thread(conn.send_command, "show running-config", read_timeout=90))
                 cfg = cfgparse.parse_config(pre)
-                await _step(cid, steps, "Konfiguration vorher gelesen")
+                await step("Konfiguration vorher gelesen")
                 if kind == "save":
                     plan = {"commands": [], "shown": [], "blocked": []}
                 elif kind == "prepare":
@@ -674,16 +708,16 @@ async def run_change(cid: int):
                     plan = plan_ports(row["firmware"] or "", inv, cfg, req)
                 if plan["blocked"]:
                     status, error = "aborted", "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"])
-                    await _step(cid, steps, "Abgebrochen: " + error, "error")
+                    await step("Abgebrochen: " + error, "error")
                     return
                 if plan["shown"] != previewed:
                     status, error = "aborted", "Der Switch hat sich seit der Vorschau geändert. Bitte Vorschau neu laden."
-                    await _step(cid, steps, error, "error")
+                    await step(error, "error")
                     return
                 if kind == "ports":
                     await _upd(cid, before=json.dumps(plan["before"]))
                 if plan["commands"]:
-                    await _step(cid, steps, f"Sende {len(plan['commands'])} Befehle")
+                    await step(f"Sende {len(plan['commands'])} Befehle")
                     try:
                         output = await asyncio.to_thread(conn.send_config_set, plan["commands"], read_timeout=30,
                                                          error_pattern=ERROR_PATTERN, cmd_verify=True)
@@ -691,11 +725,11 @@ async def run_change(cid: int):
                         output = str(e)
                         post = sshcli.clean(await asyncio.to_thread(conn.send_command, "show running-config", read_timeout=90))
                         status, error = "failed", "Der Switch hat einen Befehl abgelehnt. Nichts gespeichert, Teile können schon wirken."
-                        await _step(cid, steps, error, "error")
+                        await step(error, "error")
                         return
                     post = sshcli.clean(await asyncio.to_thread(conn.send_command, "show running-config", read_timeout=90))
                     after = cfgparse.parse_config(post)
-                    await _step(cid, steps, "Konfiguration nachher gelesen")
+                    await step("Konfiguration nachher gelesen")
                     if kind == "prepare":
                         r = readiness(after, rs["server"])
                         bad = [k for k in ("host", "coa", "tw", "eap", "active", "park") if not r[k]]
@@ -703,36 +737,46 @@ async def run_change(cid: int):
                         bad = verify_ports(after, plan["desired"])
                     if bad:
                         status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
-                        await _step(cid, steps, error + ". Nicht gespeichert.", "error")
+                        await step(error + ". Nicht gespeichert.", "error")
                         return
-                    await _step(cid, steps, "Prüfung ok")
-                await _step(cid, steps, "Speichere (write memory)")
+                    await step("Prüfung ok")
+                await step("Speichere (write memory)")
                 await asyncio.to_thread(conn.save_config)
                 saved, status = 1, "ok"
-                await _step(cid, steps, "Gespeichert", "ok")
+                await step("Gespeichert", "ok")
             finally:
                 await asyncio.to_thread(sshcli.disconnect, conn)
     except Exception as e:  # noqa: BLE001
         log.exception("Änderung %s", cid)
         if pre is None:  # R27: per SSH nicht bis zur running-config gekommen (Verbinden oder erstes Lesen scheiterte)
             invalidate_cfg(sid)
-        status, error = ("unclear" if post or output else "failed"), f"{type(e).__name__}: {str(e)[:300]}"
-        await _step(cid, steps, error, "error")
+        status, error = ("unclear" if post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        await step(error, "error")
     finally:
-        await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(),
-                   output=cfgparse.mask_secrets(output or "", secrets))
+        await _upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=_now(), output=mask(output or ""))
+        # Each step on its own: what fails is logged and costs the rest nothing, audit and re-poll run always. A read that does not
+        # parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped (R27).
         if pre:
-            await sshcli.store_backup(sid, pre, f"vor #{cid}")
+            await _logged(cid, "Sicherung vorher", sshcli.store_backup(sid, pre, f"vor #{cid}"))
         if post:
-            await sshcli.store_backup(sid, post, f"nach #{cid}")
-            await store_cfg(sid, post)
-        elif pre:
-            await store_cfg(sid, pre)
+            await _logged(cid, "Sicherung nachher", sshcli.store_backup(sid, post, f"nach #{cid}"))
+        if (post or pre) and not await _logged(cid, "Konfiguration auswerten", store_cfg(sid, post or pre)):
+            invalidate_cfg(sid)
         if kind == "save" and status == "ok" and req.get("of"):
             await _upd(int(req["of"]), saved=1)
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}")
         if status in ("ok", "unclear", "failed") and kind != "save":
             asyncio.create_task(_repoll(sid))
+
+
+async def _logged(cid: int, what: str, aw) -> bool:
+    """await aw at the end of run_change; False when it raised, logged with the change and what: the end of the change goes on."""
+    try:
+        await aw
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("Änderung %s: %s fehlgeschlagen", cid, what)
+        return False
 
 
 async def _run_snmp(cid: int, ch, row):
@@ -764,54 +808,65 @@ async def _run_snmp(cid: int, ch, row):
         return await _refuse(cid, ch, "Per SNMP gibt es nur Port-Änderungen: nichts ausgeführt")
     req, previewed = json.loads(ch["request"] or "{}"), json.loads(ch["commands"] or "[]")
     steps: list = []
+    secrets: list[str] = []    # as in run_change (E25): _secrets_of, read in the try (a cancel there still ends the change below)
+
+    def mask(text: str) -> str:
+        return cfgparse.mask_secrets(text, secrets)
+
+    async def step(text: str, level: str = "info"):
+        await _step(cid, steps, mask(text), level)
+
     status, error, saved, output = None, None, 0, ""
     sent, kept = False, ""  # sent: ab hier kann der Switch etwas uebernommen haben; kept: was das dann heisst (SNMP_KEPT)
     try:
+        rs = await radius_settings()
+        secrets.extend(_secrets_of(row, rs))
         reason = _no_write_identity(row)
         if reason:
             status, error = "failed", reason
-            await _step(cid, steps, error, "error")
+            await step(error, "error")
             return
         inv = await inventory(sid)
         lock = sshcli.lock(sid)
         if lock.locked():
-            await _step(cid, steps, "Warte auf laufende Aktion an diesem Switch")
+            await step("Warte auf laufende Aktion an diesem Switch")
         async with lock:
             await _upd(cid, status="running")
             row = await _switch_row(sid)
+            secrets.extend(_secrets_of(row, rs))
             reason = _no_write_identity(row) if row is not None else "Switch nicht gefunden"
             if reason:
                 status, error = "failed", reason
-                await _step(cid, steps, error, "error")
+                await step(error, "error")
                 return
             driver = drivers.driver_for(row)
             autosave = drivers.can(driver, "snmp_autosave")
             kept = SNMP_KEPT[autosave]
-            await _step(cid, steps, f"Lese {row['host']} per SNMP")
+            await step(f"Lese {row['host']} per SNMP")
             with_poe = touches_poe(req)    # R34: fuer beide Reads dieser Aenderung derselbe Wert
             try:
                 cfg, raw = await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
             except (snmp.SnmpError, OSError) as e:
                 status, error = "failed", f"Zustand per SNMP nicht lesbar: {e}"
-                await _step(cid, steps, error, "error")
+                await step(error, "error")
                 return
-            await _step(cid, steps, "Zustand vorher gelesen")
+            await step("Zustand vorher gelesen")
             plan = plan_ports(row["firmware"] or "", inv, cfg, req, mechanism="snmp", driver=driver, raw=raw)
             if plan["blocked"]:
                 status, error = "aborted", "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"])
-                await _step(cid, steps, "Abgebrochen: " + error, "error")
+                await step("Abgebrochen: " + error, "error")
                 return
             if plan["shown"] != previewed:
                 status, error = "aborted", "Der Switch hat sich seit der Vorschau geändert. Bitte Vorschau neu laden."
-                await _step(cid, steps, error, "error")
+                await step(error, "error")
                 return
             if not plan["ops"]:
                 status, error = "aborted", "Nichts zu ändern"
-                await _step(cid, steps, error, "error")
+                await step(error, "error")
                 return
             await _upd(cid, before=json.dumps(plan["before"]))
             n = len(plan["ops"])
-            await _step(cid, steps, f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
+            await step(f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
             await age_cfg(sid)    # vor sent: scheitert das Schreiben in die DB, ist nichts gesendet
             unsaved = await unsaved_ssh_changes(sid) if autosave else []    # R42: was dieses SET mitspeichert, im Lock festgestellt
             sent = True
@@ -821,7 +876,7 @@ async def _run_snmp(cid: int, ch, row):
                 output = await snmpwrite.apply_ops(row, driver, plan["ops"])
             except (snmp.SnmpError, OSError) as e:
                 output, set_failed = str(e), True
-                await _step(cid, steps, f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
+                await step(f"SET nicht bestätigt ({e}): ob der Switch die Werte übernommen hat, zeigt das Zurücklesen", "error")
             else:
                 if unsaved:    # ein SET ohne Fehler: der Switch hat seine gesamte laufende Konfiguration gespeichert
                     await _also_saved(cid, steps, unsaved)
@@ -829,15 +884,15 @@ async def _run_snmp(cid: int, ch, row):
                 cfg_after, raw_after = await snmpwrite.read_cfg(row, driver, with_poe=with_poe)
             except (snmp.SnmpError, OSError) as e:
                 status, error = "unclear", f"Zurücklesen per SNMP fehlgeschlagen: {e}"
-                await _step(cid, steps, f"{error}. {kept}", "error")
+                await step(f"{error}. {kept}", "error")
                 return
-            await _step(cid, steps, "Zustand nachher gelesen")
+            await step("Zustand nachher gelesen")
             bad = verify_snmp(driver, cfg, cfg_after, raw_after, plan["desired"], raw=raw)
             if bad:
                 status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
-                await _step(cid, steps, f"{error}. {kept}", "error")
+                await step(f"{error}. {kept}", "error")
                 return
-            await _step(cid, steps, "Prüfung ok")
+            await step("Prüfung ok")
             if set_failed and unsaved:
                 # R42b: die Antwort auf das SET fehlte, das Zuruecklesen bestaetigt aber jeden Wert: der Switch hat das SET verarbeitet
                 # und dabei (wie bei jedem SET) seine gesamte laufende Konfiguration gespeichert (unsaved gibt es nur mit snmp_autosave)
@@ -845,18 +900,18 @@ async def _run_snmp(cid: int, ch, row):
             status = "ok"
             if autosave:
                 saved = 1
-                await _step(cid, steps, "Gespeichert (der Switch speichert SNMP-Änderungen selbst)", "ok")
+                await step("Gespeichert (der Switch speichert SNMP-Änderungen selbst)", "ok")
             else:
-                await _step(cid, steps, SNMP_UNSAVED, "warn")
+                await step(SNMP_UNSAVED, "warn")
     except Exception as e:  # noqa: BLE001
         log.exception("Änderung %s", cid)
-        status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {str(e)[:300]}"
-        await _step(cid, steps, f"{error}. {kept}" if sent else error, "error")
+        status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        await step(f"{error}. {kept}" if sent else error, "error")
     finally:
         if status is None:  # nicht zu Ende gelaufen: der Task wurde abgebrochen
             status, error = ("unclear" if sent else "failed"), "Abgebrochen (Prozess beendet)"
             steps.append([_now(), f"{error}. {kept}" if sent else error, "error"])
-        await _close(cid, ch, status, error, saved, output, steps)
+        await _close(cid, ch, status, error and mask(error), saved, mask(output or ""), steps)
 
 
 ALSO_SAVED = "der Switch speichert bei jedem SNMP-SET die gesamte laufende Konfiguration"

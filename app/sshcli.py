@@ -23,6 +23,8 @@ from db import db
 log = logging.getLogger("switchview.ssh")
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1bE|\x1b[=>]")
+# show commands that print secrets in clear text even with encrypt-credentials: SwitchView never runs them (E27)
+SECRET_SHOWS = re.compile(r"^\s*show\s+(radius|tech|tacacs)\b", re.I)
 
 
 _locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -83,6 +85,10 @@ def disconnect(conn):
 
 
 def _run_show(row, commands: list[str]) -> dict[str, str]:
+    """Each command's answer, cleaned. ValueError for a command that prints secrets (SECRET_SHOWS), before a session opens."""
+    for cmd in commands:
+        if SECRET_SHOWS.match(cmd):
+            raise ValueError(f"„{cmd}“ gibt Geheimnisse im Klartext aus und wird nie ausgeführt")
     out = {}
     with ConnectHandler(**_device(row)) as conn:
         for cmd in commands:
@@ -120,6 +126,9 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
 
 
 async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
+    """Read the running-config of the switch, store it (masked, store_backup) and its parse (changes.store_cfg, the cache of
+    changes.fresh_cfg). A configuration that does not parse is still kept as a backup: it is the evidence, all the more for a switch
+    that sends something odd (E24); the answer is then ok False with the parse error."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM switches WHERE id = ?", (switch_id,)) as cur:
             row = await cur.fetchone()
@@ -140,8 +149,13 @@ async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
     if "hostname" not in content and "vlan" not in content:
         return {"ok": False, "error": "Antwort sieht nicht nach einer Konfiguration aus"}
     import changes  # spaete Bindung, vermeidet Zyklus
-    await changes.store_cfg(switch_id, content)
     changed = await store_backup(switch_id, content, trigger)
+    try:
+        await changes.store_cfg(switch_id, content)
+    except Exception as e:  # noqa: BLE001
+        error = f"Konfiguration gesichert, aber nicht auswertbar: {type(e).__name__}: {cfgparse.mask_secrets(str(e))[:200]}"
+        log.warning("%s: %s", row["host"], error)
+        return {"ok": False, "error": error}
     return {"ok": True, "changed": changed}
 
 
@@ -156,5 +170,8 @@ async def backup_all():
     async with db() as conn:
         async with conn.execute("SELECT id, driver FROM switches WHERE enabled = 1 AND ssh_user IS NOT NULL AND ssh_pass IS NOT NULL") as cur:
             ids = [r["id"] for r in await cur.fetchall() if drivers.can(drivers.driver_for(r), "backup")]
-    for i in ids:
-        await backup_config(i, "nightly")
+    for i in ids:    # one switch at a time; whatever goes wrong with one never stops the others (F5)
+        try:
+            await backup_config(i, "nightly")
+        except Exception:  # noqa: BLE001
+            log.exception("Nächtliche Sicherung von Switch %s fehlgeschlagen", i)

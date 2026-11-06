@@ -535,6 +535,7 @@ async def list_backups(sid: int, user=Depends(auth.current_user)):
             return [dict(r) for r in await cur.fetchall()]
 
 
+# A backup is served masked with today's patterns, also one stored before them; the stored rows stay as they are (E26)
 @app.get("/api/backups/{bid}", response_class=PlainTextResponse)
 async def get_backup(bid: int, user=Depends(auth.current_user)):
     async with db() as conn:
@@ -542,7 +543,7 @@ async def get_backup(bid: int, user=Depends(auth.current_user)):
             row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "Sicherung nicht gefunden")
-    return row["content"]
+    return cfgparse.mask_secrets(row["content"])
 
 
 @app.get("/api/backups/{bid}/diff", response_class=PlainTextResponse)
@@ -557,7 +558,8 @@ async def diff_backup(bid: int, user=Depends(auth.current_user)):
             prev = await cur.fetchone()
     if not prev:
         return "Erste Sicherung dieses Switches, kein Vergleich möglich.\n"
-    return "".join(difflib.unified_diff(prev["content"].splitlines(True), cur_row["content"].splitlines(True),
+    before, after = cfgparse.mask_secrets(prev["content"]), cfgparse.mask_secrets(cur_row["content"])
+    return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                         fromfile=f"vorher {prev['taken_at']} UTC", tofile=f"nachher {cur_row['taken_at']} UTC"))
 
 
