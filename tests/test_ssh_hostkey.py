@@ -246,8 +246,10 @@ def mismatch_text(host: str, key: str) -> str:
 
 # ── Trust on first use ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async def test_first_contact_pins_the_key(world, sid):
+    other = add_switch("203.0.113.22")    # unpinned as well: the pin is this entry's only
     assert (await sshcli.test_ssh(row(sid)))["ok"]
     assert row(sid)["ssh_host_key"] == KEY_A and row(sid)["ssh_host_key_at"]
+    assert (row(other)["ssh_host_key"], row(other)["ssh_host_key_at"]) == (None, None)
 
 
 async def test_a_changed_key_is_refused_before_login(world, sid):            # NV, Eingabe: MITM mit anderem Schlüssel
@@ -404,6 +406,22 @@ async def test_no_pin_for_an_entry_whose_host_changed_meanwhile(world, sid):
     assert row(sid)["ssh_host_key"] is None and world.disconnects == 1
 
 
+async def test_no_pin_for_the_entry_that_took_over_the_address_meanwhile(world, sid):
+    """During the login the entry moves away and another one takes over its address (host is unique, so only this way does another
+    row have the session's host): the key is pinned for neither, the other entry pins on its own first contact."""
+    other = add_switch("203.0.113.22")
+
+    def swap():
+        query("UPDATE switches SET host = '203.0.113.99' WHERE id = ?", (sid,))
+        query("UPDATE switches SET host = ? WHERE id = ?", (HOST, other))
+
+    world.during_login = swap
+    res = await sshcli.test_ssh(row(sid))
+    assert res["ok"] is False and res["error"].startswith(f"HostKeyMismatch: SSH-Hostschlüssel von {HOST} ließ sich nicht merken")
+    assert [(r["host"], r["ssh_host_key"], r["ssh_host_key_at"]) for r in (row(sid), row(other))] == [("203.0.113.99", None, None),
+                                                                                                      (HOST, None, None)]
+
+
 def test_a_driver_without_cli_fails_before_anything_else(world, monkeypatch):
     """NoCliError comes first, as in _device: the pin is not even read, and no session opens (R39)."""
     sid = add_switch("203.0.113.31")
@@ -436,10 +454,12 @@ def test_the_switch_list_serves_the_fingerprints_of_the_pinned_key(api):
 
 
 def test_forgetting_clears_key_and_time_and_audits_the_old_fingerprint(api):
-    sid = create(api)
+    sid, other = create(api), create(api, name="SW-VK-03", host="203.0.113.43")
     query("UPDATE switches SET ssh_host_key = ?, ssh_host_key_at = '2026-11-06 08:00:00' WHERE id = ?", (KEY_A, sid))
+    query("UPDATE switches SET ssh_host_key = ?, ssh_host_key_at = '2026-11-06 09:00:00' WHERE id = ?", (KEY_B, other))
     assert api.delete(f"/api/switches/{sid}/ssh-host-key").json() == {"ok": True}
     assert (row(sid)["ssh_host_key"], row(sid)["ssh_host_key_at"]) == (None, None)
+    assert (row(other)["ssh_host_key"], row(other)["ssh_host_key_at"]) == (KEY_B, "2026-11-06 09:00:00")    # only this switch's
     assert tuple(query("SELECT username, action, target, detail FROM audit ORDER BY id DESC LIMIT 1")[0]) == (
         "tester", "switch_hostkey_reset", "203.0.113.42", pkey(KEY_A).fingerprint)
 
