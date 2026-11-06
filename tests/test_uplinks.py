@@ -45,7 +45,8 @@ def loc_port(num: str, port_id: str, port_desc: str) -> dict:
 
 
 def link_ports(m: dict) -> list[tuple]:
-    return [(link["a"], link["A"]["ports"], link["A"]["trunk"], link["b"], link["B"]["ports"], link["B"]["trunk"], link["src"])
+    """The links by switch name ("an" / "bn"; "a" < "b" are the ids)."""
+    return [(link["an"], link["A"]["ports"], link["A"]["trunk"], link["bn"], link["B"]["ports"], link["B"]["trunk"], link["src"])
             for link in m["links"]]
 
 
@@ -138,7 +139,7 @@ async def test_a_procurve_cisco_link_protects_both_ends(net):
     hp = await add(net, "HP-A", "10.0.0.3", "procurve", W_SAMPLE, lldp("6", "CAT-B", "Gi1/0/2", "GigabitEthernet1/0/2"))
     cat = await add(net, "CAT-B", "10.0.0.2", "cisco", CATALYST, lldp("2", "HP-A", "6", "6"))
     m = await main.build_map()
-    assert link_ports(m) == [("CAT-B", ["Gi1/0/2"], "", "HP-A", ["6"], "", "lldp")]
+    assert link_ports(m) == [("HP-A", ["6"], "", "CAT-B", ["Gi1/0/2"], "", "lldp")]    # "a" is the lower id: HP-A is added first
     assert (await changes.inventory(hp))["uplinks"] == {"6"}
     assert (await changes.inventory(cat))["uplinks"] == {"Gi1/0/2"}
     assert (await plan_off(cat, "Gi1/0/2"))["blocked"] == [{"port": "Gi1/0/2", "reason": EXPERT}]
@@ -211,6 +212,19 @@ def legacy_links(switches: list[dict], all_macs: dict) -> list[dict]:
     return out
 
 
+def named(links: list[dict], switches: list[dict]) -> list[dict]:
+    """main._links' output in the oracle's form: "a" / "b" back to the switch names, without "an" / "bn". The callers number their
+    switches in name order, so "a" < "b" by id is "a" < "b" by name, as the oracle sorts them."""
+    name = {s["id"]: s["k"] for s in switches}
+    return [{**{k: v for k, v in link.items() if k not in ("an", "bn")}, "a": name[link["a"]], "b": name[link["b"]]} for link in links]
+
+
+def by_id(switches: list[dict], macs: dict) -> dict:
+    """The base-MAC input by (switch id, port), as build_map hands it to main._links, from the oracle's (switch name, port)."""
+    sid = {s["k"]: s["id"] for s in switches}
+    return {(sid[k], port): v for (k, port), v in macs.items()}
+
+
 def legacy_uplinks(sw: dict, links: list[dict]) -> set[str]:
     """The uplink set changes.inventory() of 5aa8e90 built from the links (the oracle)."""
     uplinks: set[str] = set()
@@ -232,7 +246,7 @@ def two_elements(switches: list[dict]) -> list[dict]:
 
 
 async def all_macs() -> dict:
-    """build_map's base-MAC input to _links: (switch name, port) -> MACs."""
+    """The oracle's base-MAC input (legacy_links): (switch name, port) -> MACs."""
     out: dict = defaultdict(set)
     async with db.db() as conn:
         async with conn.execute("SELECT s.name, m.port, m.mac FROM macs m JOIN switches s ON s.id = m.switch_id") as cur:
@@ -254,7 +268,7 @@ async def test_procurve_only_links_and_uplinks_are_what_they_were(net):
                      fdb("2", "00:1a:2b:00:00:0b"), base_mac="00:1a:2b:00:00:0c")]
     m = await main.build_map()
     old = legacy_links(two_elements(m["switches"]), await all_macs())
-    assert [{k: v for k, v in link.items() if k != "confirmed"} for link in m["links"]] == old    # F3 adds "confirmed" (Task 6)
+    assert named([{k: v for k, v in link.items() if k != "confirmed"} for link in m["links"]], m["switches"]) == old    # F3 adds "confirmed" (Task 6)
     assert all(link["confirmed"] for link in m["links"])    # both sides report every one of them
     assert link_ports(m) == [("HP-A", ["4", "5"], "Trk1", "HP-C", ["4", "5"], "Trk1", "lldp"), ("HP-A", ["6"], "", "HP-B", ["6"], "", "lldp"),
                              ("HP-B", ["2"], "", "HP-C", ["3"], "", "mac")]
@@ -277,11 +291,11 @@ def test_procurve_attribution_stays_by_ifindex():
 
 def test_links_accept_rows_from_before_the_upgrade():
     """Entries of two elements (ports rows from before the third element) are matched as they always were."""
-    def sw(k, port, entry):
-        return {"k": k, "sys": k, "baseMac": "", "ports": [{"n": port, "tr": "", "u": ["1"], "t": [], "s": 1000, "l": [entry]}]}
-    switches = [sw("A", "24", ["B", "23"]), sw("B", "23", ["A", "24"])]
-    assert main._links(switches, {}) == legacy_links(switches, {})
-    assert [(link["a"], link["A"]["ports"], link["b"], link["B"]["ports"]) for link in main._links(switches, {})] == [("A", ["24"], "B", ["23"])]
+    def sw(sid, k, port, entry):
+        return {"id": sid, "k": k, "sys": k, "baseMac": "", "ports": [{"n": port, "tr": "", "u": ["1"], "t": [], "s": 1000, "l": [entry]}]}
+    switches = [sw(1, "A", "24", ["B", "23"]), sw(2, "B", "23", ["A", "24"])]
+    assert named(main._links(switches, {}), switches) == legacy_links(switches, {})
+    assert [(link["an"], link["A"]["ports"], link["bn"], link["B"]["ports"]) for link in main._links(switches, {})] == [("A", ["24"], "B", ["23"])]
 
 
 def test_port_id_only_adds_links_on_random_networks():
@@ -293,12 +307,12 @@ def test_port_id_only_adds_links_on_random_networks():
     for case in range(400):
         names = [f"SW{i}" for i in range(rng.randint(2, 4))]
         switches, macs = [], defaultdict(set)
-        for k in names:
+        for sid, k in enumerate(names, 1):
             ports = [{"n": str(i), "tr": "", "u": ["1"], "t": [], "s": 1000, "l": []} for i in range(1, 7)]
             trunk = {"n": "Trk1", "tr": "Trk1", "u": ["1"], "t": [], "s": 2000, "l": []}
             for p in rng.sample(ports, rng.randint(0, 2)):
                 p["tr"] = "Trk1"
-            switches.append({"k": k, "sys": k.lower() if rng.random() < 0.3 else k, "baseMac": f"mac-{k}", "ports": ports + [trunk]})
+            switches.append({"id": sid, "k": k, "sys": k.lower() if rng.random() < 0.3 else k, "baseMac": f"mac-{k}", "ports": ports + [trunk]})
         for s in switches:
             for p in s["ports"][:-1]:
                 if rng.random() < 0.35:
@@ -308,7 +322,7 @@ def test_port_id_only_adds_links_on_random_networks():
                     p["l"].append([rng.choice([other, other.lower(), "ap-1"]), desc or pid, pid])
                 if rng.random() < 0.15:
                     macs[(s["k"], p["n"])].add(f"mac-{rng.choice(names)}")
-        old, new = legacy_links(two_elements(switches), macs), main._links(switches, macs)
+        old, new = legacy_links(two_elements(switches), macs), named(main._links(switches, by_id(switches, macs)), switches)
 
         def pairs(links):
             return ({(link["a"], p, link["b"]) for link in links for p in link["A"]["ports"]}
@@ -318,5 +332,5 @@ def test_port_id_only_adds_links_on_random_networks():
             assert legacy_uplinks(s, old) <= legacy_uplinks(s, new), case
         grew += pairs(old) != pairs(new)
         same = [{**s, "ports": [{**p, "l": [[e[0], e[1], e[1]] for e in p["l"]]} for p in s["ports"]]} for s in switches]
-        assert main._links(same, macs) == legacy_links(two_elements(same), macs), case
+        assert named(main._links(same, by_id(same, macs)), same) == legacy_links(two_elements(same), macs), case
     assert grew > 40, grew

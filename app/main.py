@@ -1329,8 +1329,8 @@ async def unknown_devices(user=Depends(auth.current_user)):
             ds = sorted(learned.get((s["id"], p["n"]), []), key=lambda r: not (r["ip"] or r["name"]))
             for r in ds[:UNKNOWN_PER_PORT]:
                 out.append({"mac": r["mac"], "vlan": r["vlan"], "ip": r["ip"] or "", "name": r["name"] or "",
-                            "vendor": r["vendor"] or names_mod.vendor_of(r["mac"]), "sw": s["k"], "port": p["n"], "st": p["st"],
-                            "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"]})
+                            "vendor": r["vendor"] or names_mod.vendor_of(r["mac"]), "sw": s["k"], "sid": s["id"], "port": p["n"],
+                            "st": p["st"], "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"]})
     out.sort(key=lambda e: bool(e["flags"]))  # stable: poll order within each group
     return out[:500]
 
@@ -1439,7 +1439,7 @@ async def build_map() -> dict:
 
     vlans: dict[str, str] = {}
     vl_by: dict[int, list[str]] = defaultdict(list)
-    for v in sorted(vrows, key=lambda r: int(r["vid"])):
+    for v in sorted(vrows, key=lambda r: _vid_num(r["vid"])):
         vlans.setdefault(v["vid"], v["name"])
         vl_by[v["switch_id"]].append(v["vid"])
     devs: dict[tuple, list] = defaultdict(list)
@@ -1469,11 +1469,12 @@ async def build_map() -> dict:
             port["poe"] = {"on": None if p["poe_admin"] is None else p["poe_admin"] == 1, "status": p["poe_status"], "mw": p["poe_power"]}
         ports_by[p["switch_id"]].append(port)
 
-    sw_name = {s["id"]: s["name"] for s in sws}
-    all_macs = defaultdict(set)  # (switch_name, port) -> alle MACs, fuer die Link-Erkennung
+    # Switches by id (Review §4): a name is not unique, and two switches of one name looked up by it shadowed one another
+    enabled = {s["id"] for s in sws}
+    all_macs: dict[tuple[int, str], set[str]] = defaultdict(set)  # (switch id, port) -> every MAC, for the link detection
     for m in mrows:
-        if m["switch_id"] in sw_name:
-            all_macs[(sw_name[m["switch_id"]], m["port"])].add(m["mac"])
+        if m["switch_id"] in enabled:
+            all_macs[(m["switch_id"], m["port"])].add(m["mac"])
     switches = []
     for s in sws:
         switches.append({"k": s["name"], "id": s["id"], "sys": s["sys_name"] or "", "model": s["model"] or "", "fw": s["firmware"] or "",
@@ -1486,10 +1487,11 @@ async def build_map() -> dict:
                          "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], []),
                          "credWarnings": poller.credential_warnings(s)})
     links = _links(switches, all_macs)
+    by_id = {s["id"]: s for s in switches}
     for link in links:  # Uplink-Ports markieren (inkl. Trunk-Mitglieder)
-        for k, side in ((link["a"], link["A"]), (link["b"], link["B"])):
+        for sid, side in ((link["a"], link["A"]), (link["b"], link["B"])):
             ups = set(side["ports"]) | ({side["trunk"]} if side["trunk"] else set())
-            for p in next(x for x in switches if x["k"] == k)["ports"]:
+            for p in by_id[sid]["ports"]:
                 if p["n"] in ups or (p["tr"] and p["tr"] in ups):
                     p["up"] = True
     # F3: "uc" = the port, its trunk or (for a trunk) one of its members is an endpoint both switches confirm; a link is confirmed
@@ -1497,61 +1499,77 @@ async def build_map() -> dict:
     confirmed = confirmed_endpoints(switches, all_macs)
     for s in switches:
         for p in s["ports"]:
-            p["uc"] = any((s["k"], n) in confirmed for n in (p["n"], p["tr"], *p["mb"]) if n)
-    uc = {(s["k"], p["n"]) for s in switches for p in s["ports"] if p["uc"]}
+            p["uc"] = any((s["id"], n) in confirmed for n in (p["n"], p["tr"], *p["mb"]) if n)
+    uc = {(s["id"], p["n"]) for s in switches for p in s["ports"] if p["uc"]}
     for link in links:
-        link["confirmed"] = all((k, n) in uc for k, side in ((link["a"], link["A"]), (link["b"], link["B"])) for n in side["ports"])
+        link["confirmed"] = all((sid, n) in uc for sid, side in ((link["a"], link["A"]), (link["b"], link["B"])) for n in side["ports"])
     return {"generated": datetime.now(timezone.utc).isoformat(), "vlans": vlans, "switches": switches, "links": links}
 
 
-def switch_keys(switches: list[dict]) -> dict[str, str]:
-    """sysName und Name (k) jedes Switches -> sein k: woran _links einen LLDP-Nachbarn als verwalteten Switch erkennt. changes.inventory
-    nimmt fuer seinen Uplink-Schutz dieselbe Zuordnung (R40)."""
-    keys = {}
+def _port_num(v: str) -> int:
+    """Sort key of a port name: its number for ASCII digits up to nine places, else 999. int() alone raised on a name of more than 4300
+    digits and on a digit isdigit() takes but int() does not ("²"), and with it build_map, the netmap, the inventory and every change."""
+    return int(v) if v.isascii() and v.isdigit() and len(v) <= 9 else 999
+
+
+def _vid_num(v: str) -> int:
+    """Sort key of a VLAN id as text (vlans.vid, a port's u / t): as _port_num, else 10**9 (after every number)."""
+    return int(v) if v.isascii() and v.isdigit() and len(v) <= 9 else 10**9
+
+
+def switch_keys(switches: list[dict]) -> dict[str, set[int]]:
+    """Non-empty sysName and name (k) of every switch -> the ids of the switches so named: how _links and confirmed_endpoints tell an
+    LLDP neighbour that is a managed switch. A name two switches carry names both (LLDP gives only the name; R40, rather one uplink too
+    many). changes.inventory takes the same mapping for its uplink backstop (R40)."""
+    keys: dict[str, set[int]] = defaultdict(set)
     for s in switches:
-        keys[s["sys"]] = s["k"]
-        keys[s["k"]] = s["k"]
-    return keys
+        for name in (s["sys"], s["k"]):
+            if name:
+                keys[name].add(s["id"])
+    return dict(keys)
 
 
-def confirmed_endpoints(switches: list[dict], all_macs: dict) -> set[tuple[str, str]]:
-    """(switch k, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
+def confirmed_endpoints(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> set[tuple[int, str]]:
+    """(switch id, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
     LLDP: port P of A has an entry whose sysName maps (switch_keys) to another switch B and whose element 1 or 2 (stripped) is B's port
-    Q, and Q has an entry that maps back to A and P in the same way: P and Q. MAC: B's base MAC is learned on P (all_macs[(A, P)], a
-    trunk under its own name) and A's base MAC on any port of B: P, unless P carries an LLDP claim like the above that the other switch
-    does not make back. A claim only one side makes confirms nothing, not even the foreign port an LLDP entry names: otherwise a device
-    on an access port would decide which port of another switch counts as confirmed."""
+    Q, and Q has an entry that maps back to A and P in the same way: P and Q. A name several switches carry maps to each of them. MAC:
+    B's base MAC is learned on P (all_macs[(A, P)], a trunk under its own name) and A's base MAC on any port of B: P, unless P carries
+    an LLDP claim like the above that the other switch does not make back. A claim only one side makes confirms nothing, not even the
+    foreign port an LLDP entry names: otherwise a device on an access port would decide which port of another switch counts as
+    confirmed."""
     keys = switch_keys(switches)
-    names = {s["k"]: {p["n"] for p in s["ports"]} for s in switches}
+    names = {s["id"]: {p["n"] for p in s["ports"]} for s in switches}
     claims = set()  # ((A, P), (B, Q)): an LLDP entry on A's port P names B's port Q
     for s in switches:
         for p in s["ports"]:
             for entry in p["l"]:
-                nk = keys.get(entry[0])
-                if nk and nk != s["k"]:
-                    claims |= {((s["k"], p["n"]), (nk, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nk]}
+                for nid in keys.get(entry[0], ()):
+                    if nid != s["id"]:
+                        claims |= {((s["id"], p["n"]), (nid, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nid]}
     out = {end for here, there in claims if (there, here) in claims for end in (here, there)}
     # A device on an access port can send another switch's base MAC as its source in its own VLAN: the FDB is per VLAN, so that is a
     # second row and the switch's management is untouched. So base MACs confirm no port whose switch-LLDP claim is one-sided.
     one_sided = {here for here, _ in claims} - out
-    base = {s["baseMac"]: s["k"] for s in switches if s["baseMac"]}
-    learned = {(k, base[mac]) for (k, _), macs in all_macs.items() for mac in macs if base.get(mac) not in (None, k)}  # (A, B): A learns B's base MAC
-    out |= {(k, pname) for (k, pname), macs in all_macs.items()
-            if (k, pname) not in one_sided and any((base.get(mac), k) in learned for mac in macs)}
+    base = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
+    learned = {(sid, base[mac]) for (sid, _), macs in all_macs.items() for mac in macs if base.get(mac) not in (None, sid)}  # (A, B): A learns B's base MAC
+    out |= {(sid, pname) for (sid, pname), macs in all_macs.items()
+            if (sid, pname) not in one_sided and any((base.get(mac), sid) in learned for mac in macs)}
     return out
 
 
-def _links(switches: list[dict], all_macs: dict) -> list[dict]:
-    """Die Verbindungen zwischen den Switches. Ein LLDP-Eintrag eines Ports ist [sysName, PortDesc (sonst PortId), PortId] (R40; eine
-    Zeile von vor dem Upgrade hat nur die ersten beiden). Gesucht wird der Port des Nachbarn erst nach der PortDesc, dann nach der PortId:
-    bei anderen Herstellern ist die PortDesc oft der lange Name oder die Beschreibung des Ports, die PortId sein ifName. Ein Paar, das erst
-    die PortId findet, kommt nach den Paaren aus den Basis-MACs dazu und verdraengt keins davon: es fuegt nur Verbindungen hinzu."""
-    by_name = {s["k"]: s for s in switches}
+def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> list[dict]:
+    """The links between the switches, by switch id (a name is not unique): per link the ids in "a" < "b", their names in "an" / "bn"
+    for display; all_macs by (id, port). An LLDP entry of a port is [sysName, PortDesc (else PortId), PortId] (R40; a row from before
+    the upgrade has only the first two). A sysName several switches carry (switch_keys) is tried at each of them that has the port it
+    names. The neighbour's port is looked up by the PortDesc first, then by the PortId: with other vendors the PortDesc is often the
+    long name or the description of the port, the PortId its ifName. A pair only the PortId finds is added after the base-MAC pairs
+    and displaces none of them: it only adds links."""
+    by_id = {s["id"]: s for s in switches}
     sys2 = switch_keys(switches)
-    base2 = {s["baseMac"]: s["k"] for s in switches if s["baseMac"]}
+    base2 = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
 
-    def port(k, n):
-        return next((p for p in by_name[k]["ports"] if p["n"] == n), None)
+    def port(sid, n):
+        return next((p for p in by_id[sid]["ports"] if p["n"] == n), None)
 
     pairs: dict[tuple, str] = {}
     by_port_id: dict[tuple, str] = {}    # Paare, die erst die PortId findet
@@ -1562,23 +1580,25 @@ def _links(switches: list[dict], all_macs: dict) -> list[dict]:
                 continue
             for entry in p["l"]:
                 nsys, nport = entry[0], entry[1]
-                nk = sys2.get(nsys)
-                np_ = port(nk, nport.strip()) if nk else None
-                if nk and nk != s["k"] and np_:
-                    pairs[tuple(sorted([(s["k"], p["n"]), (nk, nport.strip())]))] = "lldp"
-                    for kk, pp in ((s["k"], p), (nk, np_)):
-                        lldp_ports.add((kk, pp["n"]))
-                        if pp["tr"]:
-                            lldp_ports.add((kk, pp["tr"]))
-                elif nk and nk != s["k"] and len(entry) > 2 and entry[2].strip() and port(nk, entry[2].strip()):
-                    by_port_id[tuple(sorted([(s["k"], p["n"]), (nk, entry[2].strip())]))] = "lldp"
+                for nid in sys2.get(nsys, ()):
+                    if nid == s["id"]:
+                        continue
+                    np_ = port(nid, nport.strip())
+                    if np_:
+                        pairs[tuple(sorted([(s["id"], p["n"]), (nid, nport.strip())]))] = "lldp"
+                        for kk, pp in ((s["id"], p), (nid, np_)):
+                            lldp_ports.add((kk, pp["n"]))
+                            if pp["tr"]:
+                                lldp_ports.add((kk, pp["tr"]))
+                    elif len(entry) > 2 and entry[2].strip() and port(nid, entry[2].strip()):
+                        by_port_id[tuple(sorted([(s["id"], p["n"]), (nid, entry[2].strip())]))] = "lldp"
     # Ohne LLDP: Port, an dem die Basis-MAC eines anderen Switches gelernt wird, und umgekehrt
     seen_at: dict[tuple, str] = {}
-    for (k, pname), macset in all_macs.items():
+    for (sid, pname), macset in all_macs.items():
         for mac in macset:
             other = base2.get(mac)
-            if other and other != k:
-                seen_at[(k, other)] = pname
+            if other is not None and other != sid:
+                seen_at[(sid, other)] = pname
     for (a, b), pa in seen_at.items():
         pb = seen_at.get((b, a))
         if not pb or a > b:
@@ -1600,14 +1620,15 @@ def _links(switches: list[dict], all_macs: dict) -> list[dict]:
         g["bp"].append(py[1])
     out = []
     for g in groups.values():
-        def side(k, plist):
-            ps = [port(k, n) for n in plist if port(k, n)]
+        def side(sid, plist):
+            ps = [port(sid, n) for n in plist if port(sid, n)]
             trk = sorted({p["tr"] for p in ps if p["tr"]})
-            rep = port(k, trk[0]) if trk else (ps[0] if ps else None)
-            return {"ports": sorted(plist, key=lambda v: int(v) if v.isdigit() else 999), "trunk": trk[0] if trk else "",
+            rep = port(sid, trk[0]) if trk else (ps[0] if ps else None)
+            return {"ports": sorted(plist, key=_port_num), "trunk": trk[0] if trk else "",
                     "u": rep["u"] if rep else [], "t": rep["t"] if rep else [], "speed": rep["s"] if rep else 0}
         A, B = side(g["a"], g["ap"]), side(g["b"], g["bp"])
         va, vb = set(A["u"]) | set(A["t"]), set(B["u"]) | set(B["t"])
-        out.append({"a": g["a"], "b": g["b"], "A": A, "B": B, "src": g["src"], "onlyA": sorted(va - vb, key=int),
-                    "onlyB": sorted(vb - va, key=int), "native": sorted(set(A["u"]) ^ set(B["u"]), key=int)})
+        out.append({"a": g["a"], "b": g["b"], "an": by_id[g["a"]]["k"], "bn": by_id[g["b"]]["k"], "A": A, "B": B, "src": g["src"],
+                    "onlyA": sorted(va - vb, key=_vid_num), "onlyB": sorted(vb - va, key=_vid_num),
+                    "native": sorted(set(A["u"]) ^ set(B["u"]), key=_vid_num)})
     return out

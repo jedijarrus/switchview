@@ -42,7 +42,8 @@ def port(m: dict, k: str, n: str) -> dict:
 
 
 def link(m: dict, a: str, b: str) -> dict:
-    return next(x for x in m["links"] if {x["a"], x["b"]} == {a, b})
+    """The link between the switches named a and b (a link carries the ids in "a" / "b", the names in "an" / "bn")."""
+    return next(x for x in m["links"] if {x["an"], x["bn"]} == {a, b})
 
 
 async def register(*macs: str) -> None:
@@ -121,15 +122,17 @@ async def test_a_trunk_confirmed_from_both_sides_marks_the_trunk_and_its_members
 def test_confirmed_endpoints_take_only_what_both_switches_report():
     """The rule itself, on plain inputs as _links takes them. A:3 claims B:6 (forged, B:6 names A:6): B:6 is confirmed by the real
     pair A:6 <-> B:6 (PortDesc padded), never by the forged claim, and A:3 not at all. A:7 <-> B:7 is found by the PortId (element 2).
-    A learns B's base MAC on port 8, B never A's: nothing; once B learns A's base MAC on port 8 as well, A:8 and B:8 are confirmed."""
-    def sw(k, base, ports):
-        return {"k": k, "sys": f"{k.lower()}.example", "baseMac": base, "ports": [{"n": n, "tr": "", "mb": [], "l": entries} for n, entries in ports]}
-    a = sw("A", "mac-a", [("3", [["B", "6", "6"]]), ("6", [["b.example", " 6 ", "x"]]), ("7", [["B", "to-core", "7"]]), ("8", [])])
-    b = sw("B", "mac-b", [("6", [["A", "6", "6"]]), ("7", [["a.example", "uplink", "7 "]]), ("8", [])])
-    macs = {("A", "8"): {"mac-b", "aa:bb:cc:00:00:01"}}
-    pairs = {("A", "6"), ("B", "6"), ("A", "7"), ("B", "7")}
+    A learns B's base MAC on port 8, B never A's: nothing; once B learns A's base MAC on port 8 as well, A:8 and B:8 are confirmed.
+    Switches by id (A = 1, B = 2), MACs and endpoints by (id, port)."""
+    def sw(sid, k, base, ports):
+        return {"id": sid, "k": k, "sys": f"{k.lower()}.example", "baseMac": base,
+                "ports": [{"n": n, "tr": "", "mb": [], "l": entries} for n, entries in ports]}
+    a = sw(1, "A", "mac-a", [("3", [["B", "6", "6"]]), ("6", [["b.example", " 6 ", "x"]]), ("7", [["B", "to-core", "7"]]), ("8", [])])
+    b = sw(2, "B", "mac-b", [("6", [["A", "6", "6"]]), ("7", [["a.example", "uplink", "7 "]]), ("8", [])])
+    macs = {(1, "8"): {"mac-b", "aa:bb:cc:00:00:01"}}
+    pairs = {(1, "6"), (2, "6"), (1, "7"), (2, "7")}
     assert main.confirmed_endpoints([a, b], macs) == pairs
-    assert main.confirmed_endpoints([a, b], {**macs, ("B", "8"): {"mac-a"}}) == pairs | {("A", "8"), ("B", "8")}
+    assert main.confirmed_endpoints([a, b], {**macs, (2, "8"): {"mac-a"}}) == pairs | {(1, "8"), (2, "8")}
 
 
 # ── Review round 1 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -157,14 +160,15 @@ async def test_a_spoofed_base_mac_does_not_confirm_a_forged_uplink(net):
 
 def test_base_macs_confirm_no_port_whose_switch_lldp_claim_is_one_sided():
     """The rule on plain inputs: A:6 <-> B:6 by LLDP from both sides, base MACs learned mutually (B's on A:6 and, spoofed, on A:3; A's
-    on B:6). A:3 claims B:6, B:6 does not name A:3: A:3 is not confirmed. A:8, with B's base MAC and no LLDP claim, is (rule (b))."""
-    def sw(k, base, ports):
-        return {"k": k, "sys": k, "baseMac": base, "ports": [{"n": n, "tr": "", "mb": [], "l": entries} for n, entries in ports]}
-    a = sw("A", "mac-a", [("3", [["B", "6", "6"]]), ("6", [["B", "6", "6"]]), ("8", [])])
-    b = sw("B", "mac-b", [("6", [["A", "6", "6"]])])
-    macs = {("A", "3"): {"mac-b"}, ("A", "6"): {"mac-b"}, ("B", "6"): {"mac-a"}}
-    assert main.confirmed_endpoints([a, b], macs) == {("A", "6"), ("B", "6")}
-    assert main.confirmed_endpoints([a, b], {**macs, ("A", "8"): {"mac-b"}}) == {("A", "6"), ("B", "6"), ("A", "8")}
+    on B:6). A:3 claims B:6, B:6 does not name A:3: A:3 is not confirmed. A:8, with B's base MAC and no LLDP claim, is (rule (b)).
+    Switches by id (A = 1, B = 2), MACs and endpoints by (id, port)."""
+    def sw(sid, k, base, ports):
+        return {"id": sid, "k": k, "sys": k, "baseMac": base, "ports": [{"n": n, "tr": "", "mb": [], "l": entries} for n, entries in ports]}
+    a = sw(1, "A", "mac-a", [("3", [["B", "6", "6"]]), ("6", [["B", "6", "6"]]), ("8", [])])
+    b = sw(2, "B", "mac-b", [("6", [["A", "6", "6"]])])
+    macs = {(1, "3"): {"mac-b"}, (1, "6"): {"mac-b"}, (2, "6"): {"mac-a"}}
+    assert main.confirmed_endpoints([a, b], macs) == {(1, "6"), (2, "6")}
+    assert main.confirmed_endpoints([a, b], {**macs, (1, "8"): {"mac-b"}}) == {(1, "6"), (2, "6"), (1, "8")}
 
 
 async def test_registered_devices_do_not_push_an_unknown_one_off_the_list(net):

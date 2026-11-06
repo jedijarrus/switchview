@@ -86,11 +86,12 @@ def status_of(st: dict) -> str:
 
 # ── Inventar (aus der SNMP-Abfrage) ───────────────────────────────────────────
 async def inventory(sid: int) -> dict:
-    """Ports des Switches plus Uplinks: die Ports seiner Verbindungen (LLDP oder MAC-Link, main._links), mit Trunk und dessen Mitgliedern.
-    Bei einem Treiber, der seine Ports nach ifType waehlt (poller.by_iftype, jeder ausser ProCurve), dazu jeder Port, dessen LLDP-Nachbar
-    ein anderer verwalteter Switch ist (dieselbe Zuordnung wie in _links, main.switch_keys), auch ohne erkannte Verbindung (R40): dort
-    kann ein Nachbar einen Port nennen, den _links nicht findet, und ohne Uplink-Schutz koennte jeder den einzigen Uplink abschalten.
-    Lieber zu viele Uplinks als einer zu wenig. ProCurve bleibt, wie es war."""
+    """The switch's ports plus its uplinks: the ports of its links (LLDP or MAC link, main._links), with their trunk and its members.
+    For a driver that selects its ports by ifType (poller.by_iftype, every one but ProCurve) also every port whose LLDP neighbour is
+    another managed switch (the mapping of _links, main.switch_keys), even without a link found (R40): there a neighbour can name a
+    port _links does not find, and without uplink protection anyone could switch off the only uplink. Rather too many uplinks than one
+    too few. ProCurve stays as it was. All by the switch's id (a name is not unique): its links carry it in "a" / "b", and an LLDP name
+    it shares with another switch names that one too."""
     from main import build_map, switch_keys  # spaete Bindung, vermeidet Zyklus
     m = await build_map()
     sw = next((s for s in m["switches"] if s["id"] == sid), None)
@@ -98,15 +99,15 @@ async def inventory(sid: int) -> dict:
         raise LookupError("Switch nicht gefunden oder nicht aktiv")
     uplinks: set[str] = set()
     for link in m["links"]:
-        for k, side in ((link["a"], link["A"]), (link["b"], link["B"])):
-            if k == sw["k"]:
+        for end, side in ((link["a"], link["A"]), (link["b"], link["B"])):
+            if end == sid:
                 uplinks |= set(side["ports"])
                 if side["trunk"]:
                     uplinks.add(side["trunk"])
     if poller.by_iftype(sw["driver"] or "procurve"):
         keys = switch_keys(m["switches"])
         for p in sw["ports"]:
-            if any(keys.get(entry[0]) not in (None, sw["k"]) for entry in p["l"]):
+            if any(keys.get(entry[0], set()) - {sid} for entry in p["l"]):
                 uplinks.add(p["n"])
                 if p["tr"]:
                     uplinks.add(p["tr"])

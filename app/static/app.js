@@ -68,15 +68,22 @@
   });
   $("#btn-logout").addEventListener("click", async () => { try { await api("POST", "/api/auth/logout"); } catch (e) { /* egal */ } showLogin(); });
 
-  /* ── Router: #overview, #switches, #switch=<name>, #vlans, … ── */
+  /* ── Router: #overview, #switches, #sw=<id>, #vlans, … (#switch=<name>: a bookmark from before ids, still valid) ── */
   const VIEWS = { overview: renderOverview, switches: renderSwitchDetail, vlans: renderVlans, devices: renderDevices, backups: renderBackups, audit: renderAudit, settings: renderSettings };
+  // selSwitch: the id of the shown switch (a name is not unique); from an old bookmark briefly a name, which renderSwitchDetail resolves
+  // with SVLogic.switchIdOf
   let current = "overview", selSwitch = null, swVlan = null, swPortFilter = "all", swText = "";
+  // The hash of the current view: "#sw=<id>"; a name not resolved yet keeps its "#switch=<name>"
+  function syncHash() {
+    const sw = current === "switches" && selSwitch != null ? (typeof selSwitch === "number" ? "sw=" + selSwitch : "switch=" + encodeURIComponent(selSwitch)) : "";
+    try { history.replaceState(null, "", "#" + (sw || current)); } catch (e) { /* egal */ }
+  }
   function go(view, arg) {
     if (!VIEWS[view]) view = "overview";
     current = view;
     if (view === "switches" && arg !== undefined) selSwitch = arg;
     document.querySelectorAll(".tabs [data-view]").forEach(b => { if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
-    try { history.replaceState(null, "", "#" + (view === "switches" && selSwitch ? "switch=" + encodeURIComponent(selSwitch) : view)); } catch (e) { /* egal */ }
+    syncHash();
     closeDrawer(true);
     $("#view").onclick = null;
     VIEWS[view]();
@@ -86,13 +93,16 @@
   async function start() {
     ME = await api("GET", "/api/auth/me");
     $("#user-name").textContent = ME.name; $("#login").hidden = true; $("#app").hidden = false;
-    const h = decodeURIComponent((location.hash || "").slice(1));
-    if (h.startsWith("switch=")) go("switches", h.slice(7)); else go(h || "overview");
+    // SVLogic.parseHash never throws: a malformed hash ("#%") no longer ends in the catch below, which showed the login
+    const h = SVLogic.parseHash(location.hash);
+    go(h.view, h.sw != null ? h.sw : h.swName != null ? h.swName : undefined);
   }
 
   /* ── Daten ── */
   let MAP = null;
   async function loadMap(force) { if (!MAP || force) MAP = await api("GET", "/api/netmap"); return MAP; }
+  // Switches by id (/api/netmap: links name theirs in a / b, unknown devices in sid); names (k, an / bn) are for display only
+  const swById = id => MAP.switches.find(s => s.id === id);
   const vname = id => (MAP && MAP.vlans[id]) || ("VLAN " + id);
   const chip = (id, cls = "small") => `<span class="vchip static ${cls}" style="--vc:${vcol(id)}" title="${esc(vname(id))}"><i class="sw"></i><span class="id">${esc(id)}</span>${cls === "small" ? "" : `<span class="nm">${esc(vname(id))}</span>`}</span>`;
   const chips = (ids, cls, max) => { if (!ids || !ids.length) return `<span class="muted">–</span>`; const shown = max ? ids.slice(0, max) : ids; return `<div class="vlans">${shown.map(i => chip(i, cls)).join("")}${max && ids.length > max ? `<span class="more">+${ids.length - max}</span>` : ""}</div>`; };
@@ -107,9 +117,9 @@
     : isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : "";
   // The ports of a link that build_map does not confirm ("uc": neither LLDP from both sides nor mutual base MACs), as "SW-A 3"; a link
   // can join a confirmed pair and a one-sided claim, so the tooltip names the ports instead of calling the whole link one-sided.
-  const unconfPorts = l => [...new Set([[l.a, l.A], [l.b, l.B]].flatMap(([k, x]) => {
-    const s = MAP.switches.find(v => v.k === k);
-    return x.ports.filter(n => !(s && s.ports.some(p => p.n === n && p.uc))).map(n => `${k} ${n}`);
+  const unconfPorts = l => [...new Set([[l.a, l.an, l.A], [l.b, l.bn, l.B]].flatMap(([id, name, x]) => {
+    const s = swById(id);
+    return x.ports.filter(n => !(s && s.ports.some(p => p.n === n && p.uc))).map(n => `${name} ${n}`);
   }))];
   const unconfTitle = l => l.confirmed ? "" : `Nicht von beiden Switches bestätigt: ${unconfPorts(l).join(", ")}`;
   const linkIssue = l => l.onlyA.length + l.onlyB.length + l.native.length;
@@ -121,19 +131,19 @@
     const g = [];
     const bad = MAP.switches.filter(s => !s.ok);
     if (bad.length) g.push({ sev: "crit", t: "Abfrage fehlgeschlagen", sum: bad.map(s => s.k).join(", "), open: true,
-      items: bad.map(s => ({ t: s.k, d: s.error || "keine Antwort", go: () => go("switches", s.k) })) });
+      items: bad.map(s => ({ t: s.k, d: s.error || "keine Antwort", go: () => go("switches", s.id) })) });
     const lk = MAP.links.filter(linkIssue);
     if (lk.length) g.push({ sev: "warn", t: "VLANs auf Verbindungen unterschiedlich", sum: `${lk.length} von ${MAP.links.length} Verbindungen`,
       items: lk.map(l => {
         const parts = [];
-        if (l.onlyA.length) parts.push(`nur ${l.a}: ${l.onlyA.join(", ")}`);
-        if (l.onlyB.length) parts.push(`nur ${l.b}: ${l.onlyB.join(", ")}`);
+        if (l.onlyA.length) parts.push(`nur ${l.an}: ${l.onlyA.join(", ")}`);
+        if (l.onlyB.length) parts.push(`nur ${l.bn}: ${l.onlyB.join(", ")}`);
         if (l.native.length) parts.push(`ungetaggt verschieden: ${l.native.join(", ")}`);
-        return { t: `${l.a} ⇄ ${l.b}`, d: parts.join(" · "), go: () => go("switches", l.a) };
+        return { t: `${l.an} ⇄ ${l.bn}`, d: parts.join(" · "), go: () => go("switches", l.a) };
       }) });
     const free = MAP.switches.map(s => ({ s, ps: physOf(s).filter(p => !p.o && !isUplink(p) && p.u.includes("1")) })).filter(x => x.ps.length);
     if (free.length) g.push({ sev: "info", t: "Freie Ports im Standard-VLAN 1", sum: `${free.reduce((a, x) => a + x.ps.length, 0)} Ports auf ${free.length} Switches · Einstecken = Server-Netz`,
-      items: free.map(x => ({ t: `${x.s.k}: ${x.ps.length} Ports`, d: x.ps.map(p => p.n).join(", "), go: () => { swVlan = "1"; swPortFilter = "free"; go("switches", x.s.k); } })) });
+      items: free.map(x => ({ t: `${x.s.k}: ${x.ps.length} Ports`, d: x.ps.map(p => p.n).join(", "), go: () => { swVlan = "1"; swPortFilter = "free"; go("switches", x.s.id); } })) });
     return g;
   }
 
@@ -160,7 +170,7 @@
         <section class="card"><div class="card-h"><h2>Switches</h2><div class="right"><span class="muted" style="font-size:12px">Stand ${esc(fmtTime(sw.map(s => s.lastPoll).sort().slice(-1)[0]))}</span><button class="btn small" type="button" id="btn-refresh">Alle abfragen</button></div></div>
           <div class="card-b" style="display:grid;gap:10px">${zones().map(z => `<div class="zonehead">${esc(z)}</div><div class="swgrid">${sw.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
             const ph = physOf(s), u = ph.filter(p => p.o).length;
-            return `<button type="button" class="swcard" data-sw="${esc(s.k)}"><span class="n">${stDot(s)}${esc(s.k)}</span><span class="m">${esc(s.model)} · <span class="mono">${esc(s.fw)}</span></span>
+            return `<button type="button" class="swcard" data-sw="${s.id}"><span class="n">${stDot(s)}${esc(s.k)}</span><span class="m">${esc(s.model)} · <span class="mono">${esc(s.fw)}</span></span>
               <div class="bar2" aria-hidden="true"><i style="width:${Math.round(u / Math.max(1, ph.length) * 100)}%"></i></div><span class="row"><span>${u} / ${ph.length} Ports aktiv</span><span class="mono">${esc(s.host)}</span></span></button>`; }).join("")}</div>`).join("")}</div></section>
         <section class="card"><div class="card-h"><h2>Auffälligkeiten</h2><span class="sub">aus den Switch-Daten</span></div>
           ${groups.length ? `<div class="issues">${groups.map((x, gi) => `<details class="ig ${x.sev}" ${x.open ? "open" : ""}><summary>${sevPill[x.sev]}<span class="t">${esc(x.t)}</span><span class="cnt">${x.items.length}</span><svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="d">${esc(x.sum)}</span></summary>
@@ -169,21 +179,22 @@
       <section class="card"><div class="card-h"><h2>Verbindungen zwischen Switches</h2><span class="sub">${MAP.links.length} erkannt</span></div>${linksTable(MAP.links)}</section>`;
     v.onclick = e => {
       const b = e.target.closest("[data-iss]"); if (b) { const [gi, n] = b.dataset.iss.split(":"); return groups[+gi].items[+n].go(); }
-      const c = e.target.closest(".swcard"); if (c) go("switches", c.dataset.sw);
+      const c = e.target.closest(".swcard"); if (c) go("switches", +c.dataset.sw);
     };
     $("#btn-refresh").addEventListener("click", async ev => { ev.target.disabled = true; try { await api("POST", "/api/poll"); toast("Alle Switches abgefragt"); renderOverview(); } catch (e) { toast(e.message); ev.target.disabled = false; } });
     renderTopo($("#topo"));
   }
 
-  function linksTable(links, focus) {
+  // focusId: the switch whose detail shows the table (its name first)
+  function linksTable(links, focusId) {
     if (!links.length) return `<div class="empty">Keine Verbindungen erkannt.</div>`;
     return `<div class="tbl-wrap"><table><thead><tr><th>Verbindung</th><th>Ports</th><th>Geschwindigkeit</th><th>Erkannt über</th><th>VLAN-Abgleich</th></tr></thead><tbody>` + links.map(l => {
       const n = l.A.ports.length, per = n > 1 ? l.A.speed / n : l.A.speed;
       const issue = linkIssue(l);
       const det = issue ? `<details class="lk"><summary><span class="pill warn">${issue} Abweichung${issue > 1 ? "en" : ""}</span> <span class="linkbtn">Details</span></summary><div style="display:grid;gap:4px;margin-top:6px">
-        ${l.onlyA.length ? `<div>nur ${esc(l.a)}: ${chips(l.onlyA)}</div>` : ""}${l.onlyB.length ? `<div>nur ${esc(l.b)}: ${chips(l.onlyB)}</div>` : ""}${l.native.length ? `<div>ungetaggt verschieden: ${chips(l.native)}</div>` : ""}</div></details>` : `<span class="pill ok">gleich</span>`;
-      const side = (k, x) => `${esc(k)} <span class="mono muted">${esc(x.trunk || x.ports.join(","))}</span>`;
-      return `<tr><td><b>${esc(focus && l.b === focus ? l.b : l.a)}</b> ⇄ <b>${esc(focus && l.b === focus ? l.a : l.b)}</b></td><td>${side(l.a, l.A)}<br>${side(l.b, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td${l.confirmed ? "" : ` title="${esc(unconfTitle(l))}"`}>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
+        ${l.onlyA.length ? `<div>nur ${esc(l.an)}: ${chips(l.onlyA)}</div>` : ""}${l.onlyB.length ? `<div>nur ${esc(l.bn)}: ${chips(l.onlyB)}</div>` : ""}${l.native.length ? `<div>ungetaggt verschieden: ${chips(l.native)}</div>` : ""}</div></details>` : `<span class="pill ok">gleich</span>`;
+      const side = (name, x) => `${esc(name)} <span class="mono muted">${esc(x.trunk || x.ports.join(","))}</span>`, flip = focusId != null && l.b === focusId;
+      return `<tr><td><b>${esc(flip ? l.bn : l.an)}</b> ⇄ <b>${esc(flip ? l.an : l.bn)}</b></td><td>${side(l.an, l.A)}<br>${side(l.bn, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td${l.confirmed ? "" : ` title="${esc(unconfTitle(l))}"`}>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
   }
 
@@ -194,22 +205,22 @@
       const list = MAP.switches.filter(s => (s.zone || "Ohne Zone") === z), cols = Math.min(2, list.length), rows = Math.ceil(list.length / cols);
       const w = cols * DX + PAD, h = rows * DY + 44;
       svg += `<rect class="zone" x="${x0}" y="10" width="${w}" height="${h}" rx="10"/><text class="zlabel" x="${x0 + 14}" y="30">${esc(z.toUpperCase())}</text>`;
-      list.forEach((s, i) => { pos[s.k] = [x0 + PAD / 2 + (i % cols) * DX + DX / 2, 10 + 62 + Math.floor(i / cols) * DY]; });
+      list.forEach((s, i) => { pos[s.id] = [x0 + PAD / 2 + (i % cols) * DX + DX / 2, 10 + 62 + Math.floor(i / cols) * DY]; });
       x0 += w + 40; maxH = Math.max(maxH, h);
     });
     let edges = "";
     MAP.links.forEach(l => {
       const a = pos[l.a], b = pos[l.b]; if (!a || !b) return;
-      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""} ${l.confirmed ? "" : "unconf"}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.a)} ⇄ ${esc(l.b)}${l.confirmed ? "" : ` · ${esc(unconfTitle(l))}`}</title></line>`;
+      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""} ${l.confirmed ? "" : "unconf"}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.an)} ⇄ ${esc(l.bn)}${l.confirmed ? "" : ` · ${esc(unconfTitle(l))}`}</title></line>`;
     });
     let nodes = "";
     MAP.switches.forEach(s => {
-      const p = pos[s.k], ph = physOf(s);
-      nodes += `<g class="node ${s.ok ? "" : "bad"}" tabindex="0" role="link" data-goto="${esc(s.k)}" aria-label="${esc(s.k)} öffnen"><rect x="${p[0] - NW / 2}" y="${p[1] - NH / 2}" width="${NW}" height="${NH}" rx="7"/>
+      const p = pos[s.id], ph = physOf(s);
+      nodes += `<g class="node ${s.ok ? "" : "bad"}" tabindex="0" role="link" data-goto="${s.id}" aria-label="${esc(s.k)} öffnen"><rect x="${p[0] - NW / 2}" y="${p[1] - NH / 2}" width="${NW}" height="${NH}" rx="7"/>
         <text class="nname" x="${p[0]}" y="${p[1] - 3}" text-anchor="middle">${esc(s.k)}</text><text class="nmeta" x="${p[0]}" y="${p[1] + 13}" text-anchor="middle">${ph.filter(x => x.o).length}/${ph.length} aktiv</text></g>`;
     });
     t.innerHTML = `<svg viewBox="0 0 ${x0 - 30} ${maxH + 20}" role="img" aria-label="Topologie">${svg}${edges}${nodes}</svg><p class="note">Dicke Linie = Trunk · orange = VLANs unterschiedlich · gestrichelt = ohne LLDP erkannt · gepunktet = unbestätigt (nicht von beiden Switches gemeldet)</p>`;
-    const openNode = e => { const g = e.target.closest("[data-goto]"); if (g) go("switches", g.dataset.goto); };
+    const openNode = e => { const g = e.target.closest("[data-goto]"); if (g) go("switches", +g.dataset.goto); };
     t.addEventListener("click", openNode);
     t.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openNode(e); } });
   }
@@ -227,16 +238,16 @@
   async function renderSwitchDetail() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(!MAP); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
-    if (!selSwitch || !MAP.switches.some(s => s.k === selSwitch)) selSwitch = MAP.switches.length ? MAP.switches[0].k : null;
+    selSwitch = SVLogic.switchIdOf(MAP.switches, selSwitch); syncHash();
     if (pickedFor !== selSwitch) { picked = new Set(); pickedFor = selSwitch; }
     const side = `<nav class="side" aria-label="Switches">${zones().map(z => `<div class="zonehead">${esc(z)}</div>` + MAP.switches.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
-      const ph = physOf(s); return `<button type="button" class="si" data-sw="${esc(s.k)}" aria-current="${s.k === selSwitch}">${stDot(s)}<span>${esc(s.k)}</span><span class="c">${ph.filter(p => p.o).length}/${ph.length}</span></button>`; }).join("")).join("")}
+      const ph = physOf(s); return `<button type="button" class="si" data-sw="${s.id}" aria-current="${s.id === selSwitch}">${stDot(s)}<span>${esc(s.k)}</span><span class="c">${ph.filter(p => p.o).length}/${ph.length}</span></button>`; }).join("")).join("")}
       <button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button></nav>`;
-    if (!selSwitch) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Links „Switch hinzufügen".</span></div></div></div>`; bindSide(); return; }
-    const s = MAP.switches.find(x => x.k === selSwitch), ph = physOf(s), trunks = s.ports.filter(p => p.n.startsWith("Trk"));
+    if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Links „Switch hinzufügen".</span></div></div></div>`; bindSide(); return; }
+    const s = swById(selSwitch), ph = physOf(s), trunks = s.ports.filter(p => p.n.startsWith("Trk"));
     const vset = [...new Set(ph.flatMap(p => [...p.u, ...p.t]))].sort((a, b) => a - b);
     if (swVlan && !vset.includes(swVlan)) swVlan = null;
-    const links = MAP.links.filter(l => l.a === s.k || l.b === s.k);
+    const links = MAP.links.filter(l => l.a === s.id || l.b === s.id);
     const cnt = st => ph.filter(p => stOf(s, p.st) === st).length;
     const stFacts = (has(s, "nac") ? [["radius", "RADIUS"], ["known", "Bekannte Geräte"], ["protected", "Protected"]] : [["on", "An"]]).concat([["off", "Aus"]]);
     // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
@@ -267,7 +278,7 @@
         <div class="tbl-wrap"><table><thead><tr><th class="ck">${canW ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
       ${radiusCard(s)}
       ${canW ? `<section class="card"><div class="card-h"><h2>Änderungen</h2><span class="sub">an diesem Switch, neueste zuerst</span></div><div id="sw-changes"><div class="empty">Lade …</div></div></section>` : ""}
-      <section class="card"><div class="card-h"><h2>Verbindungen</h2><span class="sub">${links.length} zu anderen Switches</span></div>${linksTable(links, s.k)}</section>
+      <section class="card"><div class="card-h"><h2>Verbindungen</h2><span class="sub">${links.length} zu anderen Switches</span></div>${linksTable(links, s.id)}</section>
     </div></div>`;
     bindSide();
     portIdx = {}; s.ports.forEach(p => portIdx[p.n] = p);
@@ -307,7 +318,7 @@
         : `<p class="note" style="margin:0">Konfiguration noch nicht gelesen.</p>`}</div></section>`;
   }
   function bindSide() {
-    document.querySelectorAll(".side .si").forEach(b => b.addEventListener("click", () => { swVlan = null; swPortFilter = "all"; swText = ""; go("switches", b.dataset.sw); }));
+    document.querySelectorAll(".side .si").forEach(b => b.addEventListener("click", () => { swVlan = null; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); }));
     $("#btn-add").addEventListener("click", () => editSwitch(null));
   }
   function renderPlate(s) {
@@ -592,9 +603,9 @@
     v.innerHTML = `<section class="card"><div class="card-h"><h2>VLANs je Switch</h2><span class="sub">U = Ports ungetaggt, T = getaggt (Trunks zählen einfach). Klick öffnet den Switch mit diesem VLAN.</span></div>
       <div class="tbl-wrap"><table class="matrix"><thead><tr><th>VLAN</th>${sw.map(s => `<th>${esc(s.k)}</th>`).join("")}</tr></thead><tbody>` +
       Object.keys(MAP.vlans).map(id => `<tr><td>${chip(id, "")}</td>${sw.map(s => { const c = cnt(s, id); const exists = s.ports.some(p => p.u.includes(id) || p.t.includes(id));
-        return `<td>${exists ? `<button type="button" class="mcell" data-sw="${esc(s.k)}" data-v="${esc(id)}" title="${esc(s.k)} · VLAN ${esc(id)}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>` : `<span class="muted">–</span>`}</td>`; }).join("")}</tr>`).join("") +
+        return `<td>${exists ? `<button type="button" class="mcell" data-sw="${s.id}" data-v="${esc(id)}" title="${esc(s.k)} · VLAN ${esc(id)}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>` : `<span class="muted">–</span>`}</td>`; }).join("")}</tr>`).join("") +
       `</tbody></table></div></section>`;
-    v.querySelector("table").addEventListener("click", e => { const b = e.target.closest(".mcell"); if (!b) return; swVlan = b.dataset.v; swPortFilter = "all"; swText = ""; go("switches", b.dataset.sw); });
+    v.querySelector("table").addEventListener("click", e => { const b = e.target.closest(".mcell"); if (!b) return; swVlan = b.dataset.v; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); });
   }
 
   /* ── Globale Suche ── */
@@ -610,14 +621,14 @@
       p.l.forEach(x => { if ((x[0] + " " + x[1]).toLowerCase().includes(term)) hits.push({ s, p, t: x[0] + " Port " + x[1], x: "LLDP-Nachbar" }); });
       if (p.mc <= 12 && !isPeer(p) && !p.tr) p.d.forEach(d => { if (d.some(val => String(val || "").toLowerCase().includes(term))) hits.push({ s, p, t: d[3] || d[4] || d[0], x: d[0] + (d[2] ? " · " + d[2] : "") + " · VLAN " + d[1] }); });
     }));
-    res.innerHTML = hits.length ? hits.slice(0, 30).map(h => `<button type="button" data-sw="${esc(h.s.k)}" data-p="${esc(h.p.n)}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.s.k)} · Port ${esc(h.p.n)}</span><span class="r2">${esc(h.x)}</span></button>`).join("") : `<div class="none">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
+    res.innerHTML = hits.length ? hits.slice(0, 30).map(h => `<button type="button" data-sw="${h.s.id}" data-p="${esc(h.p.n)}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.s.k)} · Port ${esc(h.p.n)}</span><span class="r2">${esc(h.x)}</span></button>`).join("") : `<div class="none">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
     res.hidden = false;
   });
   res.addEventListener("click", async e => {
     const b = e.target.closest("[data-sw]"); if (!b) return; res.hidden = true;
-    swVlan = null; swPortFilter = "all"; swText = ""; go("switches", b.dataset.sw);
+    swVlan = null; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw);
     for (let i = 0; i < 20 && !$("#plate"); i++) await new Promise(r => setTimeout(r, 100));
-    const s = MAP.switches.find(x => x.k === b.dataset.sw); if (s) openPort(s, b.dataset.p, q);
+    const s = swById(+b.dataset.sw); if (s) openPort(s, b.dataset.p, q);
   });
   document.addEventListener("click", e => { if (!e.target.closest(".search")) res.hidden = true; });
 
@@ -761,7 +772,7 @@
         closeModal(); toast(isNew ? "Angelegt, wird abgefragt …" : savedTxt(cleared));
         if (writeNeedsAlert(row)) writeAlert(row);
         if (isNew) await api("POST", `/api/switches/${id}/poll`).catch(() => {});
-        await loadMap(true); go("switches", payload.name);
+        await loadMap(true); go("switches", id);
       } catch (e) { toast(e.message); btn.disabled = false; }
     } });
     modal(isNew ? "Switch hinzufügen" : `Zugang bearbeiten: ${s.name}`, body, buttons);
@@ -847,7 +858,7 @@
       if (!$("#ulist")) return;
       $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th></th></tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && MAP.switches.find(x => x.k === d.sw), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
@@ -896,7 +907,7 @@
     const list = await api("GET", "/api/switches").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!list) return;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Konfigurationssicherungen</h2><span class="sub">nächtlich 02:30, gespeichert nur bei Änderung</span>
-      <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.name === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
+      <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.id === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
       <button class="btn small" type="button" id="b-now" aria-describedby="b-why">Jetzt sichern</button></div></div><p class="note gate" id="b-why" style="margin:12px 16px 0" hidden></p><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
     if (!list.length) return;
     const selected = () => list.find(x => String(x.id) === $("#b-sw").value);
