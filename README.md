@@ -82,45 +82,80 @@ docker compose up -d --build
 ```
 
 SwitchView listens on port 8080 (see `docker-compose.yml`). Data (SQLite) lives in `./data`.
-Run it behind a TLS-terminating reverse proxy in production, and set `FORWARDED_ALLOW_IPS` in `.env` to the proxy's address as the
-container sees it (comma-separated addresses or networks, e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container
-of the compose network): only that sender may set `X-Forwarded-For` and `X-Forwarded-Proto`. To find the address, open SwitchView
-through the proxy and look at the uvicorn access log (`docker compose logs switchview`): before the variable is set, every request
-shows the proxy as its client (for a proxy on the Docker host usually the gateway of the compose network). Without the variable
-uvicorn trusts proxy headers only from 127.0.0.1, which inside the container is nobody else: SwitchView works the same, but the log
-shows the proxy's address for every client.
-
-`COOKIE_SECURE` decides when the session and device cookies carry the `Secure` flag. `auto` (the default) sets it when the request
-came over HTTPS, by its own scheme or by `X-Forwarded-Proto: https`; either signal can only add the flag, a forged
-`X-Forwarded-Proto: http` never removes it. If SwitchView is reachable over HTTPS only, set `COOKIE_SECURE=always`. Any other value
-stops the start.
-
-The emergency login (`ADMIN_USER` / `ADMIN_PASSWORD`) is throttled: after 10 failed attempts within 60 seconds from browsers
-without a device cookie, it refuses such browsers (HTTP 429) until those failures are older than 60 seconds. A browser in which the
-emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out. Entra SSO is
-never throttled.
+Run it behind a TLS-terminating reverse proxy in production and set `FORWARDED_ALLOW_IPS` and `COOKIE_SECURE` as described under
+[Security](#security).
 
 Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, the login throttle (`main._LOGIN`), per-switch SSH/poll locks and running changes live in process memory.
 
 Then add switches in the UI (management IP, driver, SNMP credentials, for ProCurve an optional SSH manager account, optional SNMP write access). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again.
-A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different characters gets a
-warning in the log at every start. Changing the key later means entering every stored credential anew.
 
-SNMP credentials never go on a command line, where any local process could read them (`ps`, `/proc/<pid>/cmdline`): for each SNMP
-call SwitchView writes the community or the v3 passphrases into a short-lived `snmp.conf` (mode 0600, in a private directory under
-`/dev/shm`, removed when the call ends) and points net-snmp at it with `SNMPCONFPATH`. An SNMP credential with a line break or a NUL
-character is refused when the switch is saved.
+## Security
 
-SSH host keys are pinned on first use: the first SSH session to a switch (connection test, backup, configuration read or change)
-stores the host key the switch offers, and from then on SwitchView refuses any other key before it logs in, so the password never
-reaches a device that only pretends to be the switch. The switch form shows the pinned key's fingerprints (SHA256 and MD5); compare
-them once with the switch (`show crypto host-public-key fingerprint`). The pinned key stays when the switch's address changes. If
-a key changes as expected (replacement, new firmware), every SSH access to that switch fails with "passt nicht zum gemerkten" until
-you choose "SSH-Hostschlüssel vergessen" in the switch form; the next SSH session then pins the key it is offered.
+Security notes and upgrade steps (German): [docs/sicherheit-phase2.md](docs/sicherheit-phase2.md) (what was built, known limits,
+checks before production use, what to do on an update, decisions).
 
-"TLS-Zertifikat prüfen" (PacketFence, OPNsense) is on for a new installation; an existing one keeps its stored setting. `http://`
-addresses stay allowed. The settings warn while a check is off or an address uses `http://`: anyone on the network could then read
-the password or API key.
+The settings that matter, in `.env` unless noted:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `FORWARDED_ALLOW_IPS` | unset (`127.0.0.1`, nobody else inside the container) | addresses or networks allowed to set `X-Forwarded-For` / `X-Forwarded-Proto` |
+| `COOKIE_SECURE` | `auto` | `auto` or `always`: when the session and device cookies carry the `Secure` flag |
+| `SECRET_KEY` | none (required) | key of the stored credentials; under 16 characters stops the start, a weak one gets a warning |
+| `SESSION_HOURS` | `12` | lifetime of a session |
+| "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
+| "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
+| "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |
+
+**Reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address as the container sees it (comma-separated addresses or networks,
+e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container of the compose network): only that sender may set
+`X-Forwarded-For` and `X-Forwarded-Proto`. To find the address, open SwitchView through the proxy and look at the uvicorn access log
+(`docker compose logs switchview`): before the variable is set, every request shows the proxy as its client (for a proxy on the
+Docker host usually the gateway of the compose network). Without the variable uvicorn trusts proxy headers only from 127.0.0.1, which
+inside the container is nobody else: SwitchView works the same, but the log shows the proxy's address for every client.
+`docker-compose.yml` publishes port 8080 on every address of the host; if only the proxy should reach SwitchView, bind it to
+`127.0.0.1` or close it in the firewall.
+
+**Cookies.** `COOKIE_SECURE` decides when the session and device cookies carry the `Secure` flag. `auto` (the default) sets it when
+the request came over HTTPS, by its own scheme or by `X-Forwarded-Proto: https`; either signal can only add the flag, a forged
+`X-Forwarded-Proto: http` never removes it. If SwitchView is reachable over HTTPS only, set `COOKIE_SECURE=always`. Any other value
+stops the start. HSTS belongs on the TLS-terminating proxy. Sessions are stored as the SHA-256 of their token.
+
+**Emergency login.** The emergency login (`ADMIN_USER` / `ADMIN_PASSWORD`) is throttled: after 10 failed attempts within 60 seconds
+from browsers without a device cookie, it refuses such browsers (HTTP 429) until those failures are older than 60 seconds. A browser
+in which the emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out.
+Entra SSO is never throttled; an access token is refused where an id_token is expected.
+
+**Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
+
+**SECRET_KEY.** A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different
+characters gets a warning in the log at every start. Changing the key later means entering every stored credential anew.
+
+**Credentials follow their destination.** When a save changes the address of a switch, of PacketFence, of OPNsense or of the
+RADIUS server, every stored secret of that destination that the same save does not enter anew is deleted, and the answer and the UI
+say which. A changed address never inherits a stored secret.
+
+**SNMP credentials** never go on a command line, where any local process could read them (`ps`, `/proc/<pid>/cmdline`): for each
+SNMP call SwitchView writes the community or the v3 passphrases into a short-lived `snmp.conf` (mode 0600, in a private directory
+under `/dev/shm`, removed when the call ends) and points net-snmp at it with `SNMPCONFPATH`. An SNMP credential with a line break or
+a NUL character is refused when the switch is saved. A v2c community still travels in clear text on the network; prefer SNMPv3
+with authPriv.
+
+**SSH host keys** are pinned on first use: the first SSH session to a switch (connection test, backup, configuration read or
+change) stores the host key the switch offers, and from then on SwitchView refuses any other key before it logs in, so the password
+never reaches a device that only pretends to be the switch. The switch form shows the pinned key's fingerprints (SHA256 and MD5);
+compare them once with the switch (`show crypto host-public-key fingerprint`). The pinned key stays when the switch's address
+changes. If a key changes as expected (replacement, new firmware), every SSH access to that switch fails with "passt nicht zum
+gemerkten" until you choose "SSH-Hostschlüssel vergessen" in the switch form; the next SSH session then pins the key it is offered.
+
+**TLS.** "TLS-Zertifikat prüfen" (PacketFence, OPNsense) is on for a new installation; an existing one keeps its stored setting.
+`http://` addresses stay allowed. The settings warn while a check is off or an address uses `http://`: anyone on the network could
+then read the password or API key. The check uses the certifi bundle; for an own CA, set `SSL_CERT_FILE` to a bundle that holds the
+usual CAs plus your own (the variable also applies to the Microsoft key fetch of the Entra login).
+
+**Masking.** Secrets are masked in stored backups, in the backup and diff views, in CLI previews and in the error, steps and output
+of every change; SwitchView never runs `show radius`, `show tech` or `show tacacs`. Switch output is parsed within fixed limits (SNMP
+output per call, values per walk, port ranges and configuration size), so a hostile switch cannot exhaust the single worker's memory
+with one answer.
 
 ## Requirements
 
