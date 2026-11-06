@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -54,6 +54,7 @@ async def _schedule():
     scheduler.add_job(names_mod.refresh_names, "interval", minutes=15, id="names", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(sshcli.backup_all, "cron", hour=2, minute=30, id="backup", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(pf.expire_and_sync, "cron", hour=3, minute=15, id="pf_sync", replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(auth.prune_sessions, "interval", minutes=60, id="sessions", replace_existing=True, max_instances=1, coalesce=True)
 
 
 def check_startup_config(s: Settings) -> list[str]:
@@ -82,6 +83,7 @@ async def lifespan(app: FastAPI):
     for warning in check_startup_config(settings):
         log.warning(warning)
     await init_db()
+    await auth.prune_sessions()    # expired sessions of before the start; the scheduler prunes hourly from here on
     async with db() as conn:  # nach Neustart haengen gebliebene Aenderungen markieren
         await conn.execute("UPDATE changes SET status = 'unclear', error = 'Abgebrochen durch Neustart von SwitchView', "
                            "finished_at = datetime('now') WHERE status IN ('queued', 'running')")
@@ -580,6 +582,11 @@ async def get_backup(bid: int, user=Depends(auth.current_user)):
     return cfgparse.mask_secrets(row["content"])
 
 
+# What the diff of a backup says when its masked text equals the one before: only what masking hides changed, a secret (sshcli.store_backup
+# keeps such a backup, its raw_mac tells it apart)
+SECRET_ONLY_DIFF = "Nur maskierte Geheimnisse haben sich geändert – der Vergleich zeigt sie nicht.\n"
+
+
 @app.get("/api/backups/{bid}/diff", response_class=PlainTextResponse)
 async def diff_backup(bid: int, user=Depends(auth.current_user)):
     async with db() as conn:
@@ -593,6 +600,8 @@ async def diff_backup(bid: int, user=Depends(auth.current_user)):
     if not prev:
         return "Erste Sicherung dieses Switches, kein Vergleich möglich.\n"
     before, after = cfgparse.mask_secrets(prev["content"]), cfgparse.mask_secrets(cur_row["content"])
+    if before == after:
+        return SECRET_ONLY_DIFF
     return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                         fromfile=f"vorher {prev['taken_at']} UTC", tofile=f"nachher {cur_row['taken_at']} UTC"))
 
@@ -1199,7 +1208,20 @@ class DeviceIn(BaseModel):
     notes: str = Field(default="", max_length=500)
     role: str = Field(default="", max_length=64)
     allowed: bool = False
-    valid_until: str | None = Field(default=None, pattern=r"^(\d{4}-\d{2}-\d{2})?$")
+    valid_until: str | None = Field(default=None, pattern=r"^(\d{4}-\d{2}-\d{2})?$")    # null or "": no expiry date
+
+
+def _valid_until(body: DeviceIn) -> str | None:
+    """body.valid_until as stored: None for no expiry date (null or ""), else the date; 422 for one that has the format of a date but
+    is none (2026-13-45, 0000-00-00, 2026-02-30): pf compares it as text with today's date and hands it to PacketFence as the
+    node's unregdate, so an impossible one would end the release at a point nobody chose."""
+    if not body.valid_until:
+        return None
+    try:
+        date.fromisoformat(body.valid_until)
+    except ValueError:
+        raise HTTPException(422, "Gültig bis: kein gültiges Datum (JJJJ-MM-TT)") from None
+    return body.valid_until
 
 
 @app.get("/api/devices")
@@ -1264,7 +1286,7 @@ async def unknown_devices(user=Depends(auth.current_user)):
 
 
 async def _save_device(body: DeviceIn, user: str, mac: str, create: bool):
-    vu = body.valid_until or None
+    vu = _valid_until(body)
     async with db() as conn:
         if create:
             try:
@@ -1296,14 +1318,17 @@ async def create_device(body: DeviceIn, user=Depends(auth.current_user)):
 
 @app.put("/api/devices/{mac}")
 async def update_device(mac: str, body: DeviceIn, user=Depends(auth.current_user)):
-    return await _save_device(body, user["username"], norm_mac(mac), False)
+    mac = norm_mac(mac)
+    if norm_mac(body.mac) != mac:    # the form never sends another one; saving it under the path's MAC would hide the mismatch
+        raise HTTPException(422, "MAC-Adresse im Formular passt nicht zum Gerät")
+    return await _save_device(body, user["username"], mac, False)
 
 
 @app.delete("/api/devices/{mac}")
 async def delete_device(mac: str, user=Depends(auth.current_user)):
     mac = norm_mac(mac)
-    try:
-        await pf.unregister(mac)
+    try:    # PacketFence has to confirm reading and unregistering the node, else the device stays; a failed CoA is only a warning
+        warning = await pf.unregister(mac)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"In PacketFence nicht zurückgenommen ({e}). Gerät bleibt erhalten.")
     async with db() as conn:
@@ -1311,8 +1336,8 @@ async def delete_device(mac: str, user=Depends(auth.current_user)):
         await conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(404, "Gerät nicht gefunden")
-    await audit(user["username"], "device_delete", mac)
-    return {"ok": True}
+    await audit(user["username"], "device_delete", mac, warning or "")
+    return {"ok": True, "warning": warning}
 
 
 @app.post("/api/devices/sync")

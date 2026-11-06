@@ -773,7 +773,10 @@ async def run_change(cid: int):
             invalidate_cfg(sid)
         if kind == "save" and status == "ok" and req.get("of"):
             await _upd(int(req["of"]), saved=1)
-        await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}")
+        # "Speichern" (also "Trotzdem speichern") writes the whole running configuration, not only what change "of" sent: the audit
+        # names the state it read before, the start of the sha of its backup "vor #cid" (or of the equal one before it)
+        stand = f", Stand {sshcli.backup_sha(pre)[:12]}" if kind == "save" and pre else ""
+        await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}")
         if status in ("ok", "unclear", "failed") and kind != "save":
             asyncio.create_task(_repoll(sid))
 

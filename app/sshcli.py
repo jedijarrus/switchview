@@ -23,7 +23,7 @@ from netmiko import ConnectHandler, NetmikoTimeoutException
 
 import cfgparse
 import drivers
-from crypto import decrypt, unreadable
+from crypto import decrypt, keyed_digest, unreadable
 from db import db, execute_sync, query_sync
 
 log = logging.getLogger("switchview.ssh")
@@ -224,18 +224,33 @@ async def test_ssh(row) -> dict:
         return {"ok": False, "error": _error(e)}
 
 
+def backup_sha(content: str) -> str:
+    """The sha of the backup of the running-config content: the SHA-256 (hex) of its masked text, as config_backups.sha stores it."""
+    return hashlib.sha256(cfgparse.mask_secrets(content).encode()).hexdigest()
+
+
 async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
-    """Speichert die Konfiguration maskiert; gleiche Fassung wie zuletzt wird nicht doppelt abgelegt."""
-    content = cfgparse.mask_secrets(content)
-    sha = hashlib.sha256(content.encode()).hexdigest()
+    """Stores the running-config content masked, with its sha (backup_sha) and the mark of the unmasked text (raw_mac,
+    crypto.keyed_digest), and says whether it made a new row. No new row when the last row has the same sha and the same raw_mac:
+    then nothing changed. With the same sha and another raw_mac only secrets changed, which makes a new row, except when reading for
+    a preview (trigger "lesen", up to every 600 s): that compares the masked text only, since a firmware that salts its encrypted
+    secrets anew on every read would otherwise store a backup per preview. A last row from before raw_mac (NULL) with the same sha
+    gets this mark filled in, without a new row: the first backup after the update adds none."""
+    sha, mark = backup_sha(content), keyed_digest("backup", content)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     async with db() as conn:
-        async with conn.execute("SELECT sha FROM config_backups WHERE switch_id = ? ORDER BY id DESC LIMIT 1", (switch_id,)) as cur:
+        async with conn.execute("SELECT id, sha, raw_mac FROM config_backups WHERE switch_id = ? ORDER BY id DESC LIMIT 1",
+                                (switch_id,)) as cur:
             last = await cur.fetchone()
         if last and last["sha"] == sha:
-            return False
-        await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger) VALUES (?,?,?,?,?)",
-                           (switch_id, now, sha, content, trigger))
+            if last["raw_mac"] is None:
+                await conn.execute("UPDATE config_backups SET raw_mac = ? WHERE id = ?", (mark, last["id"]))
+                await conn.commit()
+                return False
+            if last["raw_mac"] == mark or trigger == "lesen":
+                return False
+        await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger, raw_mac) VALUES (?,?,?,?,?,?)",
+                           (switch_id, now, sha, cfgparse.mask_secrets(content), trigger, mark))
         await conn.commit()
     return True
 

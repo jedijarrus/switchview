@@ -793,7 +793,7 @@
   let ROLES = { configured: false, roles: [] }, devFilter = "all", devText = "";
   const today = () => new Date().toISOString().slice(0, 10);
   const freePill = d => !d.allowed ? `<span class="pill neutral">nicht freigegeben</span>` : d.valid_until && d.valid_until < today() ? `<span class="pill warn">abgelaufen</span>` : `<span class="pill st-known">freigegeben</span>`;
-  const pfPill = d => d.pf_state === "ok" ? `<span class="pill ok" title="${esc(fmtTime(d.pf_synced_at))}">übernommen</span>` : d.pf_state === "fehler" ? `<span class="pill crit" title="${esc(d.pf_error || "")}">Fehler</span>` : d.pf_state === "aus" ? `<span class="pill neutral" title="PacketFence-API nicht eingerichtet">nicht verbunden</span>` : `<span class="muted">–</span>`;
+  const pfPill = d => d.pf_state === "ok" && d.pf_error ? `<span class="pill warn" title="${esc(d.pf_error)}">übernommen, Hinweis</span>` : d.pf_state === "ok" ? `<span class="pill ok" title="${esc(fmtTime(d.pf_synced_at))}">übernommen</span>` : d.pf_state === "fehler" ? `<span class="pill crit" title="${esc(d.pf_error || "")}">Fehler</span>` : d.pf_state === "aus" ? `<span class="pill neutral" title="PacketFence-API nicht eingerichtet">nicht verbunden</span>` : `<span class="muted">–</span>`;
   async function renderDevices() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     let list;
@@ -853,7 +853,7 @@
     if (!isNew) btns.push({ label: "Löschen", cls: "danger", onClick: async () => {
       closeModal();
       if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.`, "Löschen", true))) return editDevice(d, false);
-      try { await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast("Gelöscht"); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
+      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || "Gelöscht"); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     btns.push({ label: isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {

@@ -183,6 +183,10 @@ ADDED_COLUMNS = (
     # /api/switches serves its fingerprints only.
     ("switches", "ssh_host_key", "TEXT"),
     ("switches", "ssh_host_key_at", "TEXT"),
+    # The mark of the unmasked running-config a backup was taken from: crypto.keyed_digest("backup", text), never a plain hash (that
+    # would be an oracle for the masked secrets in a copy of the database). sshcli.store_backup compares it to tell a change of
+    # secrets alone, which the masked sha cannot see. Existing rows have NULL: the next backup of the same masked text fills it in.
+    ("config_backups", "raw_mac", "TEXT"),
 )
 
 

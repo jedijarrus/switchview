@@ -116,12 +116,27 @@ def device_id(cookie: str | None, username: str) -> str | None:
     return nonce if hmac.compare_digest(_device_mac(nonce, username).encode(), _utf8(mac)) else None
 
 
+async def _delete_expired(conn) -> int:
+    """Deletes the expired sessions of anyone on conn, without a commit; how many."""
+    cur = await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+    return cur.rowcount
+
+
+async def prune_sessions() -> int:
+    """Deletes every expired session and returns how many: hourly by the scheduler (main._schedule) and once at the start
+    (main.lifespan), so the table does not grow between logins."""
+    async with db() as conn:
+        pruned = await _delete_expired(conn)
+        await conn.commit()
+    return pruned
+
+
 async def create_session(username: str, display: str, method: str) -> str:
     """Starts a session and returns its token for the cookie; the database keeps only token_hash(token)."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     async with db() as conn:
-        await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(),))
+        await _delete_expired(conn)
         await conn.execute("INSERT INTO sessions(token, username, display_name, method, created_at, expires_at) VALUES (?,?,?,?,?,?)",
                            (token_hash(token), username, display, method, now.isoformat(),
                             (now + timedelta(hours=settings.session_hours)).isoformat()))
@@ -139,7 +154,7 @@ async def drop_user_sessions(username: str) -> int:
     """Ends every session of username, on every device ("log out everywhere"), and returns how many of them were still valid.
     Expired sessions of anyone are deleted first, as create_session does, so they are not counted."""
     async with db() as conn:
-        await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+        await _delete_expired(conn)
         cur = await conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
         ended = cur.rowcount
         await conn.commit()

@@ -30,9 +30,10 @@ async def _ptr(ip: str) -> str:
         return ""
 
 
-async def opnsense_arp() -> list[dict]:
-    """The ARP table of the OPNsense, [] without an address or without key and secret. RuntimeError when key or secret is stored but
-    does not decrypt: refresh_names reports it, instead of a silent empty table."""
+async def opnsense_arp() -> list:
+    """The ARP table of the OPNsense, [] without an address or without key and secret: the answer itself when it is a list, else the
+    list under "rows". RuntimeError when key or secret is stored but does not decrypt, or when the answer is neither: refresh_names
+    reports it, instead of a silent empty table. Its entries are as OPNsense sent them, refresh_names checks each."""
     # target and secret in one SELECT (db.load_settings): a concurrent settings PUT never pairs one with the other's old value (F2)
     s = await load_settings(["opnsense_url", "opnsense_key", "opnsense_secret", "opnsense_verify_tls"])
     url = (s["opnsense_url"] or "").rstrip("/")
@@ -49,7 +50,20 @@ async def opnsense_arp() -> list[dict]:
         r = await c.get(f"{url}/api/diagnostics/interface/getArp", auth=(key, secret))
         r.raise_for_status()
         data = r.json()
-    return data if isinstance(data, list) else data.get("rows", [])
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("rows"), list):
+        return data["rows"]
+    raise RuntimeError("OPNsense-Antwort unerwartet: keine Liste von ARP-Einträgen")
+
+
+def _odd(entry) -> bool:
+    """Whether an ARP entry has a shape refresh_names cannot read: no object, a mac or ip that is set but no text, a hostname or
+    manufacturer that is set but no text. A missing or null mac or ip is no odd shape: the filter of refresh_names drops such an
+    entry in silence, as it drops a MAC that is not 17 characters long."""
+    if not isinstance(entry, dict):
+        return True
+    return any(entry.get(k) is not None and not isinstance(entry[k], str) for k in ("mac", "ip", "hostname", "manufacturer"))
 
 
 async def refresh_names() -> dict:
@@ -59,6 +73,10 @@ async def refresh_names() -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("OPNsense-ARP fehlgeschlagen: %s", e)
         return {"ok": False, "error": str(e)}
+    readable = [e for e in arp if not _odd(e)]
+    skipped = len(arp) - len(readable)
+    if skipped:    # an OPNsense that changed its answer shows here, and the readable entries still count
+        log.warning("OPNsense-ARP: %d von %d Einträgen übersprungen (unerwartete Form)", skipped, len(arp))
     rows = []
     sem = asyncio.Semaphore(20)
 
@@ -73,7 +91,7 @@ async def refresh_names() -> dict:
                 name = await _ptr(ip)
         rows.append((mac, ip, name, entry.get("manufacturer") or vendor_of(mac), "arp", now))
 
-    await asyncio.gather(*(one(e) for e in arp))
+    await asyncio.gather(*(one(e) for e in readable))
     async with db() as conn:
         await conn.executemany(
             "INSERT INTO names(mac, ip, name, vendor, source, last_seen) VALUES (?,?,?,?,?,?) "
@@ -82,4 +100,4 @@ async def refresh_names() -> dict:
             rows,
         )
         await conn.commit()
-    return {"ok": True, "entries": len(rows)}
+    return {"ok": True, "entries": len(rows), "skipped": skipped}

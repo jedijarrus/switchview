@@ -86,7 +86,17 @@ def _expired(dev) -> bool:
     return bool(dev["valid_until"]) and dev["valid_until"] < date.today().isoformat()
 
 
-async def _sync_one(cl, role_ids: dict, dev) -> None:
+async def _reevaluate(cl, mac: str) -> int | None:
+    """Asks PacketFence to re-evaluate the node's access (CoA), so a device that is plugged in switches over at once; None when it
+    answers 2xx, else its status code."""
+    r = await cl.post(f"/node/{mac}/reevaluate_access", json={})
+    return None if 200 <= r.status_code < 300 else r.status_code
+
+
+async def _sync_one(cl, role_ids: dict, dev) -> str | None:
+    """Writes the device dev to its node (registered with its role, or unregistered) and re-evaluates it. RuntimeError for a role
+    PacketFence does not have, or when it does not confirm reading or writing the node. A failed re-evaluation is no error, the node
+    stands as written: the hint it returns then says that the device switches over at its next login only (None without one)."""
     mac = dev["mac"]
     allowed = bool(dev["allowed"]) and not _expired(dev)
     r = await cl.get(f"/node/{mac}")
@@ -104,10 +114,13 @@ async def _sync_one(cl, role_ids: dict, dev) -> None:
     elif exists:
         r = await cl.patch(f"/node/{mac}", json={"status": "unreg", "pid": "default"})
     else:
-        return
+        return None
     if r.status_code not in (200, 201, 204):
         raise RuntimeError(f"Node schreiben: HTTP {r.status_code} {r.text[:150]}")
-    await cl.post(f"/node/{mac}/reevaluate_access", json={})  # CoA, damit ein angestecktes Geraet sofort umschaltet
+    code = await _reevaluate(cl, mac)
+    if code is not None:
+        return f"Freigabe übertragen, aber Neubewertung (CoA) fehlgeschlagen: HTTP {code} – das Gerät schaltet erst bei der nächsten Anmeldung um"
+    return None
 
 
 async def _save_state(mac: str, state: str, err: str | None):
@@ -134,8 +147,8 @@ async def sync(macs: list[str] | None = None) -> dict:
             role_ids = {r["name"]: r["id"] for r in await roles(cl)}
             for d in devs:
                 try:
-                    await _sync_one(cl, role_ids, d)
-                    await _save_state(d["mac"], "ok", None)
+                    hint = await _sync_one(cl, role_ids, d)
+                    await _save_state(d["mac"], "ok", hint)    # transferred; a hint (failed CoA) stands at the device
                     done += 1
                 except Exception as e:  # noqa: BLE001
                     await _save_state(d["mac"], "fehler", str(e)[:250])
@@ -148,14 +161,24 @@ async def sync(macs: list[str] | None = None) -> dict:
     return {"ok": failed == 0, "done": done, "failed": failed}
 
 
-async def unregister(mac: str) -> None:
+async def unregister(mac: str) -> str | None:
+    """Takes the release of a device that is being deleted back in PacketFence: its node unregistered and re-evaluated. Nothing to do
+    without PacketFence set up or for a node PacketFence does not know (404). RuntimeError when PacketFence does not confirm reading or
+    unregistering the node: the caller keeps the device, which would otherwise stay registered in PacketFence without a trace in
+    SwitchView. A failed re-evaluation is only a warning, returned (None without one): the node is unregistered."""
     if not await configured():
-        return
+        return None
     async with session() as cl:
         r = await cl.get(f"/node/{mac}")
-        if r.status_code == 200:
-            await cl.patch(f"/node/{mac}", json={"status": "unreg", "pid": "default"})
-            await cl.post(f"/node/{mac}/reevaluate_access", json={})
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise RuntimeError(f"Node lesen: HTTP {r.status_code}")
+        r = await cl.patch(f"/node/{mac}", json={"status": "unreg", "pid": "default"})
+        if r.status_code not in (200, 201, 204):
+            raise RuntimeError(f"Node zurücknehmen: HTTP {r.status_code} {r.text[:150]}")
+        code = await _reevaluate(cl, mac)
+    return None if code is None else f"In PacketFence zurückgenommen, aber Neubewertung (CoA) fehlgeschlagen: HTTP {code}"
 
 
 async def expire_and_sync():
