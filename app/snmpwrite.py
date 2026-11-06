@@ -284,6 +284,9 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
 FIELD_CAPS = {"u": "snmp_vlan", "pvid": "snmp_vlan", "t": "snmp_vlan", "en": "snmp_admin", "name": "snmp_name", "poe": "snmp_poe"}
 # Die VLAN-Felder (u, t, pvid): nur sie haengen an der VLAN-Zugehoerigkeit, die cfg mit einem einzigen u beschreibt
 VLAN_FIELDS = frozenset(k for k, cap in FIELD_CAPS.items() if cap == "snmp_vlan")
+# What a trunk member takes on its own (changes.MEMBER_FIELDS, both ways): name and on / off, each one ifIndex column (ifAlias,
+# ifAdminStatus). Its VLANs are the trunk's (it has no bridge port of its own), PoE on members stays refused (R36).
+MEMBER_FIELDS = frozenset({"name", "en"})
 _CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portnamen", "snmp_poe": "PoE"}
 POE_DELIVERING = 3    # pethPsePortDetectionStatus deliveringPower(3): der Port versorgt gerade ein Geraet (changes.plan_ports warnt)
 ALIAS_MAX = 64  # ifAlias ist DisplayString SIZE (0..64): hoechstens 64 Bytes, geschrieben werden die UTF-8-Bytes des Namens
@@ -348,7 +351,8 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
       - ein Port, den es nicht gibt, und ein anderes Feld als u / pvid / t / en / name / poe (802.1X / MAC-Anmeldung gehen nur ueber die
         CLI);
       - ein Port in raw["unmanaged"], fuer ein VLAN-Feld (VLAN_FIELDS: u, t, pvid; R41, An / Aus, Name und PoE gehen); ein
-        Trunk-Mitglied (der Trunk selbst geht: er ist ein Bridge-Port); ein Port ohne Bridge-Port oder
+        Trunk-Mitglied mit einem Feld ausser MEMBER_FIELDS (der Trunk selbst geht: er ist ein Bridge-Port; name and en of a member go
+        by its ifIndex alone, without the bridge-port checks that follow); ein Port ohne Bridge-Port oder
         ifIndex (nur Anzeige, auch kein Abschalten; ausser bei cisco_vmps ein Port mit vmVlan-Zeile ohne t / pvid, R45) oder dessen
         Bridge-Port laut raw["bp2port"] nicht ihm gehoert; ein Feld, dessen Faehigkeit der Treiber nicht hat (FIELD_CAPS, drivers.can);
       - ein Wert, der keiner ist: u keine VLAN-ID als Text, t keine Liste verschiedener, pvid keine VLAN-ID 1..4094 (is_vlan_id), en
@@ -373,21 +377,24 @@ def snmp_block_reason(driver: drivers.Driver, cfg: dict, raw: dict, port: str, f
         # R41: nicht eindeutig ist nur seine VLAN-Zugehoerigkeit (cfg hat ein einziges u); An / Aus, Name und PoE lesen u nie
         return raw["unmanaged"][p]
     member_of = {m: trunk for trunk, members in cfg["trunks"].items() for m in members}
-    if p in member_of:  # ein Mitglied hat keinen eigenen Bridge-Port, seine VLANs sind die des Trunks
+    member = p in member_of
+    if member and not set(d) <= MEMBER_FIELDS:  # ein Mitglied hat keinen eigenen Bridge-Port, seine VLANs sind die des Trunks
         return f"gehört zu {member_of[p]}, bitte {member_of[p]} wählen"
     # cisco_vmps (R45): ein Port mit vmVlan-Zeile ist ein Switchport, auch ohne Bridge-Port. Klassisches IOS fuehrt BRIDGE-MIB je VLAN
     # (community@vlan, v3-Kontext vlan-N), im Default-Kontext stehen nur die Ports von VLAN 1; ohne diese Ausnahme waere jeder Access-Port
     # ausserhalb von VLAN 1 gesperrt. Sein Access-VLAN (vmVlan), An / Aus, Name und PoE gehen ueber ifIndex bzw. PoE-Eintrag; was nur
     # Q-BRIDGE schreibt (t, pvid), braucht weiter einen Bridge-Port.
     switchport = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"] and not {"t", "pvid"} & set(d)
-    if p not in raw["ifindex"] or (p not in raw["port2bp"] and not switchport):
+    # A member (only MEMBER_FIELDS get here) needs its ifIndex alone: its effective bridge port is the trunk's (port2bp), owned by the
+    # trunk in bp2port, and no bit of it is written
+    if p not in raw["ifindex"] or (not member and p not in raw["port2bp"] and not switchport):
         # etwa ein Management-Port ausserhalb der Bridge: nur Anzeige, auch kein Abschalten (es koennte SwitchViews eigener Zugang sein).
         # Diese Regel sperrt auch PoE an einem Port, dem poller.poe_ports einen Eintrag zuordnet, der aber kein Bridge-Port ist (etwa ein
         # SVI, den ein falsch gewaehlter Treiber als Port fuehrt). In der Zuordnung selbst einen Bridge-Port zu verlangen ginge nicht: ein
         # ProCurve-Trunk-Mitglied hat keinen eigenen, ohne es als physischen Port verloere der ganze Switch sein PoE.
         return "kein Bridge-Port (etwa ein Management-Port), per SNMP nur zur Anzeige"
     bp = raw["port2bp"].get(p)
-    if bp is not None and raw["bp2port"].get(bp) != p:
+    if not member and bp is not None and raw["bp2port"].get(bp) != p:
         # build_cfg sorgt dafuer, dass der effektive Bridge-Port eines Ports, der kein Mitglied ist, ihm selbst gehoert. Stimmt das
         # nicht, waere es ein Fehler in raw: lieber nichts schreiben als die Bits eines fremden Ports kippen.
         owner = raw["bp2port"].get(bp)

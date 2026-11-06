@@ -44,8 +44,12 @@ PORTNAME_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")
 # Druckbares ASCII ohne Leerzeichen. Ausgeschlossen: ? (startet die CLI-Hilfe), ~ (J.15 kennt es nicht), Quotes, Backslash
 RADIUS_KEY_RE = re.compile(r"""^(?!.*[?~"'\\])[!-~]{8,64}$""")
 ERROR_PATTERN = r"(Invalid input|Incomplete input|Ambiguous input|Module not present|invalid port|cannot|Error|Unable|denied)"
-ORDER = ["dot1x_off", "mac_off", "vlan_untagged", "vlan_tagged", "no_vlan_tagged", "name", "no_name", "enable", "disable",
-         "dot1x_on", "dot1x_cl", "dot1x_uv", "dot1x_no_uv", "mac_on", "mac_al", "mac_uv", "mac_no_uv"]
+# no_vlan_untagged (u -> None, a revert) after every tagged line: the port must stay in some VLAN (docs/procurve-cli-referenz.md 3.3)
+ORDER = ["dot1x_off", "mac_off", "vlan_untagged", "vlan_tagged", "no_vlan_tagged", "no_vlan_untagged", "name", "no_name", "enable",
+         "disable", "dot1x_on", "dot1x_cl", "dot1x_uv", "dot1x_no_uv", "mac_on", "mac_al", "mac_uv", "mac_no_uv"]
+# The fields a trunk member takes on its own, over SSH and SNMP (snmpwrite.snmp_block_reason): its name and on / off. Its VLANs are the
+# trunk's, NAC never goes on a trunk, PoE on members stays refused (R36).
+MEMBER_FIELDS = snmpwrite.MEMBER_FIELDS
 TERMINAL = {"ok", "unclear", "failed", "aborted"}
 # R26: ohne snmp_autosave steht ein SNMP-Set nur in der laufenden Konfiguration des Switches
 SNMP_UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Switch speichern (z. B. write memory / copy running-config startup-config)"
@@ -143,15 +147,19 @@ def _desired_from_set(cfg: dict, ports: list[str], s: dict) -> dict:
             if m_new:
                 d["muv"] = g
         # Laufen 802.1X und MAC-Anmeldung zusammen, darf nur die MAC-Anmeldung ein unauth-vid haben
-        # (J.15 meldet sonst: "Only Web or MAC-authenticator can have unauthenticated VLAN enabled ...")
-        if x_new and m_new and cur["xuv"]:
+        # (J.15 meldet sonst: "Only Web or MAC-authenticator can have unauthenticated VLAN enabled ...").
+        # Only for a request that touches NAC (R48): the switch has taken the state as it is, and "on", a VLAN or a name change must
+        # not take an authentication line off the port.
+        touches_nac = status in STATUS or s.get("limit") or s.get("guest") is not None
+        if touches_nac and x_new and m_new and cur["xuv"]:
             d["xuv"] = None
         # cur.get: eine running-config kennt kein PoE (port_state hat dann kein "poe"), ein PoE-Feld bleibt dort also stehen
         out[p] = {k: v for k, v in d.items() if (sorted(cur[k], key=int) if k == "t" else cur.get(k)) != v}
     return out
 
 
-def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ssh", driver=None, raw: dict | None = None) -> dict:
+def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ssh", driver=None, raw: dict | None = None,
+               radius_server: str | None = None) -> dict:
     """req: {ports:[..], set:{..}, expert:bool} oder {desired:{port:{feld:wert}}, expert:bool}
 
     mechanism ist der Schreibweg. "ssh" (Vorgabe): cfg aus der running-config, commands = shown = ProCurve-CLI-Zeilen (_commands).
@@ -161,7 +169,10 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
 
     Gesperrt wird auf beiden Wegen gleich (Uplink / Trunk nur im Expertenmodus, kein NAC auf Uplinks und Trunks, ein Trunk-Mitglied nur
     ueber seinen Trunk, VLANs muss es geben, ...). Trunk ist TrkN oder jeder Trunk / LAG in cfg["trunks"] (Po1, ae0, ...); Mitglied ist
-    ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. Per SSH dazu jeder Port mit PoE (R30: PoE nur per SNMP;
+    ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. A member takes MEMBER_FIELDS (name, on / off) on its own,
+    under the uplink / expert rule of every port (inventory counts the members of an uplink trunk as uplinks); with any other field it
+    is blocked ("gehört zu <trunk>"). Its VLANs are the trunk's, so "Port wäre in keinem VLAN mehr" is not checked for it (over SSH
+    port_state shows a member in no VLAN line at all). Per SSH dazu jeder Port mit PoE (R30: PoE nur per SNMP;
     _commands kennt das Feld nicht und liesse es still weg). Over SSH also a port whose name in desired (a revert) does not fit
     PORTNAME_RE: it would land in a CLI line (E28). Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
     snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...). Ein gesperrter
@@ -171,7 +182,10 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
     before haelt die Werte der geplanten Felder vor der Aenderung (die Quelle eines Reverts: plan_ports mit desired = before), per SNMP
     dazu die PVID (R21, siehe _snmp_before). Ergebnis: commands, shown, desired, before, blocked, warnings, expert, mechanism; per SNMP
     dazu ops. ValueError fuer eine ungueltige Anfrage oder einen unbekannten mechanism (per SNMP auch aus render_ops, wenn raw in sich
-    nicht stimmt: zwei Ports auf einem ifIndex, was read_cfg nie liefert), TypeError fuer "snmp" ohne driver oder raw."""
+    nicht stimmt: zwei Ports auf einem ifIndex, was read_cfg nie liefert), TypeError fuer "snmp" ohne driver oder raw.
+
+    radius_server: the RADIUS server of the settings (radius_settings()["server"]). A NAC change then needs exactly that server on the
+    switch; without one ("" or None) any radius-server host line will do, as before."""
     if mechanism not in ("ssh", "snmp"):
         raise ValueError(f"Unbekannter Schreibweg: {mechanism!r}")
     over_snmp = mechanism == "snmp"
@@ -214,7 +228,8 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             continue
         is_trk = p.startswith("Trk") or p in trunks  # auch der LAG eines anderen Herstellers (Po1, ae0, Bridge-Aggregation1, ...)
         trk = ip["tr"] or member_of.get(p, "")
-        if trk and not is_trk:
+        member = bool(trk) and not is_trk
+        if member and not set(d) <= MEMBER_FIELDS:    # a member without fields is not blocked: nothing is planned for it
             blocked.append({"port": p, "reason": f"gehört zu {trk}, bitte {trk} wählen"})
             continue
         if not d:
@@ -254,8 +269,9 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
         if u_new and u_new in t_new:
             blocked.append({"port": p, "reason": f"VLAN {u_new} kann nicht ungetaggt und getaggt zugleich sein"})
         # Per SNMP nur, wenn sich VLANs aendern (L17): An / Aus, Name und PoE lassen sie, wie sie sind, und bei einem nicht verwaltbaren
-        # Port (snmp_block_reason laesst ihn dafuer zu) ist das leere u nur ein Platzhalter. Per SSH wie bisher immer.
-        if not u_new and not t_new and (not over_snmp or snmpwrite.VLAN_FIELDS & set(d)):
+        # Port (snmp_block_reason laesst ihn dafuer zu) ist das leere u nur ein Platzhalter. Per SSH wie bisher immer, except for a trunk
+        # member (only MEMBER_FIELDS get here): its VLANs are the trunk's, and over SSH it stands in no VLAN line (u None, t []).
+        if not u_new and not t_new and not member and (not over_snmp or snmpwrite.VLAN_FIELDS & set(d)):
             blocked.append({"port": p, "reason": "Port wäre in keinem VLAN mehr"})
         if (d.get("x") or d.get("m")) or ((x_new or m_new) and ("cl" in d or "al" in d or "xuv" in d or "muv" in d)):
             needs_radius = True
@@ -273,7 +289,7 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             warnings.append(f"Port {p}: VLAN 1 ist das Standard-VLAN")
 
     if needs_radius:
-        miss = readiness_missing(cfg, None)
+        miss = readiness_missing(cfg, radius_server or None)
         if miss:
             blocked.append({"port": "*", "reason": "Switch ist nicht für RADIUS vorbereitet: " + ", ".join(miss)})
 
@@ -333,8 +349,10 @@ def _commands(cfg: dict, desired: dict) -> list[str]:
             atoms[("dot1x_off",)].append(p)
         if d.get("m") is False:
             atoms[("mac_off",)].append(p)
-        if "u" in d:
+        if "u" in d and d["u"] is not None:
             atoms[("vlan_untagged", d["u"])].append(p)
+        elif "u" in d and cur["u"] is not None:    # u -> None (a revert): leave the old untagged VLAN, after the tagged lines (ORDER)
+            atoms[("no_vlan_untagged", cur["u"])].append(p)
         if "t" in d:
             for v in set(d["t"]) - set(cur["t"]):
                 atoms[("vlan_tagged", v)].append(p)
@@ -362,7 +380,8 @@ def _commands(cfg: dict, desired: dict) -> list[str]:
         return {
             "dot1x_off": f"no aaa port-access authenticator {pl}", "mac_off": f"no aaa port-access mac-based {pl}",
             "vlan_untagged": f"vlan {v} untagged {pl}", "vlan_tagged": f"vlan {v} tagged {pl}",
-            "no_vlan_tagged": f"no vlan {v} tagged {pl}", "name": f"interface {pl} name {v}", "no_name": f"no interface {pl} name",
+            "no_vlan_tagged": f"no vlan {v} tagged {pl}", "no_vlan_untagged": f"no vlan {v} untagged {pl}",
+            "name": f"interface {pl} name {v}", "no_name": f"no interface {pl} name",
             "enable": f"interface {pl} enable", "disable": f"interface {pl} disable",
             "dot1x_on": f"aaa port-access authenticator {pl}", "dot1x_cl": f"aaa port-access authenticator {pl} client-limit {v}",
             "dot1x_uv": f"aaa port-access authenticator {pl} unauth-vid {v}", "dot1x_no_uv": f"no aaa port-access authenticator {pl} unauth-vid",
@@ -511,8 +530,11 @@ def readiness(cfg: dict, server: str | None) -> dict:
 
 
 def readiness_missing(cfg: dict, server: str | None) -> list[str]:
+    """What a NAC change needs on the switch and cfg does not show: the RADIUS server (exactly `server` when given, any host line
+    without), eap-radius and 802.1X globally on."""
     r = readiness(cfg, server)
-    names = {"host": "RADIUS-Server", "eap": "802.1X-Methode eap-radius", "active": "802.1X global aktiv"}
+    names = {"host": f"RADIUS-Server {server}" if server else "RADIUS-Server", "eap": "802.1X-Methode eap-radius",
+             "active": "802.1X global aktiv"}
     return [names[k] for k in names if not r[k]]
 
 
@@ -714,7 +736,7 @@ async def run_change(cid: int):
                 elif kind == "prepare":
                     plan = plan_prepare(cfg, rs)
                 else:
-                    plan = plan_ports(row["firmware"] or "", inv, cfg, req)
+                    plan = plan_ports(row["firmware"] or "", inv, cfg, req, radius_server=rs["server"])
                 if plan["blocked"]:
                     status, error = "aborted", "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"])
                     await step("Abgebrochen: " + error, "error")

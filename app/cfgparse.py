@@ -6,8 +6,10 @@ Port-Access: globale Zeilen mit Portliste (15.x) und Zeilen im interface-Block (
 import re
 from collections import defaultdict
 
-_TOKEN = re.compile(r"^(?:(\d+)/)?([A-Za-z]?)(\d+)$")
-_TRK = re.compile(r"(?i)^trk(\d+)$")
+# A port token, bounded and ASCII only (\d takes every Unicode digit, and int() fails beyond 4300 digits): [<stack>/][<module>]<port>,
+# at most 4 digits of stack member and 6 of port; a trunk TrkN with at most 4 digits
+_TOKEN = re.compile(r"^(?:([0-9]{1,4})/)?([A-Za-z]?)([0-9]{1,6})$")
+_TRK = re.compile(r"(?i)^trk([0-9]{1,4})$")
 
 # Limits for text from a switch (F5, NV cfgparse-unbounded-range-expansion): a compromised or MITM'd switch controls its
 # running-config, and parse_config runs on the single worker's event loop. The largest real case (a chassis, 288 ports x 500 VLANs)

@@ -491,10 +491,10 @@ def test_the_trunk_interface_itself_is_one_bridge_port():
     assert shown == ["Port Trk1: VLAN ungetaggt 1 → 20", "Port Trk1: VLAN getaggt 20, 30, 99 → 30, 99"]
 
 
-@pytest.mark.parametrize("d", [{"u": "20"}, {"t": ["20"]}, {"en": False}, {"name": "x"}, {"en": True}, {"pvid": "1"}], ids=str)
+@pytest.mark.parametrize("d", [{"u": "20"}, {"t": ["20"]}, {"pvid": "1"}], ids=str)
 @pytest.mark.parametrize("port", ["4", "5"])
 def test_a_trunk_member_is_refused(port, d):
-    """A member has no bridge port of its own: any write to it is refused, even one that would change nothing."""
+    """A member has no bridge port of its own: any VLAN write to it is refused, even one that would change nothing."""
     cfg, raw = _read(SAMPLE)
     with pytest.raises(ValueError, match=rf"^Port {port}: gehört zu Trk1, bitte Trk1 wählen$"):
         snmpwrite.render_ops(PROCURVE, cfg, raw, {port: d})
@@ -503,7 +503,7 @@ def test_a_trunk_member_is_refused(port, d):
 def test_a_lag_of_another_vendor():
     """W_CATALYST read for a Q-BRIDGE driver: Po1 (bridge port 56 = 0x01 of byte 6) drops VLAN 20; VLAN 20's egress list loses only
     that bit (50 00 00 00 00 00 01 00 -> 50 00 ...). The 0x10 of member Gi1/0/4's own bridge port 4 stays: it is no effective one.
-    The members are refused, the LAG can also be renamed (ifIndex 5001)."""
+    The members are refused for VLANs, the LAG can also be renamed (ifIndex 5001)."""
     ops, shown = _render_and_store(CATALYST, ARISTA, {"Po1": {"t": ["10"]}}, "arista")
     assert ops == [(f"{VLAN_EGRESS}.20", "x", "5000000000000000")]
     assert shown == ["Port Po1: VLAN getaggt 10, 20 → 10"]
@@ -514,7 +514,7 @@ def test_a_lag_of_another_vendor():
     cfg, raw = _read(CATALYST, "arista")
     for member in ("Gi1/0/3", "Gi1/0/4"):
         with pytest.raises(ValueError, match=rf"^Port {re.escape(member)}: gehört zu Po1, bitte Po1 wählen$"):
-            snmpwrite.render_ops(ARISTA, cfg, raw, {member: {"en": False}})
+            snmpwrite.render_ops(ARISTA, cfg, raw, {member: {"u": "20"}})
 
 
 # ── refused: the port ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -853,9 +853,11 @@ def _must_refuse(driver, cfg: dict, raw: dict, desired: dict) -> bool:
             return True
         # R45: on cisco_vmps a port with a vmVlan row needs no bridge port, unless the request has a Q-BRIDGE field (t, pvid)
         switchport = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"] and not {"t", "pvid"} & set(d)
-        # R41: an unmanaged port is refused for its VLAN fields only
-        if (p in raw["unmanaged"] and {"u", "t", "pvid"} & set(d)) or p in members or (p not in raw["port2bp"] and not switchport) \
-                or p not in raw["ifindex"]:
+        # R41: an unmanaged port is refused for its VLAN fields only. A trunk member takes name and on / off (changes.MEMBER_FIELDS) by
+        # its ifIndex alone, without a bridge port of its own; any other field of a member is refused
+        member = p in members
+        if (p in raw["unmanaged"] and {"u", "t", "pvid"} & set(d)) or (member and set(d) - {"en", "name"}) \
+                or (not member and p not in raw["port2bp"] and not switchport) or p not in raw["ifindex"]:
             return True
         if "name" in d and _bad_name(d["name"]):
             return True
@@ -898,15 +900,16 @@ def _random_desired(rng: random.Random, cfg: dict, raw: dict, driver) -> dict:
     missing = next(str(v) for v in range(1, 4095) if str(v) not in cfg["vlans"])    # a VLAN ID, but no VLAN of this switch
     members = {m for ms in cfg["trunks"].values() for m in ms}
     switchport = {p for p in raw["vmvlan"] if driver.vlan_strategy == "cisco_vmps"}    # R45: no bridge port needed (clean: no t / pvid)
-    # an unmanaged port is writable for en / name (R41): a clean request leaves its VLANs alone
-    writable = [p for p in cfg["ports"] if p not in members and (p in raw["port2bp"] or p in switchport)]
+    # an unmanaged port (R41) and a trunk member (changes.MEMBER_FIELDS) are writable for en / name: a clean request leaves their VLANs
+    # alone
+    writable = [p for p in cfg["ports"] if p in members or p in raw["port2bp"] or p in switchport]
     clean = bool(writable) and rng.random() < 0.7
     qbridge = driver.vlan_strategy == "qbridge"
     pool = writable if clean else list(cfg["ports"])
     for p in rng.sample(pool, rng.randint(1, min(4, len(pool)))):
         st, d = cfg["ports"][p], {}
         access = driver.vlan_strategy == "cisco_vmps" and p in raw["vmvlan"]
-        vlans = not (clean and p in raw["unmanaged"])
+        vlans = not (clean and (p in raw["unmanaged"] or p in members))
         if vlans and clean and qbridge and rng.random() < 0.15:
             # a revert to no untagged VLAN, as for a port that was tagged-only: at least one tagged VLAN, maybe the old untagged one,
             # mostly with the PVID the planner recorded (R21)
@@ -987,7 +990,8 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
     reaching what matters."""
     rng = random.Random(8)
     seen: dict[str, int] = dict.fromkeys(("rendered", "refused", "drifted", "shared PortList", "trunk VLANs", "u -> None",
-                                          "tagged -> untagged", "vmVlan", "explicit pvid", "no bridge port", "unmanaged"), 0)
+                                          "tagged -> untagged", "vmVlan", "explicit pvid", "no bridge port", "unmanaged", "trunk member"),
+                                         0)
     for case in range(1500):
         W, driver, selection = _random_switch(rng)
         cfg, raw = _read(W, selection)
@@ -1020,6 +1024,7 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             ("explicit pvid", any(k == "pvid" for _, k in changed)),
             ("no bridge port", any(p not in raw["port2bp"] for p, _ in changed)),    # R45: a cisco vmVlan port, written all the same
             ("unmanaged", any(p in raw["unmanaged"] for p, _ in changed)),           # R41: on / off or name of an unmanaged port
+            ("trunk member", any(p in m for p, _ in changed for m in cfg["trunks"].values())),    # its name or on / off
         ):
             seen[key] += hit
         own = {raw["port2bp"][p] for p, d in desired.items() if d and p in raw["port2bp"]}
@@ -1031,4 +1036,4 @@ def test_render_ops_on_random_switches_against_the_simulated_switch():
             seen["drifted"] += 1
     assert min(seen["rendered"], seen["drifted"]) > 800 and seen["refused"] > 400, seen
     assert min(seen[k] for k in ("shared PortList", "trunk VLANs", "u -> None", "tagged -> untagged", "vmVlan", "explicit pvid")) > 50, seen
-    assert seen["no bridge port"] > 10 and seen["unmanaged"] > 5, seen
+    assert seen["no bridge port"] > 10 and seen["unmanaged"] > 5 and seen["trunk member"] > 50, seen

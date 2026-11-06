@@ -97,6 +97,8 @@
   const chip = (id, cls = "small") => `<span class="vchip static ${cls}" style="--vc:${vcol(id)}" title="${esc(vname(id))}"><i class="sw"></i><span class="id">${esc(id)}</span>${cls === "small" ? "" : `<span class="nm">${esc(vname(id))}</span>`}</span>`;
   const chips = (ids, cls, max) => { if (!ids || !ids.length) return `<span class="muted">–</span>`; const shown = max ? ids.slice(0, max) : ids; return `<div class="vlans">${shown.map(i => chip(i, cls)).join("")}${max && ids.length > max ? `<span class="more">+${ids.length - max}</span>` : ""}</div>`; };
   const physOf = s => s.ports.filter(p => !p.n.startsWith("Trk"));
+  // A trunk / LAG itself (TrkN, or a port whose trunk is itself: Po1, ae0, ...); its members carry the trunk's name in tr
+  const isTrunkPort = p => p.n.startsWith("Trk") || (!!p.tr && p.tr === p.n);
   const isPeer = p => p.l.some(x => MAP.switches.some(s => s.sys === x[0] || s.k === x[0]));
   const isUplink = p => isPeer(p) || !!p.tr || !!p.up;
   const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && isPeer(p)));
@@ -339,7 +341,7 @@
       return true;
     });
     const dev = p => p.l.length ? p.l.map(x => `${esc(x[0])} <span class="mono muted">${esc(x[1])}</span>`).join(", ") : p.tr && !p.n.startsWith("Trk") ? `<span class="muted">über ${esc(p.tr)}</span>` : p.mc > 3 ? `<span class="muted">${p.mc} Geräte</span>` : p.d.map(d => esc(d[3] || d[2] || d[4] || d[0])).join(", ") || `<span class="muted">–</span>`;
-    const ck = p => writable(s) && !p.tr ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
+    const ck = p => writable(s) && !isTrunkPort(p) ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
     $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(stOf(s, p.st))}${uplinkPill(p)}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="muted">Keine Ports für diesen Filter.</td></tr>`;
     if ($("#pick-all")) $("#pick-all").checked = false;
@@ -380,7 +382,13 @@
     const nacWhy = nac ? "" : nacCap
       ? "Ohne SSH-Zugang gehen RADIUS, Bekannte Geräte und Protected, Geräte pro Port und Gast-VLAN nicht: per SNMP gibt es keine 802.1X-/MAC-Anmeldung. Einschalten geht mit „An“."
       : `Treiber ${s.driver} schreibt per SNMP: RADIUS, Bekannte Geräte, Geräte pro Port und Gast-VLAN gehen nur über die SSH-CLI (ProCurve).`;
-    const stOff = { radius: !nac, known: !nac, protected: !protOk };
+    // Trunk members (tr = their trunk) take only name and on / off (changes.MEMBER_FIELDS); VLANs, NAC and PoE go through the trunk
+    const memPs = ps.filter(p => p.tr && p.tr !== p.n), mem = memPs.length > 0;
+    const memWhy = mem ? `Trunk-Mitglied (${memPs.map(p => p.n).join(", ")}): VLANs, Anmeldung und PoE nur über den Trunk – hier gehen Name und An/Aus.` : "";
+    const memGate = mem ? ' disabled aria-describedby="f-gate-mem"' : "";
+    const nacOff = { radius: !nac, known: !nac, protected: !protOk };
+    const stOff = { radius: nacOff.radius || mem, known: nacOff.known || mem, protected: nacOff.protected || mem };
+    const stGate = k => [nacOff[k] ? "f-gate-nac" : "", mem ? "f-gate-mem" : ""].filter(Boolean).join(" ");
     // Ohne NAC nur An und Aus: RADIUS und Bekannte Geräte gibt es dort nicht, und Protected hieße nichts anderes als An
     const opts = [["", "Unverändert", curSt.length > 1 ? "gemischt" : ST[curSt[0]] ? "jetzt: " + ST[curSt[0]][0] : "jetzt: unbekannt"],
       ...(has(s, "nac") ? [["radius", "RADIUS", "Zertifikat (802.1X), sonst bekannte Geräte"], ["known", "Bekannte Geräte", "nur Geräte aus der Geräte-DB, per MAC"],
@@ -389,32 +397,33 @@
     // PoE nur bei einem Treiber mit snmp_poe und nur, wenn jeder gewählte Port einen zugeordneten PoE-Eintrag hat (netmap: poe)
     const poeCap = has(s, "snmp_poe"), noPoe = ps.filter(p => !p.poe), poeAll = poeCap && !noPoe.length;
     const poeNow = [...new Set(ps.map(p => p.poe && p.poe.on))];
-    const poeHtml = poeAll ? `<div class="grid2"><div class="field"><label for="f-poe">PoE</label><select id="f-poe" aria-describedby="f-poe-hint${s.snmp_write ? "" : " f-gate-poe"}" ${s.snmp_write ? "" : "disabled"}><option value="">unverändert</option><option value="on" ${f.poe === "on" ? "selected" : ""}>an</option><option value="off" ${f.poe === "off" ? "selected" : ""}>aus</option></select>
+    const poeHtml = poeAll ? `<div class="grid2"><div class="field"><label for="f-poe">PoE</label><select id="f-poe" aria-describedby="f-poe-hint${s.snmp_write ? "" : " f-gate-poe"}${mem ? " f-gate-mem" : ""}" ${s.snmp_write && !mem ? "" : "disabled"}><option value="">unverändert</option><option value="on" ${f.poe === "on" ? "selected" : ""}>an</option><option value="off" ${f.poe === "off" ? "selected" : ""}>aus</option></select>
         <span class="hint" id="f-poe-hint">jetzt: ${esc(ps.length === 1 ? poeTxt(ps[0].poe) : poeNow.length === 1 ? onTxt(poeNow[0]) : "gemischt")}</span></div></div>
       ${!s.snmp_write ? `<p class="note gate" id="f-gate-poe">PoE schaltet SwitchView nur per SNMP: dafür im Zugang „SNMP darf schreiben“ einschalten.</p>`
         : has(s, "cli") ? `<p class="note" style="margin:0">PoE geht immer per SNMP, auch wenn SSH geht. Zusammen mit RADIUS, Bekannte Geräte, Protected, Geräte pro Port oder Gast-VLAN geht es nicht: bitte getrennt ändern.</p>` : ""}`
       : poeCap && noPoe.length < ps.length ? `<p class="note gate">PoE nur, wenn jeder gewählte Port PoE hat (ohne PoE: ${esc(noPoe.map(p => p.n).join(", "))}).</p>` : "";
-    const chipBtns = (ids, sel, attr) => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
+    const chipBtns = (ids, sel, attr) => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"${memGate}><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
     const lims = LIMITS.filter(n => n <= (s.limitMax || 2));
     const body = `<p class="note" style="margin:0">${ports.length === 1 ? "Port" : ports.length + " Ports"}: <span class="mono">${esc(ports.join(", "))}</span></p>
-      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""} ${stOff[k] ? 'disabled aria-describedby="f-gate-nac"' : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div>
+      ${memWhy ? `<p class="note gate" id="f-gate-mem">${esc(memWhy)}</p>` : ""}
+      <fieldset class="fs"><legend>Zustand</legend><div class="opts" role="radiogroup" aria-label="Zustand">${opts.map(([k, t, d]) => `<label class="opt"><input type="radio" name="f-st" value="${k}" ${f.status === k ? "checked" : ""} ${stOff[k] ? `disabled aria-describedby="${stGate(k)}"` : ""}><b>${t}</b><span>${esc(d)}</span></label>`).join("")}</div>
         ${nacWhy ? `<p class="note gate" id="f-gate-nac">${esc(nacWhy)}</p>` : ""}</fieldset>
-      <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-u-hint"></span></label>
+      <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"${memGate}><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-u-hint"></span></label>
         <label class="field"><span>Beschreibung</span><input id="f-name" value="${esc(f.name)}" maxlength="64" placeholder="unverändert" autocomplete="off"><span class="hint">ohne Leerzeichen, z. B. Drucker-EK</span></label></div>
       <label class="check"><input type="checkbox" id="f-nclear" ${f.nameClear ? "checked" : ""}> Beschreibung entfernen</label>
       ${poeHtml}
       <details class="adv"><summary>Getaggte VLANs, Geräte pro Port, Gast-VLAN</summary><div style="display:grid;gap:12px;margin-top:10px">
         <div class="field"><span>Getaggt hinzufügen</span>${chipBtns(vl, f.add, "ta")}</div>
         <div class="field"><span>Getaggt entfernen</span>${chipBtns(tagUnion, f.rem, "tr")}</div>
-        <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint" ${nac ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
-          <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint" ${nac ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
+        <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
+          <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
       </div></details>
       ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>` : ""}`;
     const collect = () => {
       f.status = (document.querySelector('input[name="f-st"]:checked') || {}).value || "";
-      f.untagged = $("#f-u").value; f.name = $("#f-name").value.trim().replace(/\s+/g, "_"); f.nameClear = $("#f-nclear").checked;
-      f.add = [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta); f.rem = [...document.querySelectorAll("[data-tr][aria-pressed=true]")].map(b => b.dataset.tr);
-      f.limit = nac ? $("#f-lim").value : ""; f.guest = nac ? $("#f-guest").value : "-"; f.poe = poeAll && s.snmp_write ? $("#f-poe").value : "";
+      f.untagged = mem ? "" : $("#f-u").value; f.name = $("#f-name").value.trim().replace(/\s+/g, "_"); f.nameClear = $("#f-nclear").checked;
+      f.add = mem ? [] : [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta); f.rem = mem ? [] : [...document.querySelectorAll("[data-tr][aria-pressed=true]")].map(b => b.dataset.tr);
+      f.limit = nac && !mem ? $("#f-lim").value : ""; f.guest = nac && !mem ? $("#f-guest").value : "-"; f.poe = poeAll && s.snmp_write && !mem ? $("#f-poe").value : "";
       f.expert = !!($("#f-expert") && $("#f-expert").checked);
       const c = {};
       if (f.status && !stOff[f.status]) c.status = f.status;
@@ -550,7 +559,7 @@
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
-    const canEdit = writable(s) && !p.tr;
+    const canEdit = writable(s) && !isTrunkPort(p);
     $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">Port bearbeiten</button></div>` : ""}
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd><dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}

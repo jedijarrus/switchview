@@ -117,12 +117,16 @@ def test_usable_vlan_tokens_next_to_unusable_ones_still_count():
     f"aaa port-access authenticator 1 client-limit {BIG}\n",
     f"radius-server host 10.0.0.1 time-window {BIG}\n",
     f"trunk 2-3 Trk{BIG}\n",
+    "interface " + "1" * 5000 + "\n   disable\n   exit\n",                          # a port token beyond 6 digits (cfgparse._TOKEN)
+    "interface ٣\n   disable\n   exit\n",                                       # an Arabic-Indic digit: \d took it, [0-9] does not
 ], ids=["vlan-beyond-int", "vlan-4095", "vlan-leading-zero", "client-limit-superscript", "addr-limit-beyond-int",
-        "global-client-limit-beyond-int", "time-window-beyond-int", "trunk-beyond-int"])
+        "global-client-limit-beyond-int", "time-window-beyond-int", "trunk-beyond-int", "interface-5000-digits", "interface-arabic-digit"])
 def test_a_number_the_parser_cannot_use_never_stops_it(text):
-    """F5 beyond the VLAN tokens: every int() of parse_config reads a switch token, and each unusable one is skipped, not raised."""
+    """F5 beyond the VLAN tokens: every int() of parse_config reads a switch token, and each unusable one is skipped, not raised. A
+    port token is ASCII digits only and bounded (cfgparse._TOKEN / _TRK): no other port than 1 comes out of these lines."""
     cfg = parse_config("vlan 1\n   untagged 1\n   exit\n" + text)
     assert cfg["vlans"] == {"1": ""} and cfg["trunks"] == {}
+    assert set(cfg["ports"]) == {"1"}
     assert (cfg["ports"]["1"]["u"], cfg["ports"]["1"]["cl"], cfg["ports"]["1"]["al"]) == ("1", None, None)
     assert cfg["radius"].get("10.0.0.1", {}).get("time_window") is None
 

@@ -938,6 +938,10 @@ def _check_request(body: PlanIn, port_re: re.Pattern):
     for v in body.change.tagged_add + body.change.tagged_remove:
         if not re.fullmatch(r"\d{1,4}", v):
             raise HTTPException(422, f"VLAN ungültig: {v}")
+    # Baseline L7: one VLAN in both lists was planned as "remove" without a word; the UI never sends both for one VLAN
+    both = sorted(set(body.change.tagged_add) & set(body.change.tagged_remove), key=int)
+    if both:
+        raise HTTPException(422, f"VLAN {both[0]} steht in „getaggt hinzufügen“ und „getaggt entfernen“")
 
 
 async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
@@ -954,7 +958,8 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
     _check_request(body, PORT_RE)
     req = {"ports": body.ports, "set": body.change.model_dump(), "expert": body.expert}
     try:
-        plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req)
+        plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req,
+                                  radius_server=(await changes.radius_settings())["server"])
     except ValueError as e:
         raise HTTPException(422, str(e))
     return plan, req, "ports", _summary(body)
@@ -1068,7 +1073,7 @@ async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict
             cfg = await changes.fresh_cfg(row["id"])
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {e}")
-        way = {}
+        way = {"radius_server": (await changes.radius_settings())["server"]}    # a NAC revert needs the configured server, like run_change
     try:
         plan = changes.plan_ports(row["firmware"] or "", await changes.inventory(row["id"]), cfg, req, **way)
     except ValueError as e:

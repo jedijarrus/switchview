@@ -589,6 +589,32 @@ def test_snmp_keeps_the_vlan_id_check(api, fake):
     assert fake.calls == []
 
 
+def test_tagged_add_and_remove_of_one_vlan_is_422(api, fake):
+    """Baseline L7: before the fix "remove" won silently. The first VLAN by number is named."""
+    sid = switch(api, "procurve", ssh=True)
+    r = plan(api, sid, {"ports": ["2"], "change": {"tagged_add": ["30"], "tagged_remove": ["30"]}})
+    assert (r.status_code, r.json()["detail"]) == (422, "VLAN 30 steht in „getaggt hinzufügen“ und „getaggt entfernen“")
+    sid = switch(api, "generic", host="203.0.113.22")    # over SNMP: the same check, before the read
+    r = plan(api, sid, {"ports": ["Gi1/0/1"], "change": {"tagged_add": ["30", "20", "100"], "tagged_remove": ["100", "20"]}})
+    assert (r.status_code, r.json()["detail"]) == (422, "VLAN 20 steht in „getaggt hinzufügen“ und „getaggt entfernen“")
+    assert fake.kinds() == ["ssh"]    # the SSH read of the first request; nothing planned, nothing read over SNMP
+
+
+# SSH_CONFIG has no RADIUS setup at all; with a RADIUS server in the settings the missing host line names it
+NOT_READY_FOR = "Switch ist nicht für RADIUS vorbereitet: RADIUS-Server 203.0.113.99, 802.1X-Methode eap-radius, 802.1X global aktiv"
+
+
+def test_an_ssh_preview_and_revert_need_the_configured_radius_server(api, fake, tmp_path):
+    """Review §3: main._make_plan and main._plan_revert hand the RADIUS server of the settings to plan_ports (radius_server)."""
+    asyncio.run(db.set_setting("radius_server", "203.0.113.99"))
+    sid = switch(api, "procurve")
+    got = preview(api, sid, {"ports": ["2"], "change": {"status": "radius"}})
+    assert (got["mechanism"], got["blocked"]) == ("ssh", [{"port": "*", "reason": NOT_READY_FOR}])
+    cid = add_change(tmp_path, sid, before={"2": {"x": True, "m": True, "cl": 1, "al": 1}}, mechanism="ssh")
+    got = preview(api, sid, {"mode": "revert", "of": cid})
+    assert (got["mechanism"], got["blocked"]) == ("ssh", [{"port": "*", "reason": NOT_READY_FOR}])
+
+
 def test_snmp_trunk_member_is_blocked_not_refused(api, fake):
     """A trunk member exists in the read, so it passes the port check; plan_ports blocks it with the usual reason."""
     got = preview(api, switch(api, "generic"), {"ports": ["Gi1/0/3"], "change": {"untagged": "10"}})

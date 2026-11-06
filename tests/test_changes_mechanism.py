@@ -238,9 +238,9 @@ def test_a_lag_of_another_vendor_is_a_trunk(monkeypatch):
                  id="no-nac-on-a-lag"),
     pytest.param(CATALYST, "arista", ARISTA, {}, True, {"Po1": {"name": "core"}, "Gi1/0/1": {"name": "Etage"}}, "Po1",
                  "Name und An/Aus nur an den Mitglied-Ports des Trunks", id="lag-no-name"),
-    pytest.param(CATALYST, "arista", ARISTA, {}, False, {"Gi1/0/3": {"en": False}, "Gi1/0/1": {"name": "Etage"}}, "Gi1/0/3", R_PO1,
+    pytest.param(CATALYST, "arista", ARISTA, {}, False, {"Gi1/0/3": {"u": "20"}, "Gi1/0/1": {"name": "Etage"}}, "Gi1/0/3", R_PO1,
                  id="lag-member"),
-    pytest.param(CATALYST, "arista", ARISTA, {"stale": {"Gi1/0/3"}}, False, {"Gi1/0/3": {"en": False}, "Gi1/0/1": {"name": "Etage"}},
+    pytest.param(CATALYST, "arista", ARISTA, {"stale": {"Gi1/0/3"}}, False, {"Gi1/0/3": {"u": "20"}, "Gi1/0/1": {"name": "Etage"}},
                  "Gi1/0/3", R_PO1, id="lag-member-the-poll-does-not-know"),
     # snmp_block_reason
     pytest.param(SAMPLE, "procurve", PROCURVE, {"extra": {"7"}}, False, {"7": {"en": False}, "2": {"u": "30"}}, "7",
