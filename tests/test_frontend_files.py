@@ -66,3 +66,26 @@ def test_the_scripts_load_in_order_in_one_global_scope():
     out = subprocess.run(["node", "-e", LOAD, *files], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == {"missing": [], "fetched": ["/api/auth/config"]}
+
+
+# The same load, then the value (JSON) of the expression in argv[1], evaluated in that global scope after the scripts ran
+EVAL = LOAD.split("const missing")[0].replace("process.argv.slice(1)", "process.argv.slice(2)") + """
+process.stdout.write(JSON.stringify(vm.runInContext(process.argv[1], ctx)));
+"""
+
+
+def in_page(expr: str):
+    files = [str(STATIC / n) for n in re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX) if n != "msal-browser.min.js"]
+    out = subprocess.run(["node", "-e", EVAL, expr, *files], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_radius_card_says_the_switch_changed_since_the_read_without_naming_a_way():
+    """Final review: switch_cfg.stale is set by an SNMP SET and by SSH commands without a read-back (Ruling 175), so the card names
+    no way; without the mark it says only when it read."""
+    card = "MAP = {}; [true, false].map(st => radiusCard({ssh: true, caps: ['nac'], cfgAt: '2026-11-06 10:00:00', cfgStale: st}))"
+    stale, fresh = in_page(card)
+    assert " · veraltet (Switch seither geändert)</span>" in stale and "SNMP" not in stale
+    assert "veraltet" not in fresh and "Stand " in fresh

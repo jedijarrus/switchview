@@ -86,7 +86,7 @@
     const r = s.ready, rs = !!(MAP && s.cfgAt);
     const li = (ok, t) => `<li class="${ok ? "ok" : "miss"}"><span class="st-dot ${ok ? "" : "down"}"></span>${t}</li>`;
     const miss = r && !(r.host && r.coa && r.tw && r.eap && r.active && r.park);
-    return `<section class="card"><div class="card-h"><h2>RADIUS am Switch</h2><span class="sub">${rs ? "Stand " + esc(fmtTime(s.cfgAt)) + (s.cfgStale ? " · veraltet (seither per SNMP geändert)" : "") : "noch nicht gelesen"}</span>
+    return `<section class="card"><div class="card-h"><h2>RADIUS am Switch</h2><span class="sub">${rs ? "Stand " + esc(fmtTime(s.cfgAt)) + (s.cfgStale ? " · veraltet (Switch seither geändert)" : "") : "noch nicht gelesen"}</span>
       <div class="right"><button class="btn small" type="button" data-a="readcfg">Neu lesen</button><button class="btn small" type="button" data-a="pa">Anmeldungen anzeigen</button>${miss ? `<button class="btn small primary" type="button" data-a="prepare">Vorbereiten</button>` : ""}</div></div>
       <div class="card-b">${r ? `<ul class="checks">${li(r.host, "RADIUS-Server (PacketFence) eingetragen")}${li(r.coa, "CoA erlaubt (dyn-authorization), damit PacketFence umschalten kann")}${li(r.tw, "CoA ohne Zeitstempel erlaubt (time-window 0), PacketFence schickt keinen")}${li(r.eap, "802.1X-Methode eap-radius")}${li(r.active, "802.1X am Switch aktiv")}${li(r.park, "Park-VLAN 3999 angelegt (für Unbekannte)")}</ul>
         ${r.login_radius ? `<p class="note">Die Anmeldung am Switch selbst nutzt RADIUS.</p>` : ""}${r.others && r.others.length ? `<p class="note">Weitere RADIUS-Server: ${esc(r.others.join(", "))}</p>` : ""}
