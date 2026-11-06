@@ -12,9 +12,9 @@ dazu kommt dieselbe VLAN-Zugehoerigkeit ueber den EFFEKTIVEN Bridge-Port (ein Tr
 Trunks). So sehen Oberflaeche, Inventar (main.build_map) und Schreibweg denselben Switch; tests/test_snmpwrite_read.py und
 tests/test_port_discovery.py legen beides auf dieselben Walk-Zeilen. Wer poller._build aendert, muss build_cfg mitziehen (oder
 bewusst abweichen). Abweichungen gibt es nur hier: ein Port, den cfg nicht eindeutig beschreiben kann (in mehreren VLANs ungetaggt,
-oder eine PVID, die nicht sein ungetaggtes VLAN ist), steht ohne u in raw["unmanaged"]; und bei vlan_strategy cisco_vmps ist ein
-Port mit vmVlan-Zeile ein Access-Port, dessen VLAN aus vmVlan kommt, dem Objekt, das der Schreibweg dort setzt (so liest das Pruefen
-zurueck, was geschrieben wurde).
+oder eine PVID, die nicht sein ungetaggtes VLAN ist; or a bridge port outside 1..65535), steht ohne u in raw["unmanaged"]; und bei
+vlan_strategy cisco_vmps ist ein Port mit vmVlan-Zeile ein Access-Port, dessen VLAN aus vmVlan kommt, dem Objekt, das der
+Schreibweg dort setzt (so liest das Pruefen zurueck, was geschrieben wurde).
 
 Drei Index-Raeume, nie vermischen:
   Bridge-Port (dot1dBasePort)  dot1qPvid und die Bits der PortLists (Egress / Untagged)
@@ -103,7 +103,9 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
 
     Nur der Port faellt heraus (raw["unmanaged"], kein u; t und raw bleiben, wie gelesen), wenn er in mehr als einem VLAN ungetaggt
     ist (Hybrid-/General-Port; das gilt auch mit vmVlan-Zeile), oder wenn er ohne vmVlan-Zeile genau ein ungetaggtes VLAN hat, sein
-    Bridge-Port aber eine andere PVID (ungetaggt Ankommendes landete in einem anderen VLAN, als cfg sagt). Fuer den ganzen Switch
+    Bridge-Port aber eine andere PVID (ungetaggt Ankommendes landete in einem anderen VLAN, als cfg sagt). The same holds for a port
+    whose effective bridge port lies outside 1..65535 (dot1dBasePort, snmp.MAX_BRIDGE_PORT; it has no bit in a PortList of at most
+    snmp.MAX_PORTLIST_BYTES, and writing one would stretch the list to that bit). Fuer den ganzen Switch
     geschlossen aus (snmp.SnmpError statt eines cfg, das ihn falsch beschreibt), wenn
       - Name, Egress- und Untagged-Liste nicht fuer dieselben VLANs vorliegen (Spalten derselben Tabellenzeile),
       - driver_name die Ports nach ifType waehlt und ein Interface mit numerischem ifIndex in ifName keine ifType-Zeile hat, oder
@@ -185,6 +187,9 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
         trk = member_of.get(ifi)
         eff = if2bp.get(trk) if trk else if2bp.get(ifi)
         b = int(eff) if eff else 0    # 0: no bridge port (PortList bits start at bridge port 1)
+        # A bridge port that no dot1dBasePort can be (BRIDGE-MIB: 1..65535) has no bit in a PortList of this read (at most
+        # snmp.MAX_PORTLIST_BYTES): its VLANs are not manageable (below), so the write path never asks for that bit
+        odd_bp = bool(eff) and not 1 <= b <= snmp.MAX_BRIDGE_PORT
         un = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
         tg = sorted([v for v in vname if b > 0 and snmp.portlist_has_bit(egress.get(v, b""), b)
                      and not snmp.portlist_has_bit(untag.get(v, b""), b)], key=int)
@@ -195,7 +200,10 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
                 raise snmp.SnmpError(f"Port {name}: vmVlan unlesbar ({vm!r})")
             raw["vmvlan"][name] = vm
             u, tg = (str(int(vm)) if int(vm) else None), []
-        if len(un) > 1:
+        if odd_bp:
+            raw["unmanaged"][name] = f"Bridge-Port {b} außerhalb von 1–{snmp.MAX_BRIDGE_PORT} (BRIDGE-MIB): VLANs per SNMP nicht verwaltbar"
+            u = None
+        elif len(un) > 1:
             raw["unmanaged"][name] = f"ungetaggt in mehreren VLANs ({', '.join(un)}): Hybrid-/General-Port, per SNMP nicht verwaltbar"
             u = None
         elif vm is None and u is not None and eff in pvid and pvid[eff] != u:
@@ -262,7 +270,9 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
     for r in results:
         if isinstance(r, BaseException):
             raise r
-    cfg, raw = build_cfg(dict(zip(walks, results)), driver.name, vmvlan_base=vm_base, text_hex=True, driver=driver)
+    # In a worker thread, like poller.poll_switch builds its display: a huge switch (or a hostile agent) must not hold up the event
+    # loop, the UI and the polls meanwhile
+    cfg, raw = await asyncio.to_thread(build_cfg, dict(zip(walks, results)), driver.name, vmvlan_base=vm_base, text_hex=True, driver=driver)
     cfg["hostname"] = hostname
     return cfg, raw
 

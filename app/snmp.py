@@ -16,6 +16,7 @@ MAX_STDOUT = 8 * 1024 * 1024    # bytes of stdout per call; 64 000 MACs are abou
 MAX_STDERR = 64 * 1024          # bytes of stderr kept per call; the rest is read and dropped (see _run)
 MAX_ROWS = 100_000              # values per walk, rows with an OID (see _parse)
 MAX_PORTLIST_BYTES = 8192       # a PortList over bridge ports 1..65535 (dot1dBasePort) needs no more (see portlist_bytes)
+MAX_BRIDGE_PORT = 65535         # the last dot1dBasePort (BRIDGE-MIB); set / clear refuse a higher one (see portlist_set_bit)
 READ_CHUNK = 64 * 1024          # _run reads stdout and stderr in pieces of this size
 
 
@@ -284,9 +285,18 @@ def portlist_has_bit(raw: bytes, port: int) -> bool:
     return i < len(raw) and bool(raw[i] & mask)
 
 
+def _portlist_write_pos(port: int) -> tuple[int, int]:
+    """_portlist_pos for set / clear, which also refuse a port beyond MAX_BRIDGE_PORT (ValueError, before anything is allocated): a
+    written PortList then never grows past MAX_PORTLIST_BYTES, whatever bridge port number an agent made up (its bit would otherwise
+    stretch the list to (port - 1) // 8 + 1 bytes, 512 MiB for 4294967295). portlist_has_bit needs no such bound, it allocates nothing."""
+    if port > MAX_BRIDGE_PORT:
+        raise ValueError(f"PortList-Portnummern enden bei {MAX_BRIDGE_PORT} (BRIDGE-MIB), nicht bei {port}")
+    return _portlist_pos(port)
+
+
 def portlist_set_bit(raw: bytes, port: int) -> bytes:
     """Neue PortList mit gesetztem Bit fuer `port`, alle anderen Bits unveraendert. Zu kurzes `raw` wird mit Nullbytes verlaengert."""
-    i, mask = _portlist_pos(port)
+    i, mask = _portlist_write_pos(port)
     buf = bytearray(raw.ljust(i + 1, b"\x00"))
     buf[i] |= mask
     return bytes(buf)
@@ -294,7 +304,7 @@ def portlist_set_bit(raw: bytes, port: int) -> bytes:
 
 def portlist_clear_bit(raw: bytes, port: int) -> bytes:
     """Neue PortList mit geloeschtem Bit fuer `port`, alle anderen Bits und die Laenge unveraendert (zu kurzes `raw` wie bei set verlaengert)."""
-    i, mask = _portlist_pos(port)
+    i, mask = _portlist_write_pos(port)
     buf = bytearray(raw.ljust(i + 1, b"\x00"))
     buf[i] &= 0xFF ^ mask
     return bytes(buf)
