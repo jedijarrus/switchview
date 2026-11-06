@@ -85,6 +85,36 @@ def test_failures_expire_after_the_window():
     assert not t.blocked(["local"]) and len(t) == 0
 
 
+def test_the_keys_stay_in_the_order_of_their_last_failure():
+    """_expire drops keys from the front only, so a key that fails again moves to the end. Otherwise B (last failure at 10) would sit
+    behind A (last failure at 50) after its window, blocked() would empty its times at 75, and at 111 _expire would read the last time
+    of an empty deque: an IndexError, a 500 on every emergency login."""
+    now = [0.0]
+    t = throttle.LoginThrottle(clock=lambda: now[0])
+    for at, key in ((0, "A"), (10, "B"), (50, "A")):
+        now[0] = at
+        t.fail([key])
+    now[0] = 75
+    assert not t.blocked(["B"]) and len(t) == 1
+    now[0] = 111
+    assert not t.blocked(["A"]) and len(t) == 0
+
+
+def test_beyond_max_keys_the_key_with_the_oldest_last_failure_goes():
+    """One failure blocks here (limit 1), so blocked() shows which keys are kept: A failed again after B, so B goes when C comes."""
+    now = [0.0]
+    t = throttle.LoginThrottle(limit=1, max_keys=2, clock=lambda: now[0])
+    for at, key in ((0, "A"), (1, "B"), (2, "A"), (3, "C")):
+        now[0] = at
+        t.fail([key])
+    assert [t.blocked([k]) for k in "ABC"] == [True, False, True]
+    one = throttle.LoginThrottle(limit=1, max_keys=1, clock=lambda: now[0])
+    for at, key in ((4, "A"), (5, "B")):
+        now[0] = at
+        one.fail([key])
+    assert [one.blocked([k]) for k in "AB"] == [False, True]
+
+
 def test_a_known_browser_gets_in_while_an_attacker_hammers(login_api):        # Review Focus 1
     assert login_api.post("/api/auth/local", json=GOOD).cookies.get(auth.DEVICE_COOKIE)
     attacker = TestClient(main.app, headers=CSRF)                               # the same sender address, no device cookie
