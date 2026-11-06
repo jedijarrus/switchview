@@ -60,7 +60,7 @@ SNMP_UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Swi
 SNMP_KEPT = {True: "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst).",
              False: "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert."}
 # Behind each step with which an SSH run ends unclear, by what was going out: lines (send_config_set, and a read-back that does not
-# match) or write memory. The progress dialog shows that step, as over SNMP (app.js resultHead).
+# match) or write memory. The progress dialog shows that step, as over SNMP (sv-switch.js resultHead).
 SSH_KEPT = {"lines": SNMP_KEPT[False], "save": "Ob der Switch gespeichert hat (write memory), ist offen."}
 # The error of a run whose task was cancelled (the app shut down): unclear once something went out, failed before
 CANCELLED = "Abgebrochen (Prozess beendet)"
@@ -191,7 +191,7 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
     in desired (a revert) does not fit PORTNAME_RE: it would land in a CLI line (E28). Per SNMP kommt fuer jeden Port, der diese Regeln
     besteht, snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...).
     Ein gesperrter Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter
-    geplant; ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
+    geplant; ausgefuehrt wird nichts, solange blocked nicht leer ist (api_changes.apply_change, run_change).
 
     before haelt die Werte der geplanten Felder vor der Aenderung (die Quelle eines Reverts: plan_ports mit desired = before), per SNMP
     dazu die PVID (R21, siehe _snmp_before). Ergebnis: commands, shown, desired, before, blocked, warnings, expert, mechanism; per SNMP
@@ -473,7 +473,7 @@ async def cached_cfg(sid: int) -> tuple[dict | None, str | None, bool]:
 
 class HostKeyRefused(RuntimeError):
     """fresh_cfg's SSH read was refused because the switch offered another host key than the pinned one (sshcli.HostKeyMismatch,
-    backup_config's "host_key"): whoever answers at the address may be an attacker. main._choose_mechanism lets SNMP take over then
+    backup_config's "host_key"): whoever answers at the address may be an attacker. api_changes._choose_mechanism lets SNMP take over then
     only with an SNMPv3 authPriv write identity. The message is backup_config's error."""
 
 
@@ -529,7 +529,7 @@ async def create_change(sid: int, user: str, kind: str, summary: str, req: dict,
     and _run_snmp set it to 1 right before anything does).
 
     One change at a time per switch (Phase 1, review §2): the check for a queued or running change of the switch and the INSERT are one
-    write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed main.apply_change's early check the second
+    write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed api_changes.apply_change's early check the second
     waits for the first's commit and then raises Busy(BUSY), nothing inserted."""
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
@@ -692,7 +692,7 @@ async def run_change(cid: int):
         await _upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=_now(), output=mask(output or ""))
         # Each step on its own: what fails is logged and costs the rest nothing, audit and re-poll run always. A read that does not
         # parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped (R27). After lines without a
-        # read-back the read from before them is no fresh read: the entry stays dropped and aged (going_out).
+        # read-back the read from before them is no fresh read: the entry stays dropped and marked stale (going_out, mark_cfg_stale).
         if pre:
             await _logged(cid, "Sicherung vorher", sshcli.store_backup(sid, pre, f"vor #{cid}"))
         if post:
@@ -743,7 +743,7 @@ async def _run_snmp(cid: int, ch, row):
          Lock noch einmal, mit der Switch-Zeile von dann (R33): SNMP-Schreiben kann inzwischen aus sein, die Zugangsdaten weg. Ab da
          gilt diese Zeile (Zugangsdaten, Treiber). Before that, and before anything else in the lock: a switch disabled meanwhile ends
          the change failed with DISABLED_RUN. Only then the inventory (the poll's ports and uplinks), inside the lock as on the SSH way.
-      2. Live lesen: snmpwrite.read_cfg selbst, nie main._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
+      2. Live lesen: snmpwrite.read_cfg selbst, nie api_changes._read_snmp (das naehme den Lock ein zweites Mal, asyncio.Lock ist nicht
          reentrant), die PoE-Tabellen nur, wenn die Aenderung PoE beruehrt (touches_poe, R34; das Zuruecklesen genauso). Scheitert es:
          failed.
       3. Gegen diesen Read neu planen (die Anfrage der Aenderung): gesperrt oder shown anders als in der Vorschau -> aborted, ebenso ein
@@ -970,7 +970,7 @@ def actions_of(ch) -> dict[str, bool]:
     """The follow-up actions of change ch, as the UI offers them (main._change_out serves both): "Rückgängig" (can_revert) for a port
     change that ended ok / unclear / failed, is not reverted yet and may have sent something; "Trotzdem speichern" (can_save, write
     memory) for an SSH change (NULL = ssh) that ended unclear / failed, is not saved and may have sent something. The same rules as
-    main._plan_revert and main._plan_save, which refuse the rest."""
+    api_changes._plan_revert and api_changes._plan_save, which refuse the rest."""
     sent = may_have_sent(ch)
     return {"can_revert": ch["kind"] == "ports" and not ch["reverted_by"] and ch["status"] in ("ok", "unclear", "failed") and sent,
             "can_save": (ch["mechanism"] or "ssh") == "ssh" and ch["status"] in ("unclear", "failed") and not ch["saved"] and sent}

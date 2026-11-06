@@ -1,8 +1,9 @@
 """Task 12 of Phase 3 (Phase 1 "... app.js aufteilen"): app.js is split into five classic scripts without a build step (sv-core,
 sv-overview, sv-switch, sv-admin, sv-main), a pure move. The IIFE is gone, so the scripts share the global scope: every top-level
-name of one is visible in the later ones, and a name declared twice (or one svlogic.js declares too) would stop a script from loading.
-The router comes last, its VIEWS reads the render functions of the earlier scripts at load. The node tests are skipped where node is
-not installed (no Python dependency, no build step).
+name of one is visible in the later ones. A let / const declared twice (or one svlogic.js declares too) stops a script from loading;
+a function declared twice silently replaces the earlier one, which only the name test catches. The router comes last, its VIEWS
+reads the render functions of the earlier scripts at load. The node tests are skipped where node is not installed (no Python
+dependency, no build step).
 """
 import json
 import re

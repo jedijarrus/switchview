@@ -188,7 +188,7 @@ def write_identity(row) -> tuple[str, dict]:
 def write_authpriv(row) -> bool:
     """Whether SNMP SETs to this switch go out with SNMPv3 authPriv (write_identity, its level as snmp._level computes it): neither a
     v2c community nor v3 without privacy shows to whoever answers at the address. False also without a write identity (snmp.SnmpError).
-    main._choose_mechanism lets SNMP take over after a refused SSH host key only then."""
+    api_changes._choose_mechanism lets SNMP take over after a refused SSH host key only then."""
     try:
         return snmp._level(write_identity(row)[1]) == "authPriv"
     except snmp.SnmpError:

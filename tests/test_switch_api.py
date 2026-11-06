@@ -102,7 +102,7 @@ def body(**fields) -> dict:
 
 
 def old_ui_body(**fields) -> dict:
-    """What the switch form of the current frontend (app.js editSwitch) sends: none of the new fields, both v3 selects filled."""
+    """What the switch form of the current frontend (sv-admin.js editSwitch) sends: none of the new fields, both v3 selects filled."""
     return {"name": "SW-VK-02", "host": "203.0.113.42", "zone": "VK", "sort": 0, "enabled": True, "snmp_version": "2c",
             "snmp_community": None, "snmp_user": None, "snmp_auth_proto": "SHA", "snmp_auth_pass": None, "snmp_priv_proto": "AES",
             "snmp_priv_pass": None, "ssh_user": None, "ssh_pass": None, **fields}
@@ -199,7 +199,7 @@ def test_update_keeps_rw_secrets_left_none_and_clears_them_with_empty(api, tmp_p
 
 
 def test_update_from_the_current_frontend_leaves_the_new_fields_alone(api, tmp_path):
-    """The form of today's app.js knows none of the new fields. Its PUT must neither reset the driver to procurve, nor switch SNMP
+    """Today's switch form (sv-admin.js editSwitch) knows none of the new fields. Its PUT must neither reset the driver to procurve, nor switch SNMP
     writing off, nor drop the RW user (the write path would then silently fall back to the read identity)."""
     sid = create(api, driver="cisco", snmp_write=True, snmp_community="ro-s3cret", snmp_rw_community="rw-s3cret", **RW_V3)
     before = stored(tmp_path, sid)

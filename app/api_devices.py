@@ -98,8 +98,9 @@ async def unknown_devices(user=Depends(auth.current_user)):
             # devices behind it; such entries are flagged and listed after the unflagged ones, so they push no one past the cap.
             if p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]):
                 continue
-            # "uplink_lldp" wherever the port table shows "Uplink (unbestätigt)" (app.js): an uplink nobody confirms (up, so not uc
-            # here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop protects such ports).
+            # "uplink_lldp" wherever the port table shows "Uplink (unbestätigt)" (sv-core.js isUnconfirmedUplink): an uplink nobody
+            # confirms (up, so not uc here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop
+            # protects such ports).
             # Not on a port that is an uplink only by a base MAC learned on it ("bm" without a link): the flag says "per LLDP" (Phase 3
             # Task 9 left this list as it was, docs/logik-phase3.md "Bekannte Grenzen").
             peer = any(e[0] in keys for e in p["l"])

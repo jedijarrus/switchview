@@ -69,7 +69,7 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
     except ValueError:
         ip = None
     # A zone id ("fe80::1%eth0") is refused like a missing server: it lands in a CLI line, and ipaddress takes any text after the "%",
-    # a line break included (§6 (a)). main.put_settings refuses it on saving; this covers a value stored before that.
+    # a line break included (§6 (a)). api_settings.put_settings refuses it on saving; this covers a value stored before that.
     if ip is None or getattr(ip, "scope_id", None) is not None:
         blocked.append({"port": "*", "reason": "RADIUS-Server (PacketFence-IP) fehlt in den Einstellungen"})
         return {"commands": [], "shown": [], "blocked": blocked, "warnings": [], "expected": {}}

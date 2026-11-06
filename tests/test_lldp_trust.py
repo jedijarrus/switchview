@@ -208,8 +208,9 @@ async def test_a_flood_does_not_push_out_a_device_the_router_knows(net):
 
 async def test_a_port_the_uplink_backstop_protects_is_flagged_as_an_unconfirmed_uplink(net):
     """CAT-A's Gi1/0/2 sees CAT-B by LLDP but names no port of it (PortId a MAC address): no link, so build_map marks it neither "up"
-    nor "uc". The backstop of changes.inventory protects it all the same, and the port table shows "Uplink (unbestätigt)" (app.js:
-    not up, its LLDP neighbour a managed switch). The device behind it is flagged the same way; the one behind an access point is not."""
+    nor "uc". The backstop of changes.inventory protects it all the same, and the port table shows "Uplink (unbestätigt)"
+    (sv-core.js isUnconfirmedUplink: not up, its LLDP neighbour a managed switch). The device behind it is flagged the same way; the
+    one behind an access point is not."""
     cat = {**W_CATALYST, "vmVlan": CATALYST_VMVLAN}
     a = await add(net, "CAT-A", "10.0.0.1", "cisco", cat, lldp("2", "CAT-B", "00 1A 2B 3C 4D 5E", "to-core"),
                   lldp("1", "ap-1.example", "eth0", "AP"), fdb("2", MAC1), fdb("1", MAC2))

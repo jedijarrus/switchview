@@ -216,7 +216,7 @@ def _run_show(row, commands: list[str]) -> dict[str, str]:
 
 
 def error_text(e: Exception) -> str:
-    """An error as the connection test, the backup and "Anmeldungen anzeigen" (main.port_access) report it: its type and text, the
+    """An error as the connection test, the backup and "Anmeldungen anzeigen" (api_switches.port_access) report it: its type and text, the
     text cut to 200 characters, except for a HostKeyMismatch (SwitchView's own text, bounded by the 64-character host), whose end
     says what to do."""
     return f"{type(e).__name__}: {e if isinstance(e, HostKeyMismatch) else str(e)[:200]}"
