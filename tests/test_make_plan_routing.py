@@ -998,3 +998,18 @@ def test_poe_must_be_a_json_boolean(api, fake, value):
     r = plan(api, switch(api, "procurve"), {"ports": ["1"], "change": {"poe": value}})
     assert r.status_code == 422 and r.json()["detail"][0]["loc"] == ["body", "change", "poe"], r.text
     assert fake.calls == []
+
+
+def test_the_api_serves_the_follow_up_actions_of_each_change(api, fake, tmp_path):
+    """GET /api/changes and GET /api/changes/{id} carry can_revert and can_save (changes.actions_of, main._change_out): the UI offers
+    "Rückgängig" and "Trotzdem speichern" by these flags alone."""
+    sid = switch(api, "procurve", ssh=True)
+    before = {"2": {"u": "20"}}
+    want = {add_change(tmp_path, sid, before=before, mechanism="ssh", status="failed", sent=1): [True, True],
+            add_change(tmp_path, sid, before=before, mechanism="ssh", status="failed", sent=0): [False, False],
+            add_change(tmp_path, sid, before=before, mechanism="snmp", status="unclear", sent=1): [True, False],
+            add_change(tmp_path, sid, before=before, mechanism=None, status="ok", saved=1): [True, False]}
+    listed = {c["id"]: [c["can_revert"], c["can_save"]] for c in api.get("/api/changes").json()}
+    single = {cid: [api.get(f"/api/changes/{cid}").json()[k] for k in ("can_revert", "can_save")] for cid in want}
+    assert listed == single == want
+    assert {type(v) for flags in listed.values() for v in flags} == {bool}

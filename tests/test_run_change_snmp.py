@@ -25,13 +25,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import pytest
-from netmiko.exceptions import NetmikoTimeoutException
+from netmiko.exceptions import NetmikoTimeoutException, ReadTimeout
 
 import cfgparse
 import changes
 import config
 import crypto
 import db
+import dbfix
 import drivers
 import main
 import snmp
@@ -559,6 +560,18 @@ async def test_a_successful_revert_marks_the_change_reverted(env):
     sid, cid = await forward_port3(env)
     rid, _ = await apply(sid, {"mode": "revert", "of": cid})
     assert (await run(env, rid))["status"] == "ok" and (await change(cid))["reverted_by"] == rid
+
+
+async def test_a_failing_revert_mark_costs_the_end_of_an_snmp_change_nothing(env, monkeypatch):
+    """_close notes the revert (_mark_reverted) through _logged, as run_change does: when that write fails, the revert still ends with
+    its result, its audit row and its re-poll; only the mark "zurückgenommen" is missing (the log says why)."""
+    sid, cid = await forward_port3(env)
+    rid, _ = await apply(sid, {"mode": "revert", "of": cid})
+    monkeypatch.setattr(changes, "_mark_reverted", dbfix.raising_async_fn(RuntimeError("database is locked")))
+    env.repolls.clear()
+    ch = await run(env, rid)
+    assert (ch["status"], ch["finished_at"] is not None, (await change(cid))["reverted_by"]) == ("ok", True, None)
+    assert (await audit_rows())[-1] == ("change_ok", str(sid), f"#{rid} {ch['summary']}, mechanism: snmp") and env.repolls == [sid]
 
 
 @pytest.mark.parametrize("set_mode, read_error, status, sent", [
@@ -1303,6 +1316,55 @@ async def test_r27_a_failed_ssh_read_in_fresh_cfg_invalidates(env):
     with pytest.raises(RuntimeError, match=SSH_DOWN):
         await changes.fresh_cfg(sid)
     assert env.ssh == [("backup_config", sid)]
+
+
+def age_s(taken_at: str) -> float:
+    """How old a switch_cfg.taken_at is, in seconds."""
+    return (datetime.now(timezone.utc) - datetime.strptime(taken_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds()
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["same-process", "after-a-restart"])
+async def test_r27_ssh_lines_without_a_read_back_leave_no_young_cached_config(env, monkeypatch, restart):
+    """send_config_set raises after the switch took the line (netmiko's ReadTimeout, the answer lost): the change ends unclear without
+    a read-back. The read from before it must not stand for the switch then. Before the line goes out the cached entry is dropped
+    (the R27 mark) and aged past fresh_cfg's window (so a hard kill mid-send leaves it so too), and run_change's end does not store
+    the read from before as the fresh one: the next fresh_cfg reads for real, also after a restart (the mark is gone), and the revert
+    this unclear change offers previews the line that takes it back instead of "nothing to change"."""
+    sid = await env.switch("procurve", ssh=True)
+    env.allow_ssh()
+    await changes.store_cfg(sid, SSH_CONFIG)                    # the young entry the preview left
+    real, at_send = FakeSSH.send_config_set, []
+
+    def send_then_time_out(self, cmds, **kwargs):
+        [(taken_at,)] = dbfix.query("SELECT taken_at FROM switch_cfg WHERE switch_id = ?", (sid,))
+        at_send.append((sid in changes._cfg_stale, age_s(taken_at) > changes.CFG_MAX_AGE_S))
+        real(self, cmds, **kwargs)                              # the switch takes the line: it now runs SSH_AFTER
+        raise ReadTimeout("Pattern not detected")
+
+    monkeypatch.setattr(FakeSSH, "send_config_set", send_then_time_out)
+    cid = await ssh_change(env, sid)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["sent"], at_send) == ("unclear", 1, [(True, True)])
+    if restart:
+        changes._cfg_stale.clear()                              # a restart: the in-process mark is gone
+    env.ssh.clear()
+    assert await changes.fresh_cfg(sid) == cfgparse.parse_config(SSH_AFTER)
+    assert env.ssh == [("backup_config", sid), ("store_cfg", sid)]
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(mode="revert", of=cid)))[0]
+    assert (plan["mechanism"], plan["shown"]) == ("ssh", ["vlan 99 untagged 2"])
+
+
+async def test_an_ssh_save_keeps_its_read_as_the_cached_config(env):
+    """write memory does not change the running configuration: a save, which sends no line, still leaves its read as the young
+    switch_cfg entry; only lines that went out without a read-back drop it."""
+    sid = await env.switch("procurve", ssh=True)
+    env.allow_ssh()
+    cid = await changes.create_change(sid, USER, "save", "Speichern", {}, {"shown": [], "desired": {}, "before": {}, "mechanism": "ssh"})
+    assert (await run(env, cid))["status"] == "ok"
+    [(taken_at,)] = await sql("SELECT taken_at FROM switch_cfg WHERE switch_id = ?", (sid,))
+    assert age_s(taken_at) < 60 and sid not in changes._cfg_stale
+    env.ssh.clear()
+    assert await changes.fresh_cfg(sid) == cfgparse.parse_config(SSH_CONFIG) and env.ssh == []
 
 
 @pytest.mark.parametrize("outcome, stale", [("ok", True), ("unclear", True), ("aborted", False)])

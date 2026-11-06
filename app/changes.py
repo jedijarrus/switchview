@@ -56,6 +56,11 @@ SNMP_UNSAVED = "Änderung ist aktiv, aber NICHT dauerhaft gespeichert – am Swi
 # Hinter jedem Schritt, mit dem ein SNMP-Lauf nach dem SET unklar endet, je nach snmp_autosave des Treibers
 SNMP_KEPT = {True: "Was der Switch davon übernommen hat, wirkt schon und ist gespeichert (er speichert SNMP-Änderungen selbst).",
              False: "Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert."}
+# Behind each step with which an SSH run ends unclear, by what was going out: lines (send_config_set, and a read-back that does not
+# match) or write memory. The progress dialog shows that step, as over SNMP (app.js resultHead).
+SSH_KEPT = {"lines": SNMP_KEPT[False], "save": "Ob der Switch gespeichert hat (write memory), ist offen."}
+# The error of a run whose task was cancelled (the app shut down): unclear once something went out, failed before
+CANCELLED = "Abgebrochen (Prozess beendet)"
 
 
 def _now() -> str:
@@ -593,12 +598,14 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
 
 # ── Konfiguration lesen (Cache) ───────────────────────────────────────────────
 # R27: Switches, deren zwischengespeicherter SSH-Read (switch_cfg) nicht mehr zaehlt: per SSH war die Konfiguration zuletzt nicht zu
-# lesen (run_change kam nicht bis zur running-config, fresh_cfg las vergeblich), oder ein SNMP-SET hat den Switch seither geaendert.
+# lesen (run_change kam nicht bis zur running-config, fresh_cfg las vergeblich), oder ein SNMP-SET hat den Switch seither geaendert, or
+# run_change sent lines (it reads back and stores the result; without a read-back, after an exception mid-send, the mark stays).
 # fresh_cfg liest fuer sie wirklich, statt bis zu max_age_s lang aus dem Cache: so merkt die Vorschau, dass SSH weg ist, und kann auf
 # SNMP ausweichen, statt eine SSH-Aenderung zu planen, die beim Ausfuehren scheitert. Die Zeile in switch_cfg bleibt (die Karte zeigt
 # daraus NAC-Zustand und RADIUS-Bereitschaft); ein erfolgreicher Read (store_cfg) hebt die Marke auf. Im Prozess gehalten wie die Locks
 # (Single-Worker); nach einem Neustart kostet das hoechstens einen vergeblichen SSH-Versuch. Nur der SNMP-SET muss den Neustart
-# ueberstehen (sonst zeigte eine SSH-Vorschau den Stand von vor ihm): er altert dazu taken_at (age_cfg).
+# ueberstehen (sonst zeigte eine SSH-Vorschau den Stand von vor ihm): er altert dazu taken_at (age_cfg). So do lines over SSH, before
+# they go out: an unclear change could not be taken back otherwise, its revert would plan against the read from before it.
 _cfg_stale: set[int] = set()
 CFG_MAX_AGE_S = 600    # so lange nimmt fresh_cfg einen SSH-Read aus switch_cfg
 
@@ -695,8 +702,11 @@ async def run_change(cid: int):
 
     sent = 1 goes into the row right before send_config_set and right before write memory: from there on the switch may have taken
     something. An exception after that point ends "unclear", not "failed" (the SNMP way's rule): netmiko's ReadTimeout from
-    send_config_set, say, comes after the lines went out. A line the switch refused (ConfigInvalidException) stays "failed", with
-    sent = 1 (the lines before it can be in effect). A revert that ends ok marks the change it took back (_mark_reverted)."""
+    send_config_set, say, comes after the lines went out; its last step says what that leaves open (SSH_KEPT). A line the switch
+    refused (ConfigInvalidException) stays "failed", with sent = 1 (the lines before it can be in effect). A cancelled task (the app
+    shut down) ends the same way with CANCELLED, as on the SNMP way. Before lines go out the cached read is aged and dropped (R27): the
+    end stores the read-back as the fresh read, or the read from before when no line went out; after lines without a read-back it
+    stores neither. A revert that ends ok marks the change it took back (_mark_reverted)."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
             ch = await cur.fetchone()
@@ -720,14 +730,22 @@ async def run_change(cid: int):
         await _step(cid, steps, mask(text), level)
 
     pre = post = None
-    status, error, saved, output = "failed", None, 0, ""
-    sent = False    # from here on the switch may have taken something (changes.sent)
+    status, error, saved, output = None, None, 0, ""    # status None to the end: the task was cancelled
+    sent, kept, lines = False, "", False    # sent: changes.sent; kept: what is open then (SSH_KEPT); lines: lines went out
 
-    async def going_out():
-        nonlocal sent
+    async def going_out(what: str):
+        """Right before `what` ("lines" or "save", SSH_KEPT) goes out to the switch. Lines change the running-config: the cached read
+        is aged first (it then stays so after a hard kill or a restart, as on the SNMP way) and dropped once sent is in the row."""
+        nonlocal sent, kept, lines
+        if what == "lines":
+            await age_cfg(sid)
         if not sent:
             await _upd(cid, sent=1)    # before it goes out: if writing the row fails, nothing is sent
             sent = True
+        kept = SSH_KEPT[what]
+        if what == "lines":
+            lines = True
+            invalidate_cfg(sid)
 
     try:
         inv = await inventory(sid) if kind == "ports" else None
@@ -769,7 +787,7 @@ async def run_change(cid: int):
                     await _upd(cid, before=json.dumps(plan["before"]))
                 if plan["commands"]:
                     await step(f"Sende {len(plan['commands'])} Befehle")
-                    await going_out()
+                    await going_out("lines")
                     try:
                         output = await asyncio.to_thread(conn.send_config_set, plan["commands"], read_timeout=30,
                                                          error_pattern=ERROR_PATTERN, cmd_verify=True)
@@ -789,11 +807,11 @@ async def run_change(cid: int):
                         bad = verify_ports(after, plan["desired"])
                     if bad:
                         status, error = "unclear", "Prüfung nach der Änderung passt nicht: " + "; ".join(bad[:8])
-                        await step(error + ". Nicht gespeichert.", "error")
+                        await step(f"{error}. {kept}", "error")
                         return
                     await step("Prüfung ok")
                 await step("Speichere (write memory)")
-                await going_out()
+                await going_out("save")
                 await asyncio.to_thread(conn.save_config)
                 saved, status = 1, "ok"
                 await step("Gespeichert", "ok")
@@ -804,16 +822,21 @@ async def run_change(cid: int):
             invalidate_cfg(sid)
         status, error = ("unclear" if sent or post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
         _log_masked(cid, e, mask)
-        await step(error, "error")
+        await step(f"{error}. {kept}" if sent else error, "error")
     finally:
+        if status is None:    # did not run to its end: the task was cancelled (the app shut down)
+            status, error = ("unclear" if sent else "failed"), CANCELLED
+            await _logged(cid, "Abbruch vermerken", step(f"{error}. {kept}" if sent else error, "error"))
         await _upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=_now(), output=mask(output or ""))
         # Each step on its own: what fails is logged and costs the rest nothing, audit and re-poll run always. A read that does not
-        # parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped (R27).
+        # parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped (R27). After lines without a
+        # read-back the read from before them is no fresh read: the entry stays dropped and aged (going_out).
         if pre:
             await _logged(cid, "Sicherung vorher", sshcli.store_backup(sid, pre, f"vor #{cid}"))
         if post:
             await _logged(cid, "Sicherung nachher", sshcli.store_backup(sid, post, f"nach #{cid}"))
-        if (post or pre) and not await _logged(cid, "Konfiguration auswerten", store_cfg(sid, post or pre)):
+        fresh = post or (None if lines else pre)
+        if fresh and not await _logged(cid, "Konfiguration auswerten", store_cfg(sid, fresh)):
             invalidate_cfg(sid)
         if kind == "save" and status == "ok" and req.get("of"):
             await _upd(int(req["of"]), saved=1)
@@ -976,7 +999,7 @@ async def _run_snmp(cid: int, ch, row):
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:
         if status is None:  # nicht zu Ende gelaufen: der Task wurde abgebrochen
-            status, error = ("unclear" if sent else "failed"), "Abgebrochen (Prozess beendet)"
+            status, error = ("unclear" if sent else "failed"), CANCELLED
             steps.append([_now(), f"{error}. {kept}" if sent else error, "error"])
         await _close(cid, ch, status, error and mask(error), saved, mask(output or ""), steps)
 
@@ -1051,7 +1074,7 @@ async def _close(cid: int, ch, status: str, error: str | None, saved: int, outpu
     revert that ended ok marks the change it took back (_mark_reverted), as on the SSH way."""
     sid = ch["switch_id"]
     await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
-    await _mark_reverted(ch, cid, status)
+    await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))    # as in run_change: audit and re-poll run always
     await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
     if status in ("ok", "unclear", "failed") and ch["kind"] != "save":
         asyncio.create_task(_repoll(sid))

@@ -492,16 +492,22 @@
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };
   const chPill = c => `<span class="pill ${CH[c.status] ? CH[c.status][1] : "neutral"}">${CH[c.status] ? CH[c.status][0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
   const stepsHtml = c => `<ul class="steps">${(c.steps || []).map(x => `<li class="${esc(x[2])}"><span class="t">${esc(fmtTime(x[0]).split(", ").pop())}</span><span>${esc(x[1])}</span></li>`).join("")}</ul>`;
-  // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. "unklar" per SNMP in den Worten des Servers: sein letzter Fehlerschritt ist
-  // der Fehler plus, ob das Übernommene schon gespeichert ist (nach dem Treiber zur Laufzeit). Beginnt er nicht mit dem Fehler der Änderung
-  // (etwa nach einem Neustart, der nur den Fehler setzt), gilt der Fehler allein. Per SSH speichert erst write memory nach der Prüfung.
+  // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. "unklar" in den Worten des Servers: sein letzter Fehlerschritt ist der Fehler
+  // plus, was offen ist (per SNMP, ob das Übernommene schon gespeichert ist, nach dem Treiber zur Laufzeit; per SSH changes.SSH_KEPT: was
+  // der Switch von den Befehlen übernommen hat, wirkt ungespeichert, oder ob write memory durchging). Beginnt er nicht mit dem Fehler der
+  // Änderung (etwa nach einem Neustart, der nur den Fehler setzt), gilt per SNMP der Fehler allein, per SSH mit dem Satz für Befehle. Eine
+  // SSH-Änderung, die danach gespeichert wurde („Trotzdem speichern“, R42), heißt gespeichert.
   function resultHead(c) {
     const lastErr = [...(c.steps || [])].reverse().find(x => x[2] === "error"), err = c.error || "";
-    const unclear = c.mechanism === "snmp" ? (lastErr && lastErr[1].startsWith(err) ? lastErr[1] : err)
-      : `${sentence(c.error || "")} ${c.saved ? "Die Änderung ist gespeichert." : "Der Switch läuft mit der Änderung, sie ist aber nicht gespeichert."}`;
+    const told = lastErr && lastErr[1].startsWith(err) ? lastErr[1] : "";
+    const unclear = c.mechanism === "snmp" ? (told || err)
+      : c.saved ? `${sentence(err)} Die Änderung ist gespeichert.`
+      : told && told !== err ? told : `${sentence(err)} Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert.`;
+    // "Abgebrochen durch Neustart …" (changes.mark_interrupted) reads "Abgebrochen: durch Neustart …", not "Abgebrochen: Abgebrochen …"
+    const aborted = err.replace(/^Abgebrochen\s+/, "");
     return { ok: c.saved ? `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>` : `<div class="banner warn"><b>Erledigt, aber nicht dauerhaft gespeichert – am Switch speichern.</b></div>`,
       unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(unclear)}</span></div>`,
-      failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(c.error || "")}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(c.error || "")}</span></div>` }[c.status] || "";
+      failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(err)}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(aborted)}</span></div>` }[c.status] || "";
   }
   async function runProgress(s, id) {
     modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
