@@ -239,10 +239,12 @@
 
   async function previewChange(s, payload, back) {
     const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
-    modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
+    const wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
     let r, row;
+    // A live read takes seconds: closed meanwhile (Back, Escape, ✕, the login) or replaced by another dialog, the answer opens nothing
     try { [r, row] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveRow(s)]); }
-    catch (e) { modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
+    catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
+    if (!modalShown(wait)) return;
     const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp", caps = (row && row.caps) || s.caps || [];
     // Per SNMP gibt es kein Staging und kein Backup: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das
     // selbst tut (snmp_autosave, R26), und der speichert dabei die gesamte laufende Konfiguration (welche SSH-Änderungen das mitspeichert,

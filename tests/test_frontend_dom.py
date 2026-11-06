@@ -171,10 +171,44 @@ def test_an_old_bookmark_resolves_without_an_extra_history_entry():             
     assert in_dom(js, hash="#switch=SW%20A") == [[["replace", "#switch=SW%20A"], ["replace", "#sw=7"]], "#sw=7"]
 
 
-def test_start_never_pushes():
+@pytest.mark.parametrize("hash, want", [("", "#overview"), ("#%", "#overview"), ("#vlans", "#vlans")])
+def test_start_never_pushes(hash, want):
+    """No hash and "#%" are not the hash start() shows: a push there would put an extra #overview in front of the page."""
     assert in_dom('(async () => { api = async () => ({name: "x"}); ' + NO_VIEWS + 'await start(); return history.calls; })()',
-                  hash="#vlans") == [["replace", "#vlans"]]
+                  hash=hash) == [["replace", want]]
+
+
+def test_a_hashchange_alone_renders_the_view_of_the_hash():
+    """hashchange on its own, without a popstate before it, shows the view of the hash."""
+    assert in_dom(NO_VIEWS + '$("#app").hidden = false; location.hash = "#vlans"; window.fire("hashchange"); [current, history.calls]') == [
+        "vlans", []]
 
 
 def test_the_browser_does_not_restore_the_scroll_position():                           # T4-d
     assert in_dom("history.scrollRestoration") == "manual"
+
+
+# previewChange with /plan pending until the test answers it (liveRow's /api/switches answers [] at once). The loading dialog has
+# no buttons, so #m-foot lists only those of a dialog opened after it
+PENDING_PLAN = (NO_VIEWS + '$("#app").hidden = false; let answer; '
+                'api = (m, u) => u.endsWith("/plan") ? new Promise((ok, no) => { answer = [ok, no]; }) : Promise.resolve([]); '
+                'const p = previewChange({id: 1, k: "SW A", caps: []}, {mode: "ports", ports: ["1"], change: {untagged: 5}}); ')
+PLAN = ('{blocked: [], commands: ["switchport access vlan 5"], warnings: [], summary: "Port 1: VLAN 5", kind: "ports", mechanism: "ssh", '
+        'token: "t"}')
+SHOWN = '[$("#modal").hidden, $("#app").inert, $("#m-title").textContent, $("#m-foot").children.map(b => b.textContent)]'
+BACK = 'location.hash = "#vlans"; window.fire("popstate"); '
+ESCAPE = 'document.fire("keydown", {key: "Escape"}); '
+
+
+@pytest.mark.parametrize("meanwhile, answer, want", [
+    ("", "answer[0](%s)" % PLAN, [False, True, "Vorschau", ["Abbrechen", "Ausführen"]]),
+    ("", 'answer[1](new Error("SSH: Zeitüberschreitung"))', [False, True, "Vorschau", ["Schließen"]]),
+    (BACK, "answer[0](%s)" % PLAN, [True, False, "Vorschau", []]),
+    (BACK, 'answer[1](new Error("SSH: Zeitüberschreitung"))', [True, False, "Vorschau", []]),
+    (ESCAPE, "answer[0](%s)" % PLAN, [True, False, "Vorschau", []]),
+    (ESCAPE + 'modal("Port 2 bearbeiten", "", []); ', "answer[0](%s)" % PLAN, [False, True, "Port 2 bearbeiten", []]),
+    ('showLogin(); ', 'answer[1](new Error("Bitte erneut anmelden"))', [True, False, "Vorschau", []])],
+    ids=["preview", "error", "back-preview", "back-error", "escape", "escape-other-dialog", "login"])
+def test_a_preview_closed_while_the_switch_is_read_stays_closed(meanwhile, answer, want):     # T4-c, Review Focus 3
+    """Back, Escape or the login close the loading dialog, or another dialog replaces it: the late answer of /plan opens nothing."""
+    assert in_dom('(async () => { ' + PENDING_PLAN + meanwhile + answer + '; await p; return ' + SHOWN + '; })()') == want

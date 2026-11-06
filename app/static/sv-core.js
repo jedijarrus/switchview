@@ -70,15 +70,20 @@
   }
   document.addEventListener("keydown", onLayerKey);
 
-  // The opener of the first dialog of a chain (form → preview → progress replace the content of the one modal)
-  let modalLastFocus = null;
+  // The opener of the first dialog of a chain (form → preview → progress replace the content of the one modal); modalSeq counts the
+  // dialogs opened, modal() returns the number of its dialog
+  let modalLastFocus = null, modalSeq = 0;
+  // Whether dialog n (the return of modal()) is still the one shown: not closed (Back, Escape, ✕, the login) and not replaced by another
+  const modalShown = n => !$("#modal").hidden && n === modalSeq;
   function modal(title, bodyHtml, buttons = []) {
     if ($("#modal").hidden) modalLastFocus = document.activeElement;
+    modalSeq++;
     $("#m-title").textContent = title; $("#m-body").innerHTML = bodyHtml; $("#m-body").onclick = null; // Klick-Handler gehört zum jeweiligen Dialog
     const foot = $("#m-foot"); foot.innerHTML = "";
     buttons.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
     $("#modal").hidden = false; syncLayers();
     const f = $("#m-body input, #m-body select, #m-foot .btn"); if (f) f.focus();
+    return modalSeq;
   }
   // syncLayers first: a browser does not focus an element inside an inert subtree
   function closeModal() { $("#modal").hidden = true; syncLayers(); restoreFocus(modalLastFocus); }
