@@ -127,7 +127,8 @@ from browsers without a device cookie, it refuses such browsers (HTTP 429) until
 in which the emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out.
 Entra SSO is never throttled; an access token is refused where an id_token is expected. The fetch of Microsoft's signing keys
 (JWKS) waits at most 5 seconds; after a fetch that could not reach Microsoft, SSO logins are refused for 30 seconds without a new
-fetch (the emergency login still works). A refused token is one warning line in the log, without a traceback.
+fetch (the emergency login still works), and the login page asks to try again in half a minute. A refused token is one warning line
+in the log, without a traceback.
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 

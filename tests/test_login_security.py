@@ -284,7 +284,11 @@ def test_a_failed_jwks_fetch_blocks_further_fetches_for_a_while(login_api, monke
     calls = []
     monkeypatch.setattr(auth, "_jwks_client", lambda tenant: failing_jwks(calls))
     token = jwt.encode({"sub": "s"}, "k", algorithm="HS256", headers={"kid": "a"})
-    assert [login_api.post("/api/auth/azure", json={"id_token": token}).status_code for _ in range(2)] == [401, 401] and len(calls) == 1
+    answers = [login_api.post("/api/auth/azure", json={"id_token": token}) for _ in range(2)]
+    assert [r.status_code for r in answers] == [401, 401] and len(calls) == 1
+    # final review: the login page shows the detail, so the user learns to wait instead of taking SSO for broken; the failed fetch and
+    # every refusal of the cooldown after it say the same (any other token error keeps the generic detail: test_the_expected_token_errors)
+    assert [r.json()["detail"] for r in answers] == [auth.JWKS_DOWN, auth.JWKS_DOWN]
 
 
 def test_an_invalid_token_is_logged_without_a_traceback(login_api, caplog):

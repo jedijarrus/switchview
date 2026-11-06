@@ -170,7 +170,9 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
         raise HTTPException(403, str(e))
     except auth.TOKEN_ERRORS as e:    # an expected refusal (bad token, JWKS unreachable): one line, no traceback (a flood fills no log)
         log.warning("Anmeldung über Microsoft abgelehnt: %s", e)
-        raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
+        # Microsoft unreachable (this fetch, or the cooldown after one): the login page says to wait; any other reason stays unnamed
+        jwks_down = str(e) == auth.JWKS_DOWN or isinstance(e, auth.jwt.PyJWKClientConnectionError)
+        raise HTTPException(401, auth.JWKS_DOWN if jwks_down else "Anmeldung über Microsoft fehlgeschlagen")
     except Exception:  # noqa: BLE001
         log.exception("id_token ungültig")
         raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
