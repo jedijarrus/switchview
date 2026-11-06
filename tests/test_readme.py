@@ -1,8 +1,10 @@
 """M6: the README describes the multivendor product, not a ProCurve/SSH-only one: every driver of the registry with what it can, SNMP
 writes (the per-switch snmp_write switch, the RW credentials, PoE), what stays SSH-only, and the pointer to the German list of known
 limitations and device checks. A driver added to drivers.DRIVERS without a README entry fails here. Phase 2: the README names the
-security settings and links the German security note, which has the sections the plan asks for."""
+security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
+with its module map and a row per decision of its plan."""
 import pathlib
+import re
 
 from drivers import DRIVERS
 
@@ -46,6 +48,28 @@ def test_the_logic_note_is_linked_and_has_its_sections():
     for heading in ("## Was gebaut wurde", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz", "## Was beim Update zu tun ist",
                     "## Später", "## Entscheidungen"):
         assert f"\n{heading}\n" in note, heading
+
+
+def test_the_logic_note_has_its_module_map_and_a_row_per_decision_of_the_plan():
+    """Phase 3 wrap-up: the note maps the moved code ("Wo liegt was") and has one table row per "Entscheidung:" of the plan, counted
+    from the plan itself: A1.. for its exclusions, Tn-a.. for the decisions of task n."""
+    note = (ROOT / "docs" / "logik-phase3.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "superpowers" / "plans" / "2026-11-06-phase3-logik.md").read_text(encoding="utf-8")
+    assert "\n## Wo liegt was\n" in note
+    counts, section = {}, None
+    for line in plan.splitlines():
+        task = re.match(r"### Task (\d+):", line)
+        if task:
+            section = f"T{task[1]}"
+        elif line.startswith("## "):
+            section = "A" if line == "## Ausschlüsse" else None
+        elif line.startswith("- Entscheidung:") and section:
+            counts[section] = counts.get(section, 0) + 1
+    assert set(counts) == {"A"} | {f"T{n}" for n in range(1, 13)}, counts
+    for section, n in counts.items():
+        ids = [f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]
+        for rid in ids:
+            assert f"\n| {rid} |" in note, rid
 
 
 def test_ruff_is_pinned_and_no_file_is_exempt():

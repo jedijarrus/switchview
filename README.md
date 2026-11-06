@@ -10,21 +10,33 @@ The user interface is in German.
 
 **Read (SNMP v2c/v3, every driver)**
 - Switch overview: ports, link/speed, untagged and tagged VLANs, trunks / LAGs, LLDP neighbours, learned MAC addresses, PoE state and power (ProCurve, Cisco)
-- Topology with automatic uplink detection (LLDP, base-MAC matching) and VLAN consistency check per link
+- Topology with automatic uplink detection (LLDP, base-MAC matching) and VLAN consistency check per link; switches are told apart by
+  id, so two switches with the same name each keep their own links and uplinks (links to a switch view read `#sw=<id>`)
 - VLAN × switch matrix, global search (device, IP, MAC, port description)
 - Device names from the OPNsense ARP table (API) plus reverse DNS
+- Port descriptions and VLAN names with non-ASCII characters (umlauts) are shown as text, not as hex
+- A poll that misses a walk still counts: the switch view says "Abfrage unvollständig" and names the gap; when the MAC table, LLDP
+  or the base MAC cannot be read, the values of the last poll are kept (they carry the uplink protection) and merged with what was read
+- A stored credential that can no longer be decrypted, a missing read community (the poll then asks with `public`) or an SNMPv3
+  level lowered because a passphrase is missing or cannot be decrypted is shown as a warning at the switch, in the connection test
+  and in the log; polling goes on as before
 
 **Configuration backups (SSH, ProCurve only)**
-- Nightly `show running-config`, stored only when changed, with diff view
+- Nightly `show running-config`, stored only when changed, with diff view; a change of a masked secret alone counts as a change too
+  (a keyed HMAC of the unmasked text, derived from `SECRET_KEY`, tells it), and its diff says that only masked secrets changed
 - Secrets (RADIUS keys, SNMP communities, password hashes) are masked before storage
 
 **Port changes over SSH (ProCurve)**
 - Port states: **Off**, **On** (switched on, 802.1X/MAC authentication left as it is), **Protected** (fixed VLAN), **Known devices** (MAC authentication), **RADIUS** (802.1X with MAC authentication fallback)
 - Untagged/tagged VLANs, description, devices per port, VLAN for unknown devices
 - Every change shows the exact CLI commands as a preview. At execution time the running config is read again and the plan must still match the preview. After sending, the config is read back and verified; only then `write memory` is issued
-- Uplinks and trunks are protected (expert mode required), 802.1X/MAC auth is never applied to uplinks or trunks
-- Per-switch lock, audit log, one-click revert, "save anyway" for unclear results
-- "Prepare switch" adds the RADIUS prerequisites additively: RADIUS host, CoA (`dyn-authorization`, `time-window 0`), `eap-radius`, `authenticator active` and a park VLAN (3999)
+- Uplinks and trunks are protected (expert mode required), 802.1X/MAC auth is never applied to uplinks or trunks. A port also counts as
+  an uplink when it learns the base MAC of another managed switch or when its LLDP neighbour is a managed switch, on every driver
+- Trunk members can be renamed and switched on/off (on an uplink trunk in expert mode only); VLANs, authentication and PoE only on the trunk
+- Per-switch lock (one change at a time per switch), audit log, one-click revert, "save anyway" for unclear results; revert and
+  "save anyway" are offered only for a change that may have sent something to the switch. A disabled switch takes no change (409)
+- "Prepare switch" adds the RADIUS prerequisites additively: RADIUS host, CoA (`dyn-authorization`, `time-window 0`), `eap-radius`, `authenticator active` and a park VLAN (3999).
+  With a RADIUS server set in the settings, a port change that needs RADIUS requires exactly that server on the switch
 
 **Port changes over SNMP (every driver)**
 - Untagged/tagged VLANs (Q-BRIDGE-MIB; on classic Cisco IOS the access VLAN via `vmVlan`), port on/off (`ifAdminStatus`), description (`ifAlias`) and PoE on/off (POWER-ETHERNET-MIB, where the driver can map PoE entries to ports)
@@ -62,17 +74,21 @@ devices per port, the VLAN for unknown devices, "Prepare switch"), configuration
 
 Known limitations and required device checks (German): [docs/snmp-multivendor.md](docs/snmp-multivendor.md)
 
-Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md)
+Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md) (what was built, where the moved code lives now,
+known limits, checks before production use, what to do on an update, decisions)
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
-- Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately
+- Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately.
+  A failed CoA shows as a hint at the device (the device switches at its next login); a delete that PacketFence does not confirm
+  keeps the device
 - Optional expiry date, nightly expiry job, list of unknown devices on access ports
 
 **Login**
-- Microsoft Entra ID (MSAL popup, ID token verified via JWKS, optional app roles/groups) or a local emergency account
+- Microsoft Entra ID (MSAL popup, ID token verified via JWKS, optional app roles/groups) or a local emergency account. With neither
+  `ENTRA_ALLOWED_ROLES` nor `ENTRA_ALLOWED_GROUPS` set, every user of the tenant may sign in; the start logs a warning
 - Sessions are stored hashed (SHA-256 of the session token), so a copy of the database holds no usable session cookie; sessions
-  from before this change are rehashed at start, nobody is logged out
+  from before this change are rehashed at start, nobody is logged out; expired sessions are removed at start and every hour
 - Log out everywhere: Settings → "Sitzungen" ends every session of your account on every device, the current one included
 
 ## Quick start
@@ -87,9 +103,9 @@ SwitchView listens on port 8080 (see `docker-compose.yml`). Data (SQLite) lives 
 Run it behind a TLS-terminating reverse proxy in production and set `FORWARDED_ALLOW_IPS` and `COOKIE_SECURE` as described under
 [Security](#security).
 
-Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler, the login throttle (`main._LOGIN`), per-switch SSH/poll locks and running changes live in process memory.
+Run it with a **single uvicorn worker** (the `Dockerfile` default; do not add `--workers`): the scheduler (`jobs.scheduler`), the login throttle (`main._LOGIN`), the cache of Microsoft's signing keys with its 30-second cooldown, per-switch SSH/poll locks and running changes (`api_changes._tasks`) live in process memory.
 
-Then add switches in the UI (management IP, driver, SNMP credentials, for ProCurve an optional SSH manager account, optional SNMP write access). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again.
+Then add switches in the UI (management IP, driver, SNMP credentials, for ProCurve an optional SSH manager account, optional SNMP write access). All credentials are stored encrypted with a key derived from `SECRET_KEY` and are never shown again. A credential that can no longer be decrypted (for example after a change of `SECRET_KEY`) is reported in the switch view, the connection test and the settings instead of falling back silently: SSH, "Prepare switch", PacketFence and OPNsense stop with a message rather than send an empty secret, and polling goes on as described under Read. Enter it anew.
 
 ## Security
 
@@ -171,8 +187,9 @@ and "Namen jetzt aktualisieren" in the settings.
 of every change, also of changes stored before the update (masked when they are served; the rows in the database stay as they were),
 and in the log line of a change that ends with an exception; SwitchView never runs `show radius`, `show tech` or `show tacacs`,
 nor an abbreviation of them such as `sh rad` or `sho tech`.
-Switch output is parsed within fixed limits (SNMP output per call, values per walk, port ranges and configuration size), so a hostile
-switch cannot exhaust the single worker's memory with one answer.
+Switch output is parsed within fixed limits (SNMP output per call and 32 MiB per poll, values per walk, 4096 ports per switch, VLAN IDs
+1–4094, port ranges and configuration size), off the event loop, so a hostile switch cannot exhaust the single worker's memory with one
+answer nor stall the UI; a cancelled SNMP call ends its net-snmp process.
 
 ## Requirements
 
