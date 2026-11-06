@@ -1478,7 +1478,7 @@ def argvs(monkeypatch) -> list:
     """snmp._run replaced by a recorder: the argv net-snmp would get."""
     seen = []
 
-    async def fake_run(cmd, timeout, strict=False):
+    async def fake_run(cmd, timeout, strict=False, **kwargs):    # kwargs: the cred for the call's snmp.conf
         seen.append(cmd)
         return ""
     monkeypatch.setattr(snmp, "_run", fake_run)

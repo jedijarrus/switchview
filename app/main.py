@@ -306,6 +306,12 @@ async def validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"detail": _renderable(jsonable_encoder(errors))})
 
 
+# The SNMP credential fields, read and RW identity. Their secrets travel in a line of a snmp.conf (snmp._conf_lines, R45), which a
+# NUL, CR or LF would end: such a value is refused here, before it is stored (snmp refuses one stored before, too).
+SNMP_CREDENTIAL_FIELDS = ("snmp_community", "snmp_user", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_community", "snmp_rw_user",
+                          "snmp_rw_auth_pass", "snmp_rw_priv_pass")
+
+
 def _validate(body: SwitchIn):
     try:
         ipaddress.ip_address(body.host)
@@ -320,6 +326,8 @@ def _validate(body: SwitchIn):
     for proto in (body.snmp_priv_proto, body.snmp_rw_priv_proto):
         if proto and proto not in snmp.PRIV_PROTOS:
             raise HTTPException(422, "Unbekanntes SNMP-Verschlüsselungsverfahren")
+    if any(c in (getattr(body, k) or "") for k in SNMP_CREDENTIAL_FIELDS for c in snmp.CONF_FORBIDDEN):
+        raise HTTPException(422, "SNMP-Zugangsdaten dürfen keine Zeilenumbrüche oder Nullzeichen enthalten")
 
 
 def _columns(body: SwitchIn, update: bool) -> dict:

@@ -106,6 +106,11 @@ Then add switches in the UI (management IP, driver, SNMP credentials, for ProCur
 A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different characters gets a
 warning in the log at every start. Changing the key later means entering every stored credential anew.
 
+SNMP credentials never go on a command line, where any local process could read them (`ps`, `/proc/<pid>/cmdline`): for each SNMP
+call SwitchView writes the community or the v3 passphrases into a short-lived `snmp.conf` (mode 0600, in a private directory under
+`/dev/shm`, removed when the call ends) and points net-snmp at it with `SNMPCONFPATH`. An SNMP credential with a line break or a NUL
+character is refused when the switch is saved.
+
 ## Requirements
 
 - Network access from SwitchView to the switches: UDP 161 (SNMP), TCP 22 (SSH, ProCurve)

@@ -2,50 +2,165 @@
 
 Lesen: Ausgabe immer numerisch (-On), ohne Typ (-Oq), Enums als Zahl (-Oe),
 Timeticks als Zahl (-Ot). Bitmaps (VLAN-Portlisten, MACs) mit -Ox als Hex.
+
+Credentials never go into the argv, which every process list shows (R45): the community and the v3 passphrases reach net-snmp through
+a snmp.conf of the call's own (see _run).
 """
 import asyncio
+import logging
 import os
 import re
+import shutil
+import tempfile
+
+log = logging.getLogger("switchview.snmp")
 
 AUTH_PROTOS = {"SHA", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "MD5"}
 PRIV_PROTOS = {"AES", "AES-192", "AES-256", "DES"}
 # snmpset: 5 s je Versuch, eine Wiederholung (siehe set_vars)
 SET_TIMING = ("-t", "5", "-r", "1")
 # What one SNMP call may hand to the app, whatever the agent sends (a hostile or broken one must not fill the memory):
-MAX_STDOUT = 8 * 1024 * 1024    # bytes of stdout per call; 64 000 MACs are about 4 MB (see _run)
-MAX_STDERR = 64 * 1024          # bytes of stderr kept per call; the rest is read and dropped (see _run)
+MAX_STDOUT = 8 * 1024 * 1024    # bytes of stdout per call; 64 000 MACs are about 4 MB (see _exec)
+MAX_STDERR = 64 * 1024          # bytes of stderr kept per call; the rest is read and dropped (see _exec)
 MAX_ROWS = 100_000              # values per walk, rows with an OID (see _parse)
 MAX_PORTLIST_BYTES = 8192       # a PortList over bridge ports 1..65535 (dot1dBasePort) needs no more (see portlist_bytes)
 MAX_BRIDGE_PORT = 65535         # the last dot1dBasePort (BRIDGE-MIB); set / clear refuse a higher one (see portlist_set_bit)
-READ_CHUNK = 64 * 1024          # _run reads stdout and stderr in pieces of this size
+READ_CHUNK = 64 * 1024          # _exec reads stdout and stderr in pieces of this size
+SHM_DIR = "/dev/shm"            # where _run puts a call's snmp.conf when it may: a tmpfs, so a secret never reaches a disk
+CONF_FORBIDDEN = "\x00\r\n"     # characters that end a snmp.conf line: a secret with one of them never goes into the file
 
 
 class SnmpError(Exception):
     pass
 
 
+def _level(cred: dict) -> str:
+    """The SNMPv3 security level of cred: authPriv with both pairs (protocol and passphrase), authNoPriv with the auth pair, otherwise
+    noAuthNoPriv."""
+    if cred.get("snmp_auth_proto") and cred.get("snmp_auth_pass"):
+        return "authPriv" if cred.get("snmp_priv_proto") and cred.get("snmp_priv_pass") else "authNoPriv"
+    return "noAuthNoPriv"
+
+
 def _auth_args(cred: dict) -> list[str]:
+    """The net-snmp options of cred's identity, without any secret (they show in every process list): v2c only the version, v3 the
+    user, the security level (_level) and the protocols that level uses. The secrets go into the call's snmp.conf (_conf_lines)."""
     if cred.get("snmp_version") == "3":
-        user = cred.get("snmp_user") or ""
-        args = ["-v3", "-u", user]
-        ap, apass = cred.get("snmp_auth_proto"), cred.get("snmp_auth_pass")
-        pp, ppass = cred.get("snmp_priv_proto"), cred.get("snmp_priv_pass")
-        if ap and apass and pp and ppass:
-            args += ["-l", "authPriv", "-a", ap, "-A", apass, "-x", pp, "-X", ppass]
-        elif ap and apass:
-            args += ["-l", "authNoPriv", "-a", ap, "-A", apass]
-        else:
-            args += ["-l", "noAuthNoPriv"]
+        level = _level(cred)
+        args = ["-v3", "-u", cred.get("snmp_user") or "", "-l", level]
+        if level != "noAuthNoPriv":
+            args += ["-a", cred["snmp_auth_proto"]]
+        if level == "authPriv":
+            args += ["-x", cred["snmp_priv_proto"]]
         return args
-    return ["-v2c", "-c", cred.get("snmp_community") or "public"]
+    return ["-v2c"]
 
 
-async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
-    """Start cmd without a shell and return its stdout. stdout and stderr are read together, READ_CHUNK bytes at a time, up to EOF, then
-    the exit is awaited, all under the one timeout. SnmpError on a timeout; when stdout grows beyond MAX_STDOUT (the process is killed,
-    see _collect); and on an exit code != 0 without output, with strict on EVERY exit code != 0, even when stdout has rows already (see
-    walk). The message of a failed call is the last line of stderr, of which only the first MAX_STDERR bytes are kept."""
-    env = dict(os.environ, MIBS="")
+def _conf_value(value: str) -> str:
+    """value as a quoted snmp.conf word that net-snmp reads back unchanged (read_config.c copy_nword: inside the quotes a backslash
+    takes the next character literally), so a backslash and a quote get one in front. SnmpError for a NUL, CR or LF (CONF_FORBIDDEN):
+    it would end the line, and what follows would be read as a directive of its own."""
+    if any(c in value for c in CONF_FORBIDDEN):
+        raise SnmpError("SNMP-Zugangsdaten enthalten ein unzulässiges Steuerzeichen")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _conf_lines(cred: dict) -> list[str]:
+    """The snmp.conf lines (snmp.conf(5)) with cred's secrets, the counterpart of _auth_args: v2c the community (without one "public",
+    net-snmp needs one), v3 the passphrases its security level uses (_level), none for noAuthNoPriv."""
+    if cred.get("snmp_version") == "3":
+        level = _level(cred)
+        lines = []
+        if level != "noAuthNoPriv":
+            lines.append(f"defAuthPassphrase {_conf_value(cred['snmp_auth_pass'])}")
+        if level == "authPriv":
+            lines.append(f"defPrivPassphrase {_conf_value(cred['snmp_priv_pass'])}")
+        return lines
+    return [f"defCommunity {_conf_value(cred.get('snmp_community') or 'public')}"]
+
+
+def _secrets(cred: dict) -> tuple[str, ...]:
+    """The values of cred that no message may show: the community unless it is "public" (any case, outer whitespace ignored: no
+    secret, R-T), the auth and the priv passphrase; only the ones that are set."""
+    community = cred.get("snmp_community") or ""
+    if community.strip().lower() == "public":
+        community = ""
+    return tuple(v for v in (community, cred.get("snmp_auth_pass"), cred.get("snmp_priv_pass")) if v)
+
+
+def _mask(text: str, secrets: tuple[str, ...]) -> str:
+    """text with each of secrets replaced by "***", the longest first: a secret inside a longer one must not leave the rest standing."""
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return text
+
+
+def _conf_parent() -> str | None:
+    """SHM_DIR when it is a directory this process may create entries in, otherwise None (tempfile's default directory)."""
+    return SHM_DIR if os.path.isdir(SHM_DIR) and os.access(SHM_DIR, os.W_OK | os.X_OK) else None
+
+
+def _new_conf_dir() -> str:
+    """A new, empty directory (mkdtemp, so 0700) in SHM_DIR when that is writable (_conf_parent), otherwise in the default temporary
+    directory. SnmpError when it cannot be made."""
+    try:
+        return tempfile.mkdtemp(prefix="switchview-snmp-", dir=_conf_parent())
+    except OSError as e:
+        raise SnmpError(f"SNMP-Konfiguration für den Aufruf ließ sich nicht anlegen: {e}") from None
+
+
+def _write_conf(conf_dir: str, lines: list[str]) -> None:
+    """The file snmp.conf in conf_dir, new (never one that exists already), readable and writable by this user only, holding lines in
+    UTF-8. SnmpError when it cannot be written."""
+    try:
+        fd = os.open(os.path.join(conf_dir, "snmp.conf"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write("".join(line + "\n" for line in lines))
+    except OSError as e:
+        raise SnmpError(f"SNMP-Konfiguration für den Aufruf ließ sich nicht anlegen: {e}") from None
+
+
+def _remove(conf_dir: str) -> None:
+    """Delete conf_dir with its snmp.conf. A failure is logged, not raised: it must not hide the outcome of the call."""
+    try:
+        shutil.rmtree(conf_dir)
+    except OSError:
+        log.warning("SNMP-Konfiguration %s ließ sich nicht löschen", conf_dir, exc_info=True)
+
+
+async def _run(cmd: list[str], timeout: float, strict: bool = False, *, cred: dict | None = None) -> str:
+    """Start cmd without a shell and return its stdout (see _exec for how it is read and when it fails).
+
+    With cred, its secrets reach the process through a snmp.conf of this call alone (_conf_lines), never through the argv (R45): the
+    file is 0600 (_write_conf), in a directory of its own (_new_conf_dir), empty when cred has no secret to send, and SNMPCONFPATH
+    points the process at that directory, so net-snmp reads no other snmp.conf. The directory goes when the call ends, however it ends
+    (output, error, timeout, cancel, a failed write). A secret with a NUL, CR or LF is a SnmpError before anything is created or
+    started. No SnmpError message carries one of cred's secrets (_secrets): each one is "***"."""
+    if cred is None:
+        return await _exec(cmd, timeout, strict, {})
+    secrets = _secrets(cred)
+    try:
+        lines = _conf_lines(cred)
+        conf_dir = _new_conf_dir()
+        try:
+            _write_conf(conf_dir, lines)
+            return await _exec(cmd, timeout, strict, {"SNMPCONFPATH": conf_dir})
+        finally:
+            _remove(conf_dir)
+    except SnmpError as e:
+        masked = _mask(str(e), secrets)
+        if masked == str(e):
+            raise
+        raise SnmpError(masked) from None    # not chained: the original's message, in a logged traceback, would show the secret
+
+
+async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -> str:
+    """Start cmd without a shell, with os.environ plus MIBS="" plus extra_env, and return its stdout. stdout and stderr are read together,
+    READ_CHUNK bytes at a time, up to EOF, then the exit is awaited, all under the one timeout. SnmpError on a timeout; when stdout
+    grows beyond MAX_STDOUT (the process is killed, see _collect); and on an exit code != 0 without output, with strict on EVERY exit
+    code != 0, even when stdout has rows already (see walk). The message of a failed call is the last line of stderr, of which only
+    the first MAX_STDERR bytes are kept."""
+    env = dict(os.environ, MIBS="", **extra_env)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
     )
@@ -63,7 +178,7 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False) -> str:
 
 
 async def _collect(proc) -> tuple[bytearray, bytes, int]:
-    """(stdout, the first MAX_STDERR bytes of stderr, exit code) of proc, read the way _run says. Once stdout grows beyond MAX_STDOUT,
+    """(stdout, the first MAX_STDERR bytes of stderr, exit code) of proc, read the way _exec says. Once stdout grows beyond MAX_STDOUT,
     proc is killed and, after its exit, SnmpError raised. Both pipes are read to EOF in every case, stderr alongside stdout: a process
     blocked on a full stderr pipe would never finish its stdout, and asyncio closes the process transport only once both pipes have
     closed. A pipe whose reader has paused because nobody reads it any more never does, not even after the kill: its transport would
@@ -214,18 +329,18 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
     if hex_values:
         cmd.append("-Ox")
     cmd += [_host(host), oid]
-    return _parse(await _run(cmd, timeout, strict=strict), hex_strict=strict and hex_values, text_strict=strict and not hex_values)
+    return _parse(await _run(cmd, timeout, strict=strict, cred=cred), hex_strict=strict and hex_values, text_strict=strict and not hex_values)
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
     cmd = ["snmpget", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", _host(host), *oids]
-    return dict(_parse(await _run(cmd, timeout)))
+    return dict(_parse(await _run(cmd, timeout, cred=cred)))
 
 
 async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], timeout: float = 20) -> str:
     """snmpset: schreibt alle `varbinds` = [(oid, typ, wert), ...] mit EINEM Aufruf und liefert die Ausgabe von snmpset.
 
-    `cred` ist die Schreib-Identitaet (RW-Community bzw. v3-User); der Aufrufer baut sie, hier geht sie unveraendert an _auth_args.
+    `cred` ist die Schreib-Identitaet (RW-Community bzw. v3-User); der Aufrufer baut sie, hier geht sie unveraendert an _auth_args und _run (snmp.conf).
     `typ` ist der snmpset-Typbuchstabe: i = INTEGER, u = Unsigned32/Gauge, s = String, x = Hex-String (Wert ohne Trennzeichen, siehe
     portlist_to_hex). Dieses `x` ist ein eigenes Argument zwischen OID und Wert, nicht das `-x` (v3-Privacy-Protokoll) aus _auth_args.
     Wie bei walk/get steht der Host positional hinter den Optionen, und es gibt keine Shell: jedes Argument ist ein eigenes Argv-Element,
@@ -238,7 +353,7 @@ async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], 
     cmd = ["snmpset", *_auth_args(cred), *SET_TIMING, "-On", _host(host)]
     for oid, typ, val in varbinds:
         cmd += [oid, typ, val]
-    return await _run(cmd, timeout)
+    return await _run(cmd, timeout, cred=cred)
 
 
 def hex_to_bytes(val: str) -> bytes:

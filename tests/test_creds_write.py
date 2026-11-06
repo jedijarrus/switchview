@@ -5,10 +5,11 @@ switch has snmp_write on AND a real identity to write with, in this order:
   1. a separate RW identity: the v3 user snmp_rw_user (with snmp_rw_auth_* / snmp_rw_priv_*), which wins over the v2c
      snmp_rw_community;
   2. otherwise the read identity, but only a real one: v3 with a user, or v2c with a NON-EMPTY community;
-and raises snmp.SnmpError with the reason otherwise. Above all it never returns a cred that snmp._auth_args turns into the default
+and raises snmp.SnmpError with the reason otherwise. Above all it never returns a cred that snmp._conf_lines turns into the default
 community "public" (it does that with an empty v2c community: right for polling, fatal for writing). A stored secret that does not
-decrypt, and a v3 password that _auth_args would silently not use, are refusals too, never a quiet fall back to another identity or a
-weaker security level. write=False is the read identity exactly as before.
+decrypt, and a v3 password that the call would silently not use (snmp._auth_args, snmp._conf_lines), are refusals too, never a quiet
+fall back to another identity or a weaker security level. write=False is the read identity exactly as before. What a cred becomes for
+net-snmp is checked in both parts (R45): the argv (_auth_args, no secret) and the call's snmp.conf (_conf_lines, the secrets).
 
 Rows are plain dicts with the switches columns creds_of reads; secrets are stored the way the API stores them (crypto.encrypt with the
 test SECRET_KEY of conftest.py).
@@ -31,6 +32,12 @@ PUBLIC = "Community 'public' wird nicht zum Schreiben verwendet – bitte eine e
 
 def is_public(arg: str) -> bool:
     return arg.strip().lower() == "public"
+
+
+def writes_public(cred: dict) -> bool:
+    """Whether a call with cred hands net-snmp the community "public": in its argv, or as the value of its snmp.conf's defCommunity."""
+    communities = [line[len('defCommunity "'):-1] for line in snmp._conf_lines(cred) if line.startswith("defCommunity ")]
+    return any(is_public(a) for a in snmp._auth_args(cred) + communities)
 
 RO, RW = "ro-c0mmunity", "rw-c0mmunity"
 READ_V3 = {"snmp_version": "3", "snmp_user": "monitor", "snmp_auth_proto": "SHA", "snmp_auth_pass": "ro-auth-pass",
@@ -64,48 +71,55 @@ def v3(user: str, ap=None, apass=None, pp=None, ppass=None) -> dict:
             "snmp_priv_proto": pp, "snmp_priv_pass": ppass}
 
 
-RW_V3_CRED = v3("svwrite", "SHA-256", "rw-auth-pass", "AES-256", "rw-priv-pass")
-RW_V3_ARGS = ["-v3", "-u", "svwrite", "-l", "authPriv", "-a", "SHA-256", "-A", "rw-auth-pass", "-x", "AES-256", "-X", "rw-priv-pass"]
-READ_V3_CRED = v3("monitor", "SHA", "ro-auth-pass", "AES", "ro-priv-pass")
-READ_V3_ARGS = ["-v3", "-u", "monitor", "-l", "authPriv", "-a", "SHA", "-A", "ro-auth-pass", "-x", "AES", "-X", "ro-priv-pass"]
+def v2c_call(community: str) -> tuple[list[str], list[str]]:
+    """What a v2c cred becomes for net-snmp: the version in the argv, the community in the call's snmp.conf."""
+    return ["-v2c"], [f'defCommunity "{community}"']
 
-# (case, columns besides snmp_write=1, the write cred, its net-snmp auth arguments)
+
+RW_V3_CRED = v3("svwrite", "SHA-256", "rw-auth-pass", "AES-256", "rw-priv-pass")
+RW_V3_CALL = (["-v3", "-u", "svwrite", "-l", "authPriv", "-a", "SHA-256", "-x", "AES-256"],
+              ['defAuthPassphrase "rw-auth-pass"', 'defPrivPassphrase "rw-priv-pass"'])
+READ_V3_CRED = v3("monitor", "SHA", "ro-auth-pass", "AES", "ro-priv-pass")
+READ_V3_CALL = (["-v3", "-u", "monitor", "-l", "authPriv", "-a", "SHA", "-x", "AES"],
+                ['defAuthPassphrase "ro-auth-pass"', 'defPrivPassphrase "ro-priv-pass"'])
+
+# (case, columns besides snmp_write=1, the write cred, (its net-snmp auth arguments, its snmp.conf lines))
 WRITABLE = [
-    ("rw v2c community", {"snmp_community": RO, "snmp_rw_community": RW}, v2c(RW), ["-v2c", "-c", RW]),
-    ("rw v3 user", {"snmp_community": RO, **RW_V3}, RW_V3_CRED, RW_V3_ARGS),
-    ("rw v3 wins over rw v2c", {"snmp_community": RO, "snmp_rw_community": RW, **RW_V3}, RW_V3_CRED, RW_V3_ARGS),
-    ("rw v3 beside a read v3", {**READ_V3, **RW_V3}, RW_V3_CRED, RW_V3_ARGS),
-    ("rw v2c beside a read v3", {**READ_V3, "snmp_rw_community": RW}, v2c(RW), ["-v2c", "-c", RW]),
+    ("rw v2c community", {"snmp_community": RO, "snmp_rw_community": RW}, v2c(RW), v2c_call(RW)),
+    ("rw v3 user", {"snmp_community": RO, **RW_V3}, RW_V3_CRED, RW_V3_CALL),
+    ("rw v3 wins over rw v2c", {"snmp_community": RO, "snmp_rw_community": RW, **RW_V3}, RW_V3_CRED, RW_V3_CALL),
+    ("rw v3 beside a read v3", {**READ_V3, **RW_V3}, RW_V3_CRED, RW_V3_CALL),
+    ("rw v2c beside a read v3", {**READ_V3, "snmp_rw_community": RW}, v2c(RW), v2c_call(RW)),
     ("rw v3 authNoPriv", {"snmp_rw_user": "svwrite", "snmp_rw_auth_proto": "SHA", "snmp_rw_auth_pass": "rw-auth-pass"},
-     v3("svwrite", "SHA", "rw-auth-pass"), ["-v3", "-u", "svwrite", "-l", "authNoPriv", "-a", "SHA", "-A", "rw-auth-pass"]),
+     v3("svwrite", "SHA", "rw-auth-pass"), (["-v3", "-u", "svwrite", "-l", "authNoPriv", "-a", "SHA"], ['defAuthPassphrase "rw-auth-pass"'])),
     # the switch form always sends both protocol selects; without the passwords that is noAuthNoPriv, as _auth_args has it
     ("rw v3 noAuthNoPriv, protocols as the form leaves them", {"snmp_rw_user": "svwrite", "snmp_rw_auth_proto": "SHA",
-     "snmp_rw_priv_proto": "AES"}, v3("svwrite", "SHA", None, "AES"), ["-v3", "-u", "svwrite", "-l", "noAuthNoPriv"]),
-    ("empty rw user is no rw user", {"snmp_rw_user": "", "snmp_rw_community": RW}, v2c(RW), ["-v2c", "-c", RW]),
+     "snmp_rw_priv_proto": "AES"}, v3("svwrite", "SHA", None, "AES"), (["-v3", "-u", "svwrite", "-l", "noAuthNoPriv"], [])),
+    ("empty rw user is no rw user", {"snmp_rw_user": "", "snmp_rw_community": RW}, v2c(RW), v2c_call(RW)),
     ("rw passwords without rw user are no rw identity", {"snmp_community": RO, "snmp_rw_auth_proto": "SHA",
-     "snmp_rw_auth_pass": "rw-auth-pass"}, v2c(RO), ["-v2c", "-c", RO]),
-    ("read v2c community", {"snmp_community": RO}, v2c(RO), ["-v2c", "-c", RO]),
-    ("read v3 user", dict(READ_V3), READ_V3_CRED, READ_V3_ARGS),
+     "snmp_rw_auth_pass": "rw-auth-pass"}, v2c(RO), v2c_call(RO)),
+    ("read v2c community", {"snmp_community": RO}, v2c(RO), v2c_call(RO)),
+    ("read v3 user", dict(READ_V3), READ_V3_CRED, READ_V3_CALL),
     ("read v2c, an unused v3 user beside it", {"snmp_community": RO, "snmp_user": "monitor", "snmp_auth_proto": "SHA",
-     "snmp_auth_pass": "ro-auth-pass"}, v2c(RO), ["-v2c", "-c", RO]),
+     "snmp_auth_pass": "ro-auth-pass"}, v2c(RO), v2c_call(RO)),
     # R25 refuses the community "public" only where it would write: "private" is a community like any other (shown insecure)
-    ("rw v2c 'private'", {"snmp_rw_community": "private"}, v2c("private"), ["-v2c", "-c", "private"]),
-    ("read v2c 'private'", {"snmp_community": "private"}, v2c("private"), ["-v2c", "-c", "private"]),
+    ("rw v2c 'private'", {"snmp_rw_community": "private"}, v2c("private"), v2c_call("private")),
+    ("read v2c 'private'", {"snmp_community": "private"}, v2c("private"), v2c_call("private")),
     # ... and a "public" that does not write is no reason to refuse: the rw v3 user wins over the community, which stays unread
-    ("rw v3 wins over a rw 'public'", {"snmp_rw_community": "public", **RW_V3}, RW_V3_CRED, RW_V3_ARGS),
-    ("read v3, an unused read 'public' beside it", {**READ_V3, "snmp_community": "public"}, READ_V3_CRED, READ_V3_ARGS),
+    ("rw v3 wins over a rw 'public'", {"snmp_rw_community": "public", **RW_V3}, RW_V3_CRED, RW_V3_CALL),
+    ("read v3, an unused read 'public' beside it", {**READ_V3, "snmp_community": "public"}, READ_V3_CRED, READ_V3_CALL),
 ]
 
 
-@pytest.mark.parametrize("columns, cred, args", [c[1:] for c in WRITABLE], ids=[c[0] for c in WRITABLE])
-def test_write_identity(columns, cred, args):
+@pytest.mark.parametrize("columns, cred, call", [c[1:] for c in WRITABLE], ids=[c[0] for c in WRITABLE])
+def test_write_identity(columns, cred, call):
     r = row(snmp_write=1, **columns)
 
     got = poller.creds_of(r, write=True)
 
     assert got == cred
-    assert snmp._auth_args(got) == args
-    assert not any(is_public(a) for a in snmp._auth_args(got))
+    assert (snmp._auth_args(got), snmp._conf_lines(got)) == call
+    assert not writes_public(got)
 
 
 # (case, columns besides snmp_write=1): R25, the community "public" (any case, surrounding blanks) never writes
@@ -142,7 +156,7 @@ NO_IDENTITY = [
 
 @pytest.mark.parametrize("columns", [c[1] for c in NO_IDENTITY], ids=[c[0] for c in NO_IDENTITY])
 def test_write_refused_without_an_identity(columns):
-    """Above all the first two: _auth_args would write with the community "public"."""
+    """Above all the first two: _conf_lines would write with the community "public"."""
     with pytest.raises(snmp.SnmpError) as e:
         poller.creds_of(row(snmp_write=1, **columns), write=True)
     assert str(e.value) == NO_CREDS
@@ -210,7 +224,7 @@ def test_read_identity_is_unchanged():
         assert poller.creds_of(r) == want
         assert poller.creds_of(r, write=False) == want
     assert poller.creds_of(row(**READ_V3, snmp_write=1, **RW_V3)) == READ_V3_CRED
-    # an empty community stays what it always was for polling (snmp._auth_args reads it as "public"): write=True alone refuses it
+    # an empty community stays what it always was for polling (snmp._conf_lines reads it as "public"): write=True alone refuses it
     assert poller.creds_of(row()) == v2c(None)
     assert poller.creds_of(row({"snmp_community": FOREIGN_TOKEN}))["snmp_community"] is None
 
@@ -268,11 +282,11 @@ def test_write_identity_exhaustively():
         else:
             got = poller.creds_of(r, write=True)
             assert got == want, case
-            args = snmp._auth_args(got)
-            assert not any(is_public(a) for a in args), case
+            args, conf = snmp._auth_args(got), snmp._conf_lines(got)
+            assert not writes_public(got), case
             assert (got["snmp_community"] in (RO, RW)) if got["snmp_version"] == "2c" else (got["snmp_user"] in ("monitor", "svwrite"))
             if rw_user or rw:
-                assert RW in args or "svwrite" in args, case
+                assert f'defCommunity "{RW}"' in conf or "svwrite" in args, case
             seen["cred"] += 1
         read = poller.creds_of(r)
         assert read["snmp_version"] == version and read["snmp_community"] == ro and read["snmp_user"] == user, case

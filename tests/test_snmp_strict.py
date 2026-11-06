@@ -13,6 +13,7 @@ over several lines.
 These tests keep the real snmp._run and only fake the process it starts (switchfix.FakeProcess). snmp is imported flat (app/ is on
 sys.path via pytest.ini), exactly as the app imports it.
 """
+import os
 import random
 import re
 
@@ -32,10 +33,11 @@ TIMEOUT = f"Timeout: No Response from {HOST}\n".encode()
 
 class _Spawner:
     """What the faked create_subprocess_exec hands to _run next (set with answer: a process that has already finished, with the given
-    output and exit code), and the argv of every start. Each start gets a fresh copy, so one answer serves several walks."""
+    output and exit code), the argv of every start and the lines of the snmp.conf it was given (in its SNMPCONFPATH). Each start gets
+    a fresh copy, so one answer serves several walks."""
 
     def __init__(self):
-        self.proc, self.started = FakeProcess(), []
+        self.proc, self.started, self.confs = FakeProcess(), [], []
 
     def answer(self, out=b"", err=b"", returncode=0):
         self.proc = FakeProcess(out, err, returncode)
@@ -48,6 +50,8 @@ def process(monkeypatch):
 
     async def fake_exec(*argv, **kwargs):
         spawner.started.append(argv)
+        with open(os.path.join(kwargs["env"]["SNMPCONFPATH"], "snmp.conf"), encoding="utf-8") as f:
+            spawner.confs.append(f.read().splitlines())
         return spawner.proc.fresh()
 
     monkeypatch.setattr(snmp.asyncio, "create_subprocess_exec", fake_exec)
@@ -259,9 +263,11 @@ def test_strict_text_parse_is_the_lenient_parse_or_an_error():
 
 
 async def test_strict_does_not_change_the_command(process):
-    """strict is decided in Python after the process ended; snmpbulkwalk is started with the very same argv in both modes."""
+    """strict is decided in Python after the process ended; snmpbulkwalk is started with the very same argv and snmp.conf in both
+    modes."""
     await snmp.walk(HOST, CRED, IF_NAME, hex_values=True)
     await snmp.walk(HOST, CRED, IF_NAME, hex_values=True, strict=True)
     assert len(process.started) == 2
     assert process.started[0] == process.started[1] == (
-        "snmpbulkwalk", "-v2c", "-c", "ro-s3cret", "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25", "-Ox", HOST, IF_NAME)
+        "snmpbulkwalk", "-v2c", "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25", "-Ox", HOST, IF_NAME)
+    assert process.confs == [['defCommunity "ro-s3cret"']] * 2
