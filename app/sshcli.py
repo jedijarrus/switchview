@@ -209,7 +209,7 @@ async def test_ssh(row) -> dict:
         return {"ok": False, "error": "Kein SSH-Zugang hinterlegt"}
     try:
         res = await run_shows(row, ["show version"])
-        first = next((l for l in res["show version"].splitlines() if l.strip()), "")
+        first = next((line for line in res["show version"].splitlines() if line.strip()), "")
         return {"ok": True, "detail": first[:120]}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": _error(e)}

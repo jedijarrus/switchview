@@ -6,16 +6,14 @@ The secrets are the RADIUS key and every secret of the switch (changes._secrets_
 "public") and its SNMPv3 passphrases, read and write. They are masked in every form they reach a text in: as they are, and as
 netmiko writes a command into a ReadTimeout (repr(re.escape(cmd))); and before any text is cut, so no half of one stays.
 
-No network: sshcli.connect is replaced by a fake session (ssh_env), SNMP reads and writes by stand-ins, re-polls are recorded and never
-run. Each test gets its own database under tmp_path, set up by the app's own init_db.
+No network: sshcli.connect is replaced by a fake session (ssh_env, tests/sshfix.py), SNMP reads and writes by stand-ins, re-polls are
+recorded and never run. Each test gets its own database under tmp_path, set up by the app's own init_db.
 """
 import asyncio
 import hashlib
 import json
 import logging
 import re
-import sqlite3
-from collections import defaultdict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,121 +30,18 @@ import snmp
 import snmpwrite
 import sshcli
 from cfgparse import parse_config
+from dbfix import connect, insert_switch, query, raising_async_fn
+from sshfix import SshEnv, procurve
 
 USER = {"username": "tester", "name": "Tester", "method": "local"}
-RUNNING = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n   exit\n'    # no radius-server: prepare sends the key
 SWITCH_SECRETS = {"ssh_pass": "ssh-s3cret", "snmp_community": "ro-s3cret", "snmp_auth_pass": "ro-auth-s3cret",
                   "snmp_priv_pass": "ro-priv-s3cret", "snmp_rw_community": "rw-s3cret", "snmp_rw_auth_pass": "rw-auth-s3cret",
                   "snmp_rw_priv_pass": "rw-priv-s3cret"}
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(db.settings.db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def query(sql: str, args: tuple = ()) -> list[tuple]:
-    conn = _connect()
-    try:
-        rows = [tuple(r) for r in conn.execute(sql, args).fetchall()]
-        conn.commit()
-        return rows
-    finally:
-        conn.close()
-
-
-async def raising_async(exc: BaseException):
-    raise exc
-
-
-def raising_async_fn(exc: BaseException):
-    return lambda *args, **kwargs: raising_async(exc)
-
-
-class FakeSSH:
-    """A netmiko session to a ProCurve: show commands answer with env.running, send_config_set raises env.on_send if set."""
-
-    def __init__(self, env):
-        self.env = env
-
-    def send_command(self, cmd, read_timeout=None):
-        return self.env.running
-
-    def send_config_set(self, commands, **kwargs):
-        self.env.sent.append(list(commands))
-        if self.env.on_send is not None:
-            raise self.env.on_send
-        return ""
-
-    def save_config(self):
-        pass
-
-    def disconnect(self):
-        pass
-
-
-class SshEnv:
-    """One ProCurve with SSH access manager / ssh-s3cret (sid) and what the fakes around it record."""
-
-    def __init__(self, sid: int):
-        self.sid = sid
-        self.running = RUNNING
-        self.on_send: BaseException | None = None
-        self.on_connect: BaseException | None = None
-        self.sent: list[list[str]] = []
-        self.repolls: list[int] = []
-
-    def connect(self, row):
-        if self.on_connect is not None:
-            raise self.on_connect
-        return FakeSSH(self)
-
-    def repoll(self, sid: int):
-        self.repolls.append(sid)
-        return asyncio.sleep(0)
-
-    async def run_prepare(self, **settings) -> int:
-        """Store the settings (radius_key encrypted, as PUT /api/settings does), create the RADIUS preparation as /prepare previews it
-        on RUNNING, run it to its end; the change id."""
-        for k, v in settings.items():
-            await db.set_setting(k, crypto.encrypt(v) if k == "radius_key" else v)
-        plan = changes.plan_prepare(parse_config(RUNNING), {"server": settings.get("radius_server", ""),
-                                                            "key": settings.get("radius_key", "")})
-        cid = await changes.create_change(self.sid, "tester", "prepare", "RADIUS vorbereiten", {}, plan | {"mechanism": "ssh"})
-        await changes.run_change(cid)
-        return cid
-
-    def change(self, cid: int) -> dict:
-        conn = _connect()
-        try:
-            return dict(conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)).fetchone())
-        finally:
-            conn.close()
-
-
 def add_switch(**cols) -> int:
-    cols = {"name": "SW-EK-01", "host": "203.0.113.21", "driver": "procurve", "snmp_version": "2c", "ssh_user": "manager",
-            "ssh_pass": crypto.encrypt("ssh-s3cret")} | cols
-    conn = _connect()
-    try:
-        cur = conn.execute(f"INSERT INTO switches ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
-
-
-@pytest.fixture
-def ssh_env(tmp_path, monkeypatch) -> SshEnv:
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    asyncio.run(db.init_db())
-    env = SshEnv(add_switch())
-    monkeypatch.setattr(sshcli, "connect", env.connect)
-    monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
-    monkeypatch.setattr(changes, "_cfg_stale", set())
-    monkeypatch.setattr(changes, "_repoll", env.repoll)
-    return env
+    """A switches row: the ProCurve of ssh_env (sshfix.procurve), updated by cols; its id."""
+    return insert_switch(**procurve(**cols))
 
 
 def _never(*args, **kwargs):
@@ -174,7 +69,7 @@ def create(api) -> int:
 
 def old_backup(sid: int, text: str) -> int:
     """A config_backups row as one from before this update: the content stored as it is, without the masking of today."""
-    conn = _connect()
+    conn = connect()
     try:
         cur = conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger) VALUES (?, datetime('now'), ?, ?, ?)",
                            (sid, hashlib.sha256(text.encode()).hexdigest(), text, "nightly"))
@@ -187,7 +82,7 @@ def old_backup(sid: int, text: str) -> int:
 def old_change(sid: int, error: str, steps: list, output: str) -> int:
     """A failed RADIUS preparation of switch sid as a changes row from before this update: error, steps and output stored as they
     are, without the masking of today."""
-    conn = _connect()
+    conn = connect()
     try:
         cur = conn.execute("INSERT INTO changes(switch_id, username, kind, summary, commands, status, steps, output, error, finished_at) "
                            "VALUES (?, 'tester', 'prepare', 'RADIUS vorbereiten', '[]', 'failed', ?, ?, ?, datetime('now'))",
@@ -368,8 +263,9 @@ async def test_an_snmp_change_logs_its_traceback_masked(ssh_env, monkeypatch, ca
 # ── A change row from before this update ──────────────────────────────────────────────────────────────────────────────────────────
 def test_old_change_rows_are_masked_on_output(api):                          # NV, Eingabe: Altzeile mit netmikos ReadTimeout-Text
     """A row stored before the masking of this update (written by sqlite here) is served masked with the secrets SwitchView knows now:
-    the RADIUS key in the form netmiko's ReadTimeout gives it (repr(re.escape(cmd)), which no pattern of mask_secrets finds), and each
-    switch's own secrets in the rows of that switch. What is no secret stays as stored, and so does the row in the database (E26)."""
+    the RADIUS key in the form netmiko's ReadTimeout gives it (repr(re.escape(cmd))), which since FW-b the key\\\\ pattern of
+    mask_secrets finds as well (hence '"***"' in place of the key), and each switch's own secrets in the rows of that switch. What is
+    no secret stays as stored, and so does the row in the database (E26)."""
     asyncio.run(db.set_setting("radius_key", crypto.encrypt("Old.Rad!Key1")))
     sid, other = add_switch(), add_switch(name="SW-VK-02", host="203.0.113.42", ssh_pass=crypto.encrypt("ssh-z2"))
     leak = f"ReadTimeout: \n\nPattern not detected: {re.escape('radius-server host 203.0.113.10 key Old.Rad!Key1')!r} in output."

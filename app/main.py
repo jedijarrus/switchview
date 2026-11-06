@@ -552,7 +552,8 @@ async def backup_now(sid: int, user=Depends(auth.current_user)):
 @app.get("/api/switches/{sid}/backups")
 async def list_backups(sid: int, user=Depends(auth.current_user)):
     async with db() as conn:
-        async with conn.execute("SELECT id, taken_at, sha, trigger, length(content) AS size FROM config_backups WHERE switch_id = ? ORDER BY id DESC LIMIT 200", (sid,)) as cur:
+        async with conn.execute("SELECT id, taken_at, sha, trigger, length(content) AS size FROM config_backups WHERE switch_id = ? "
+                                "ORDER BY id DESC LIMIT 200", (sid,)) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
@@ -1229,8 +1230,9 @@ async def unknown_devices(user=Depends(auth.current_user)):
             # here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop protects such ports)
             peer = any(e[0] in keys for e in p["l"])
             flags = [f for f, on in (("uplink_lldp", p.get("up") or peer), ("lldp", p["l"]), ("many", p["mc"] > 4)) if on]
-            # Of a port's devices, those the router knows (an IP or a name) come first, then poll order: a flood of made-up MACs gets
-            # neither, so it cannot push such a device past the cap.
+            # Of a port's devices, those the router knows (an IP or a name) come first, then poll order: a heuristic. A flood of made-up
+            # MACs mostly has no ARP entry, but a flooder can send ARP for each of them, so this only makes it harder to push a known
+            # device past the cap.
             ds = sorted(learned.get((s["id"], p["n"]), []), key=lambda r: not (r["ip"] or r["name"]))
             for r in ds[:UNKNOWN_PER_PORT]:
                 out.append({"mac": r["mac"], "vlan": r["vlan"], "ip": r["ip"] or "", "name": r["name"] or "",
@@ -1384,8 +1386,8 @@ async def build_map() -> dict:
                          "ready": changes.readiness(cfgs[s["id"]][1], server or None) if s["id"] in cfgs else None,
                          "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], [])})
     links = _links(switches, all_macs)
-    for l in links:  # Uplink-Ports markieren (inkl. Trunk-Mitglieder)
-        for k, side in ((l["a"], l["A"]), (l["b"], l["B"])):
+    for link in links:  # Uplink-Ports markieren (inkl. Trunk-Mitglieder)
+        for k, side in ((link["a"], link["A"]), (link["b"], link["B"])):
             ups = set(side["ports"]) | ({side["trunk"]} if side["trunk"] else set())
             for p in next(x for x in switches if x["k"] == k)["ports"]:
                 if p["n"] in ups or (p["tr"] and p["tr"] in ups):
@@ -1397,8 +1399,8 @@ async def build_map() -> dict:
         for p in s["ports"]:
             p["uc"] = any((s["k"], n) in confirmed for n in (p["n"], p["tr"], *p["mb"]) if n)
     uc = {(s["k"], p["n"]) for s in switches for p in s["ports"] if p["uc"]}
-    for l in links:
-        l["confirmed"] = all((k, n) in uc for k, side in ((l["a"], l["A"]), (l["b"], l["B"])) for n in side["ports"])
+    for link in links:
+        link["confirmed"] = all((k, n) in uc for k, side in ((link["a"], link["A"]), (link["b"], link["B"])) for n in side["ports"])
     return {"generated": datetime.now(timezone.utc).isoformat(), "vlans": vlans, "switches": switches, "links": links}
 
 
@@ -1407,7 +1409,8 @@ def switch_keys(switches: list[dict]) -> dict[str, str]:
     nimmt fuer seinen Uplink-Schutz dieselbe Zuordnung (R40)."""
     keys = {}
     for s in switches:
-        keys[s["sys"]] = s["k"]; keys[s["k"]] = s["k"]
+        keys[s["sys"]] = s["k"]
+        keys[s["k"]] = s["k"]
     return keys
 
 
@@ -1493,7 +1496,8 @@ def _links(switches: list[dict], all_macs: dict) -> list[dict]:
         key = tuple(sorted([x[0], y[0]]))
         g = groups.setdefault(key, {"a": key[0], "b": key[1], "ap": [], "bp": [], "src": src})
         px, py = (x, y) if x[0] == key[0] else (y, x)
-        g["ap"].append(px[1]); g["bp"].append(py[1])
+        g["ap"].append(px[1])
+        g["bp"].append(py[1])
     out = []
     for g in groups.values():
         def side(k, plist):

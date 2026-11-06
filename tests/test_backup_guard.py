@@ -5,66 +5,23 @@ The nightly backup (sshcli.backup_all) walks every switch in turn; before Phase 
 cfgparse.parse_config could not read, raised from changes.store_cfg) ended the walk, and every later switch went without a backup.
 A backup is the evidence, all the more for a switch that sends something odd: it is stored (masked) even when its parse fails.
 
-netmiko's ConnectHandler is replaced by a recorder (sshcli.ConnectHandler) whose sessions answer every show command with a small
-running-config; no network, no switch. Each test gets its own database under tmp_path, set up by the app's own init_db.
+netmiko's ConnectHandler is replaced by a recorder (sshcli.ConnectHandler, tests/sshfix.py) whose sessions answer every show command
+with a small running-config; no network, no switch. Each test gets its own database under tmp_path, set up by the app's own init_db.
 """
 import asyncio
 import sqlite3
-import types
 from collections import defaultdict
 
 import pytest
 
 import changes
 import config
-import crypto
 import db
 import sshcli
+from dbfix import connect, insert_switch, raising_async, raising_async_fn
+from sshfix import Session, Sessions, procurve
 
 RUNNING_CONFIG = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n   exit\n'
-
-
-# The SSH host key every switch of these tests offers, as an OpenSSH line; the first session pins it (sshcli._open)
-HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINnHpT9l6rpHqB25Ts4S4dT4wkOfhzh0ZbNcJVpVdfiZ"
-
-
-class ServerKey:
-    """The key paramiko's transport reports (Transport.get_remote_server_key), as far as sshcli.host_key_of reads it."""
-
-    def get_name(self):
-        return HOST_KEY.split()[0]
-
-    def get_base64(self):
-        return HOST_KEY.split()[1]
-
-
-class Session:
-    """A netmiko connection to a ProCurve: every show command answers with RUNNING_CONFIG; its switch offers HOST_KEY."""
-
-    remote_conn_pre = types.SimpleNamespace(get_transport=lambda: types.SimpleNamespace(get_remote_server_key=ServerKey))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def send_command(self, cmd, read_timeout=None):
-        return RUNNING_CONFIG
-
-    def disconnect(self):
-        pass
-
-
-class Sessions:
-    """sshcli.ConnectHandler: records the host of every session it is asked to open."""
-
-    def __init__(self):
-        self.hosts: list[str] = []
-
-    def __call__(self, **device):
-        self.hosts.append(device["host"])
-        return Session()
 
 
 @pytest.fixture
@@ -72,34 +29,20 @@ def world(tmp_path, monkeypatch) -> Sessions:
     """A fresh database under tmp_path; ConnectHandler recorded; fresh locks and R27 marks."""
     monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
     asyncio.run(db.init_db())
-    sessions = Sessions()
+    sessions = Sessions(RUNNING_CONFIG)
     monkeypatch.setattr(sshcli, "ConnectHandler", sessions)
     monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
     monkeypatch.setattr(changes, "_cfg_stale", set())
     return sessions
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(db.settings.db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def add_switch(host: str) -> int:
     """A ProCurve switches row with SSH credentials (manager / an encrypted password); its id."""
-    cols = {"name": f"SW-{host}", "host": host, "driver": "procurve", "snmp_version": "2c", "ssh_user": "manager",
-            "ssh_pass": crypto.encrypt("ssh-s3cret")}
-    conn = _connect()
-    try:
-        cur = conn.execute(f"INSERT INTO switches ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+    return insert_switch(**procurve(name=f"SW-{host}", host=host))
 
 
 def row_of(sid: int) -> sqlite3.Row:
-    conn = _connect()
+    conn = connect()
     try:
         return conn.execute("SELECT * FROM switches WHERE id = ?", (sid,)).fetchone()
     finally:
@@ -108,7 +51,7 @@ def row_of(sid: int) -> sqlite3.Row:
 
 def backups() -> dict[int, int]:
     """The number of config_backups rows per switch_id."""
-    conn = _connect()
+    conn = connect()
     try:
         return {r[0]: r[1] for r in conn.execute("SELECT switch_id, count(*) FROM config_backups GROUP BY switch_id")}
     finally:
@@ -116,21 +59,11 @@ def backups() -> dict[int, int]:
 
 
 def stored_cfg(sid: int):
-    conn = _connect()
+    conn = connect()
     try:
         return conn.execute("SELECT parsed FROM switch_cfg WHERE switch_id = ?", (sid,)).fetchone()
     finally:
         conn.close()
-
-
-async def raising_async(exc: BaseException):
-    """A coroutine that raises exc."""
-    raise exc
-
-
-def raising_async_fn(exc: BaseException):
-    """A function that returns such a coroutine, whatever it is called with (a stand-in for an async function)."""
-    return lambda *args, **kwargs: raising_async(exc)
 
 
 # ── The nightly backup: one switch at a time, none stops the others ────────────────────────────────────────────────────────────────

@@ -241,3 +241,20 @@ async def test_streamed_chunks_reach_the_app_as_one_body_up_to_the_cap(chunks, s
     await bodylimit.BodyLimit(app, max_bytes=10)({"type": "http", "headers": []}, receive, send)
     assert sent[0]["status"] == status
     assert seen == ([{"type": "http.request", "body": b"0123456789", "more_body": False}] if status == 204 else [])
+
+
+async def test_a_declared_length_over_the_cap_is_refused_unread():      # Phase 2 gap: the Content-Length short cut (E3)
+    sent, app_called = [], []
+
+    async def app(scope, receive, send):
+        app_called.append(True)
+
+    async def receive():
+        raise AssertionError("the body must not be read")
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [(b"content-length", b"11")]}
+    await bodylimit.BodyLimit(app, max_bytes=10)(scope, receive, send)
+    assert sent[0]["status"] == 413 and app_called == []

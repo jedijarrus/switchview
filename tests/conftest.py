@@ -126,3 +126,12 @@ async def net(tmp_path, monkeypatch):
     in login_api."""
     import netfix
     return await netfix.fresh_network(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def ssh_env(tmp_path, monkeypatch):
+    """One ProCurve with SSH access behind a fake sshcli.connect (tests/sshfix.py, SshEnv): a fresh database under tmp_path, set up by
+    the app's own init_db; fresh switch locks and R27 marks; re-polls recorded, never run. Defined here so that the test files take it
+    without importing it (ruff F401/F811); sshfix is imported here, not at the top, like netfix in net."""
+    import sshfix
+    return sshfix.make_ssh_env(tmp_path, monkeypatch)

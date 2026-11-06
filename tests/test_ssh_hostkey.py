@@ -290,12 +290,14 @@ async def test_run_change_with_a_changed_key_sends_nothing(world, sid):
     assert ch["status"] == "failed" and "HostKeyMismatch" in ch["error"] and world.sent == []
 
 
-def test_forgetting_the_key_lets_the_next_contact_pin_again(api):            # api wie in tests/test_switch_api.py
-    sid = create(api)
+def test_forgetting_the_key_lets_the_next_contact_pin_again(api, world):     # api wie in tests/test_switch_api.py
+    sid = create(api, ssh_user="manager", ssh_pass="ssh-s3cret")
     pin(sid, KEY_A)
     fp = sshcli.fingerprints(KEY_A)["sha256"]
     assert api.delete(f"/api/switches/{sid}/ssh-host-key").json() == {"ok": True}
     assert listed(api, sid)["ssh_host_key_fp"] is None and fp in last_audit_detail()
+    world.offer(KEY_B)      # sshcli.test_ssh directly, not POST /test: that would start a real snmpget
+    assert asyncio.run(sshcli.test_ssh(row(sid)))["ok"] is True and row(sid)["ssh_host_key"] == KEY_B
 
 
 def test_upgrade_adds_the_columns_and_pins_on_first_use(tmp_path, world, monkeypatch):    # Review Focus 2, Ruling R-D

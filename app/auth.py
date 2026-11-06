@@ -10,7 +10,7 @@ import jwt
 from fastapi import HTTPException, Request
 
 from config import settings
-from db import db
+from db import db, token_hash
 
 COOKIE = "sv_session"
 # The device cookie of the emergency login: a browser in which it succeeded once carries a MAC-signed nonce bound to the user, and the
@@ -114,12 +114,6 @@ def device_id(cookie: str | None, username: str) -> str | None:
     if not nonce or not mac:
         return None
     return nonce if hmac.compare_digest(_device_mac(nonce, username).encode(), _utf8(mac)) else None
-
-
-def token_hash(token: str) -> str:
-    """What the sessions table stores in place of a session token: its SHA-256 as 64 hex digits (F4). A copy of the database then
-    holds no value a browser could send as the cookie. db.hash_legacy_session_tokens computes the same for the rows of before."""
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def create_session(username: str, display: str, method: str) -> str:

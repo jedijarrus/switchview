@@ -11,7 +11,7 @@ import time
 import pytest
 
 import cfgparse
-from cfgparse import compress_ports, expand_ports, mask_secrets, parse_config
+from cfgparse import compress_ports, expand_ports, mask_secrets, parse_config, port_sort_key, port_state
 
 
 def test_parse_config_golden(sample_running_config):
@@ -171,6 +171,44 @@ def test_many_tagged_vlans_parse_in_linear_time():                           # u
     t = time.process_time()
     cfg = parse_config("interface 1-100\n   tagged vlan 1-4000\n   exit\n")              # 400 000 Einträge; gemessen: 0,5 s, heute 9 s
     assert time.process_time() - t < 3 and cfg["ports"]["100"]["t"] == [str(v) for v in range(1, 4001)]
+
+
+# ── Lines no other test of the suite reaches (Phase 3, Task 1: cfgparse coverage) ────────────────────────────────────────────────
+@pytest.mark.parametrize("spec, ports", [("1,,2", ["1", "2"]), ("trk2", ["Trk2"]), ("A1-a3", ["A1", "A2", "A3"])])
+def test_expand_ports_skips_empty_parts_and_normalises(spec, ports):
+    assert expand_ports(spec) == ports
+
+
+@pytest.mark.parametrize("spec", ["1-A3", "A1-B2", "x", "1/1-2/3"])
+def test_expand_ports_refuses_what_it_cannot_read(spec):
+    pytest.raises(ValueError, expand_ports, spec)
+
+
+def test_port_sort_key_orders_ports_trunks_and_the_rest():
+    assert sorted(["Trk2", "10", "x/y", "A1", "2", "Trk1", "1/3"], key=port_sort_key) == ["2", "10", "A1", "1/3", "Trk1", "Trk2", "x/y"]
+
+
+def test_compress_ports_refuses_another_vendors_name():
+    pytest.raises(ValueError, compress_ports, ["Gi1/0/1"])
+
+
+def test_global_lines_set_their_fields():
+    cfg = parse_config("primary-vlan 20\nmanagement-vlan 99\naaa authentication ssh login radius\naaa port-access mac-based addr-format no-delimiter\n"
+                       "aaa port-access authenticator quiet-period 30\naaa port-access mac-based 4\naaa port-access mac-based 4 unauth-vid 0\n"
+                       "aaa port-access mac-based 5 unauth-vid 7\n")
+    assert (cfg["primary_vlan"], cfg["mgmt_vlan"], cfg["login_radius"], cfg["addr_format"]) == ("20", "99", True, "no-delimiter")
+    assert cfg["ports"]["4"]["m"] is True and cfg["ports"]["4"]["al"] == 1 and cfg["ports"]["4"]["muv"] is None and cfg["ports"]["5"]["muv"] == "7"
+    assert "quiet-period" not in cfg["ports"]
+
+
+def test_aaa_with_nothing_after_it_changes_nothing():
+    st = cfgparse._empty_port()
+    cfgparse._aaa(st, "  ")
+    assert st == cfgparse._empty_port()
+
+
+def test_port_state_of_an_unknown_port_is_the_empty_port():
+    assert port_state({"ports": {}}, "9") == cfgparse._empty_port()
 
 
 # ── Masking (§6 (d), Thema A, NV masking:changes-error-and-steps-persisted-unmasked) ─────────────────────────────────────────────

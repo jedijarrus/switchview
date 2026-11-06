@@ -86,8 +86,8 @@ async def inventory(sid: int) -> dict:
     if not sw:
         raise LookupError("Switch nicht gefunden oder nicht aktiv")
     uplinks: set[str] = set()
-    for l in m["links"]:
-        for k, side in ((l["a"], l["A"]), (l["b"], l["B"])):
+    for link in m["links"]:
+        for k, side in ((link["a"], link["A"]), (link["b"], link["B"])):
             if k == sw["k"]:
                 uplinks |= set(side["ports"])
                 if side["trunk"]:
@@ -527,7 +527,8 @@ def plan_prepare(cfg: dict, rs: dict) -> dict:
     r = readiness(cfg, server)
     if not r["host"]:
         if not key or not RADIUS_KEY_RE.fullmatch(key):
-            blocked.append({"port": "*", "reason": "Shared Secret fehlt oder enthält unzulässige Zeichen (8–64 Zeichen, ohne Leerzeichen, Anführungszeichen, Backslash, ? und ~)"})
+            blocked.append({"port": "*", "reason": "Shared Secret fehlt oder enthält unzulässige Zeichen (8–64 Zeichen, ohne Leerzeichen, "
+                                                   "Anführungszeichen, Backslash, ? und ~)"})
         else:
             cmds.append(f"radius-server host {server} key {key}")
             shown.append(f"radius-server host {server} key ***")

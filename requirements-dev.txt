@@ -1,4 +1,4 @@
 # Test and lint tooling (CI and local development). Runtime dependencies live in requirements.txt.
 pytest>=8.3,<9
 pytest-asyncio>=0.24
-ruff>=0.6
+ruff==0.17.3

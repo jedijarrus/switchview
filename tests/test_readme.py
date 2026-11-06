@@ -37,3 +37,17 @@ def test_the_security_note_has_its_sections_and_every_decision():
     for n in range(1, 33):
         assert f"\n| E{n} |" in note, f"E{n}"
     assert "\n| E33 |" not in note
+
+
+def test_the_logic_note_is_linked_and_has_its_sections():
+    """Phase 3: the README links the German logic and robustness note, which has the sections the plan asks for (Task 1)."""
+    assert "Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md)" in README
+    note = (ROOT / "docs" / "logik-phase3.md").read_text(encoding="utf-8")
+    for heading in ("## Was gebaut wurde", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz", "## Was beim Update zu tun ist",
+                    "## Später", "## Entscheidungen"):
+        assert f"\n{heading}\n" in note, heading
+
+
+def test_ruff_is_pinned_and_no_file_is_exempt():
+    """A new ruff release brings new rules and would break CI without a code change; every file is held to the full rule set."""
+    assert "ruff==0.17.3" in (ROOT / "requirements-dev.txt").read_text() and "per-file-ignores" not in (ROOT / "ruff.toml").read_text()

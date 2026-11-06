@@ -234,19 +234,25 @@ async def migrate(conn) -> None:
             have[table].add(column)
 
 
-# A session token as the sessions table keeps it since F4: auth.token_hash, 64 lower-case hex digits. A raw token of before
+# A session token as the sessions table keeps it since F4: token_hash, 64 lower-case hex digits. A raw token of before
 # (secrets.token_urlsafe(32), 43 characters) never looks like this.
 _HASHED_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 
+def token_hash(token: str) -> str:
+    """What the sessions table stores in place of a session token: its SHA-256 as 64 hex digits (F4). A copy of the database then
+    holds no value a browser could send as the cookie. The one definition: auth imports it, hash_legacy_session_tokens uses it for
+    the rows of before."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 async def hash_legacy_session_tokens(conn) -> int:
-    """Replaces every raw session token of a release before F4 by its SHA-256 (the same as auth.token_hash), so its browser stays
-    signed in; returns how many it replaced. Idempotent: a stored hash is never hashed again, also after a rollback to an older
-    image and a new update (the sessions of the older image are raw again). Does not commit (init_db does), works with and
-    without row_factory."""
+    """Replaces every raw session token of a release before F4 by its token_hash, so its browser stays signed in; returns how many it
+    replaced. Idempotent: a stored hash is never hashed again, also after a rollback to an older image and a new update (the
+    sessions of the older image are raw again). Does not commit (init_db does), works with and without row_factory."""
     async with conn.execute("SELECT token FROM sessions") as cur:
         raw = [row[0] for row in await cur.fetchall() if not _HASHED_TOKEN.fullmatch(row[0])]
-    await conn.executemany("UPDATE sessions SET token = ? WHERE token = ?", [(hashlib.sha256(t.encode()).hexdigest(), t) for t in raw])
+    await conn.executemany("UPDATE sessions SET token = ? WHERE token = ?", [(token_hash(t), t) for t in raw])
     return len(raw)
 
 

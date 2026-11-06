@@ -8,9 +8,8 @@ id (§6 (a)), refused when saved and again when a switch is prepared.
 The app runs in-process: FastAPI's TestClient (created without `with`, so no lifespan and no scheduler) and, for the concurrency
 test, an httpx.AsyncClient on the same app, both signed in through the user override and sending the CSRF header. Each test gets
 its own database under tmp_path. Nothing leaves the process: PacketFence's and OPNsense's HTTP clients, netmiko's ConnectHandler and
-snmp.get are recorders. The F2 tests show that nothing reached them; the positive control shows that the HTTP and SNMP recorders do
-see what goes out (the SSH recorder is the pattern of tests/test_ssh_driver_gate.py, whose tests show it records; a session opened
-here would need the host key fake of Task 8).
+snmp.get are recorders. The F2 tests show that nothing reached them; the positive control shows that the HTTP, SNMP and SSH recorders
+do see what goes out (the SSH recorder counts the attempt; its session offers no host key, so sshcli._open gives up right after it).
 """
 import asyncio
 import functools
@@ -270,7 +269,7 @@ def test_the_audit_names_the_new_host_first_and_each_cleared_secret(api, tmp_pat
     assert audits(tmp_path)[-1] == ("switch_update", "198.51.100.201", "")
 
 
-def test_an_unchanged_destination_keeps_its_secrets_and_still_gets_them(api, outbound, snmp_creds):
+def test_an_unchanged_destination_keeps_its_secrets_and_still_gets_them(api, outbound, snmp_creds, sessions):
     """The positive control of the tests above: with every destination as it was nothing is cleared, and the recorders see what goes
     out, so an empty recorder above means that nothing went out."""
     dests = {"opnsense_url": "https://fw.example", "pf_url": "https://pf.example:9999", "pf_user": "svc"}
@@ -280,10 +279,11 @@ def test_an_unchanged_destination_keeps_its_secrets_and_still_gets_them(api, out
     assert api.post("/api/names/refresh").json()["ok"] is True
     assert outbound == ["https://pf.example:9999/api/v1/login", "https://pf.example:9999/api/v1/node_categories",
                         "https://fw.example/api/diagnostics/interface/getArp"]
-    sid = create(api, host="203.0.113.21", **ALL_SECRETS)
-    assert api.put(f"/api/switches/{sid}", json=body(host="203.0.113.21")).json() == {"ok": True, "cleared": []}
+    sid = create(api, host="203.0.113.21", ssh_user="manager", **ALL_SECRETS)
+    assert api.put(f"/api/switches/{sid}", json=body(host="203.0.113.21", ssh_user="manager")).json() == {"ok": True, "cleared": []}
     api.post(f"/api/switches/{sid}/test")
     assert [c["snmp_community"] for c in snmp_creds] == ["ro-s3cret"]
+    assert sessions.hosts == ["203.0.113.21"]
 
 
 @pytest.mark.parametrize("old, new, same", [

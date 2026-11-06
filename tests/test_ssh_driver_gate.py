@@ -10,7 +10,7 @@ never gets an SSH session, not even with SSH credentials stored (they are kept, 
   and below all of them the one choke point: sshcli._device, which connect and _run_show (everything that reaches ConnectHandler) go
   through. 9-11 are the UI (Backups view, connection test, SSH fieldset); the server side of 11 (stored credentials kept) is here.
 
-netmiko's ConnectHandler is replaced by a recorder (sshcli.ConnectHandler): a switch without cli must never reach it, and a ProCurve
+netmiko's ConnectHandler is replaced by a recorder (sshcli.ConnectHandler, tests/sshfix.py): a switch without cli must never reach it, and a ProCurve
 must still get its session (the positive control, so no check here passes by never trying). A recorder, not a raise: several of
 these paths catch every exception and would turn an AssertionError into an ordinary error result. No network: the SNMP part of the
 connection test is faked, re-polls are recorded, never run. Expected messages are written out by hand.
@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import types
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -35,6 +34,7 @@ import db
 import main
 import snmp
 import sshcli
+from sshfix import Sessions
 
 USER = {"username": "tester", "name": "Tester", "method": "local"}
 NO_CLI = "Treiber cisco hat keine SSH-CLI"
@@ -43,60 +43,12 @@ PC_HOST, CISCO_HOST = "203.0.113.21", "203.0.113.31"
 RUNNING_CONFIG = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n   exit\ninterface 3\n   disable\n   exit\n'
 
 
-# The SSH host key every switch of these tests offers, as an OpenSSH line; the first session pins it (sshcli._open)
-HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINnHpT9l6rpHqB25Ts4S4dT4wkOfhzh0ZbNcJVpVdfiZ"
-
-
-class ServerKey:
-    """The key paramiko's transport reports (Transport.get_remote_server_key), as far as sshcli.host_key_of reads it."""
-
-    def get_name(self):
-        return HOST_KEY.split()[0]
-
-    def get_base64(self):
-        return HOST_KEY.split()[1]
-
-
-class Session:
-    """A netmiko connection to a ProCurve: every show command answers with RUNNING_CONFIG; its switch offers HOST_KEY."""
-
-    remote_conn_pre = types.SimpleNamespace(get_transport=lambda: types.SimpleNamespace(get_remote_server_key=ServerKey))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def send_command(self, cmd, read_timeout=None):
-        return RUNNING_CONFIG
-
-    def disconnect(self):
-        pass
-
-
-class Sessions:
-    """sshcli.ConnectHandler: records the host of every session it is asked to open. repolls: the re-polls run_change scheduled."""
-
-    def __init__(self):
-        self.hosts: list[str] = []
-        self.repolls: list[int] = []
-
-    def __call__(self, **device):
-        self.hosts.append(device["host"])
-        return Session()
-
-    def repoll(self, sid: int):
-        self.repolls.append(sid)    # recorded on the call; the task it becomes has nothing to do (no SNMP poll in these tests)
-        return asyncio.sleep(0)
-
-
 @pytest.fixture
 def world(tmp_path, monkeypatch) -> Sessions:
     """A fresh database under tmp_path (the app's own init_db); ConnectHandler recorded; fresh locks and R27 marks; re-polls recorded."""
     monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
     asyncio.run(db.init_db())
-    sessions = Sessions()
+    sessions = Sessions(RUNNING_CONFIG)
     monkeypatch.setattr(sshcli, "ConnectHandler", sessions)
     monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
     monkeypatch.setattr(changes, "_cfg_stale", set())

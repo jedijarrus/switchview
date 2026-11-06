@@ -62,6 +62,8 @@ devices per port, the VLAN for unknown devices, "Prepare switch"), configuration
 
 Known limitations and required device checks (German): [docs/snmp-multivendor.md](docs/snmp-multivendor.md)
 
+Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md)
+
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
 - Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately

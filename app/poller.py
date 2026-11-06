@@ -13,7 +13,7 @@ from db import db
 
 log = logging.getLogger("switchview.poller")
 
-O = {
+O = {  # noqa: E741  (poller.O is used by every walk and the tests)
     "sysDescr": "1.3.6.1.2.1.1.1",
     "sysUpTime": "1.3.6.1.2.1.1.3",
     "sysName": "1.3.6.1.2.1.1.5",
@@ -74,7 +74,8 @@ PUBLIC_COMMUNITY = "Community 'public' wird nicht zum Schreiben verwendet – bi
 
 
 def creds_of(row, write: bool = False) -> dict:
-    """Die SNMP-Identitaet einer switches-Zeile als cred fuer snmp.walk / get / set_vars (Schluessel, wie snmp._auth_args sie liest).
+    """Die SNMP-Identitaet einer switches-Zeile als cred fuer snmp.walk / get / set_vars (Schluessel, wie snmp._auth_args und
+    snmp._conf_lines sie lesen).
 
     write=False: die Lese-Identitaet (snmp_version, snmp_community bzw. snmp_user ...), unveraendert wie seit jeher.
     write=True: die Schreib-Identitaet fuer SNMP-SETs, oder snmp.SnmpError mit dem Grund; Regel und Gruende siehe write_identity.
@@ -101,14 +102,15 @@ def write_identity(row) -> tuple[str, dict]:
     2. eine eigene RW-Identitaet ("rw"): der v3-Benutzer snmp_rw_user mit snmp_rw_auth_* / snmp_rw_priv_*, sonst die v2c-Community
        snmp_rw_community. Der v3-Benutzer gewinnt, wenn beide gesetzt sind (die Community bleibt dann ungelesen).
     3. sonst die Lese-Identitaet ("read", muss am Geraet schreiben duerfen), nach snmp_version und nur eine echte: v3 mit Benutzer,
-       v2c mit nicht leerer Community. Aus einer leeren Community machte snmp._auth_args "public".
+       v2c mit nicht leerer Community. Aus einer leeren Community machte snmp._conf_lines "public".
     4. sonst Fehler: keine Schreib-Zugangsdaten.
     Die Community "public" (gleich welche Schreibweise, Leerraum aussen egal) schreibt nie (R25), weder als snmp_rw_community noch
     ueber die Lese-Identitaet: Fehler statt eines Rueckgriffs auf die naechste Identitaet. Sticht der v3-Benutzer eine RW-Community
     "public" aus, schreibt sie nicht und ist kein Grund zur Ablehnung.
-    Ein Geheimnis der gewaehlten Identitaet, das sich nicht entschluesseln laesst, und ein v3-Kennwort, das _auth_args nicht verwenden
-    wuerde, sind ebenfalls Fehler: sonst ginge der SET still mit einer anderen Identitaet oder einer schwaecheren Stufe hinaus. Ein
-    Protokoll ohne Kennwort ist dagegen kein Fehler (das Switch-Formular schickt die Protokoll-Auswahl immer mit), es heisst: unbenutzt.
+    Ein Geheimnis der gewaehlten Identitaet, das sich nicht entschluesseln laesst, und ein v3-Kennwort, das snmp._conf_lines nicht
+    verwenden wuerde, sind ebenfalls Fehler: sonst ginge der SET still mit einer anderen Identitaet oder einer schwaecheren Stufe
+    hinaus. Ein Protokoll ohne Kennwort ist dagegen kein Fehler (das Switch-Formular schickt die Protokoll-Auswahl immer mit), es
+    heisst: unbenutzt.
     """
     if not row["snmp_write"]:
         raise snmp.SnmpError(WRITE_DISABLED)
@@ -438,7 +440,8 @@ async def poll_switch(switch_id: int) -> dict:
 
         async with db() as conn:
             await conn.execute(
-                "UPDATE switches SET sys_name=?, sys_descr=?, model=?, firmware=?, base_mac=?, uptime=?, last_poll=?, last_poll_ok=1, last_error=NULL WHERE id=?",
+                "UPDATE switches SET sys_name=?, sys_descr=?, model=?, firmware=?, base_mac=?, uptime=?, last_poll=?, last_poll_ok=1, "
+                "last_error=NULL WHERE id=?",
                 (data["sysName"], data["sysDescr"], data["model"], data["firmware"], data["baseMac"], data["uptime"], now, switch_id),
             )
             await conn.execute("DELETE FROM ports WHERE switch_id = ?", (switch_id,))
@@ -472,9 +475,13 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
     uptime = int(W["sysUpTime"][0][1]) // 100 if W["sysUpTime"] and W["sysUpTime"][0][1].isdigit() else None
     base = snmp.fmt_mac(snmp.hex_to_bytes(W["baseMac"][0][1])) if W["baseMac"] else ""
 
-    ifname = _tbl(W["ifName"], O["ifName"]); alias = _tbl(W["ifAlias"], O["ifAlias"])
-    speed = _tbl(W["ifHighSpeed"], O["ifHighSpeed"]); oper = _tbl(W["ifOper"], O["ifOper"]); admin = _tbl(W["ifAdmin"], O["ifAdmin"])
-    bp2if = _tbl(W["bp2if"], O["bp2if"]); if2bp = {v: k for k, v in bp2if.items()}
+    ifname = _tbl(W["ifName"], O["ifName"])
+    alias = _tbl(W["ifAlias"], O["ifAlias"])
+    speed = _tbl(W["ifHighSpeed"], O["ifHighSpeed"])
+    oper = _tbl(W["ifOper"], O["ifOper"])
+    admin = _tbl(W["ifAdmin"], O["ifAdmin"])
+    bp2if = _tbl(W["bp2if"], O["bp2if"])
+    if2bp = {v: k for k, v in bp2if.items()}
     vname = _tbl(W["vlanName"], O["vlanName"])
     # PortList bytes per VLAN, at most snmp.MAX_PORTLIST_BYTES each (ValueError beyond); membership below is a bit test, no set per VLAN
     egress = {k: snmp.portlist_bytes(v) for k, v in _tbl(W["vlanEgress"], O["vlanEgress"]).items()}
@@ -484,7 +491,8 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
     # LLDP-Nachbarn: [sysName, PortDesc (sonst PortId), PortId] (R40: PortId ab jetzt immer dabei, die Stelle 1 wie seit jeher), je
     # lokaler Portnummer (lldpRemLocalPortNum, der mittlere Teil des Index); zu welchem Port sie gehoert, steht unten nach select_ports
     entries: list[tuple[str, list[str]]] = []
-    l_desc = _tbl(W["lldpPortDesc"], O["lldpPortDesc"]); l_id = _tbl(W["lldpPortId"], O["lldpPortId"])
+    l_desc = _tbl(W["lldpPortDesc"], O["lldpPortDesc"])
+    l_id = _tbl(W["lldpPortId"], O["lldpPortId"])
     for k, v in _tbl(W["lldpSys"], O["lldpSys"]).items():
         parts = k.split(".")
         if len(parts) < 3 or not v.strip():
