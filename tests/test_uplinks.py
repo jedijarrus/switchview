@@ -240,6 +240,12 @@ def legacy_uplinks(sw: dict, links: list[dict]) -> set[str]:
     return uplinks
 
 
+def end_pairs(links: list[dict]) -> set[tuple]:
+    """(switch, port, the switch at the other end) of every port of every link, in the oracle's form (names)."""
+    return ({(link["a"], p, link["b"]) for link in links for p in link["A"]["ports"]}
+            | {(link["b"], p, link["a"]) for link in links for p in link["B"]["ports"]})
+
+
 def two_elements(switches: list[dict]) -> list[dict]:
     """The switches as the poller of before stored their LLDP entries: [sysName, PortDesc or PortId]."""
     return [{**s, "ports": [{**p, "l": [e[:2] for e in p["l"]]} for p in s["ports"]]} for s in switches]
@@ -323,14 +329,44 @@ def test_port_id_only_adds_links_on_random_networks():
                 if rng.random() < 0.15:
                     macs[(s["k"], p["n"])].add(f"mac-{rng.choice(names)}")
         old, new = legacy_links(two_elements(switches), macs), named(main._links(switches, by_id(switches, macs)), switches)
-
-        def pairs(links):
-            return ({(link["a"], p, link["b"]) for link in links for p in link["A"]["ports"]}
-                    | {(link["b"], p, link["a"]) for link in links for p in link["B"]["ports"]})
-        assert pairs(old) <= pairs(new), case
+        assert end_pairs(old) <= end_pairs(new), case
         for s in switches:
             assert legacy_uplinks(s, old) <= legacy_uplinks(s, new), case
-        grew += pairs(old) != pairs(new)
+        grew += end_pairs(old) != end_pairs(new)
         same = [{**s, "ports": [{**p, "l": [[e[0], e[1], e[1]] for e in p["l"]]} for p in s["ports"]]} for s in switches]
         assert named(main._links(same, by_id(same, macs)), same) == legacy_links(two_elements(same), macs), case
     assert grew > 40, grew
+
+
+def test_a_shared_sys_name_only_adds_links_on_random_networks():
+    """The random networks of the test above, with unique names but sysNames from a small pool the switches share (the factory sysName
+    of one model, "HP-2530", until someone sets one): the code of 5aa8e90 took the last switch of a shared name, _links tries each,
+    and a pair from a name several switches carry is added after the base-MAC pairs. So every link pair and every uplink of before
+    stays, and a MAC link between two switches is not hidden by an LLDP pair the shared name gives to one of them."""
+    rng = random.Random(41)
+    pool = ["HP-2530", "HP-2920"]
+    grew = 0
+    for case in range(400):
+        names = [f"SW{i}" for i in range(rng.randint(2, 5))]
+        switches, macs = [], defaultdict(set)
+        for sid, k in enumerate(names, 1):
+            ports = [{"n": str(i), "tr": "", "u": ["1"], "t": [], "s": 1000, "l": []} for i in range(1, 7)]
+            trunk = {"n": "Trk1", "tr": "Trk1", "u": ["1"], "t": [], "s": 2000, "l": []}
+            for p in rng.sample(ports, rng.randint(0, 2)):
+                p["tr"] = "Trk1"
+            switches.append({"id": sid, "k": k, "sys": rng.choice([*pool, k]), "baseMac": f"mac-{k}", "ports": ports + [trunk]})
+        for s in switches:
+            for p in s["ports"][:-1]:
+                if rng.random() < 0.3:
+                    other = rng.choice(switches)
+                    desc = rng.choice([str(rng.randint(1, 8)), "to-core", ""])
+                    pid = rng.choice([str(rng.randint(1, 8)), "00 1A 2B 3C 4D 5E"])
+                    p["l"].append([rng.choice([other["sys"], other["sys"], other["k"], "ap-1"]), desc or pid, pid])
+                if rng.random() < 0.25:
+                    macs[(s["k"], p["n"])].add(f"mac-{rng.choice(names)}")
+        old, new = legacy_links(two_elements(switches), macs), named(main._links(switches, by_id(switches, macs)), switches)
+        assert end_pairs(old) <= end_pairs(new), case
+        for s in switches:
+            assert legacy_uplinks(s, old) <= legacy_uplinks(s, new), case
+        grew += end_pairs(old) != end_pairs(new)
+    assert grew > 100, grew

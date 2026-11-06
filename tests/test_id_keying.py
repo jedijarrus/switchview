@@ -2,9 +2,9 @@
 switches by their id, not by their name. Before, build_map looked a switch up by name in a dict and in `next(x for x in switches if
 x["k"] == k)`, so of two switches with one name the first shadowed the second: the second lost its uplink ports, and the links of both
 were drawn to one. Now main.switch_keys maps every non-empty sysName and name to the set of ids so named (an LLDP name two switches
-share counts for both: R40, rather one uplink too many), main._links and main.confirmed_endpoints work on (id, port), every link
-carries the ids in "a" / "b" and the names in "an" / "bn", unknown devices carry "sid", and changes.inventory takes the links of its
-id.
+share counts for both: R40, rather one uplink too many; its pairs come after the base-MAC pairs and displace none of them),
+main._links and main.confirmed_endpoints work on (id, port), every link carries the ids in "a" / "b" and the names in "an" / "bn",
+unknown devices carry "sid", and changes.inventory takes the links of its id.
 
 Same root cause, found while reading: a port name of 5000 digits (int() refuses more than 4300) or a VLAN row that is no number made
 build_map raise, and with it the netmap, the inventory and every change. main._port_num and main._vid_num are the bounded sort keys.
@@ -17,11 +17,14 @@ import pytest
 import changes
 import db
 import main
+import poller
 from netfix import add, fdb, lldp
 from switchfix import CATALYST_VMVLAN, W_CATALYST, W_SAMPLE, edit_walks
 
 USER = {"username": "tester", "name": "Tester", "method": "local"}
 MAC1, MAC2 = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"
+MAC_CORE, MAC_SW_A, MAC_SW_B = "00:1a:2b:00:00:0a", "00:1a:2b:00:00:0b", "00:1a:2b:00:00:0c"    # base MACs
+FACTORY = "HP-2530"    # the sysName switches of one model carry until someone sets one
 BP3 = "2"    # W_SAMPLE: port 3 (ifIndex 3) is bridge port 2 (dot1dBasePortIfIndex)
 
 
@@ -55,6 +58,46 @@ async def test_two_switches_with_one_name_get_their_own_links_and_marks(net):
     up = {(s["id"], p["n"]) for s in m["switches"] for p in s["ports"] if p.get("up")}
     assert up == {(core, "1"), (core, "2"), (sw1, "24"), (sw2, "6")}
     assert (await changes.inventory(sw1))["uplinks"] == {"24"} and (await changes.inventory(sw2))["uplinks"] == {"6"}
+
+
+async def factory_sys_name(net, sid: int, host: str) -> None:
+    """The switch reports the sysName switches of its model carry out of the box ("HP-2530"), polled again with it."""
+    net.rec[host][poller.O["sysName"]] = [(f"{poller.O['sysName']}.0", FACTORY)]
+    assert (await poller.poll_switch(sid))["ok"] is True
+
+
+async def test_a_shared_sys_name_hides_no_link_only_base_macs_see(net):
+    """Unique names, but SW-A and SW-B (one model, the same ports) both report the factory sysName. CORE:1 names "HP-2530" port 6:
+    the real link goes to SW-B:6, and SW-A has a port 6 as well. CORE:2 <-> SW-A:3 only base MACs see (CORE learns SW-A's on port
+    2 = bridge port 1, SW-A CORE's on port 3 = bridge port 2). The pair the shared name gives to SW-A must not displace that MAC link:
+    before Task 8 the name meant the last switch of it (SW-B), so SW-A kept its uplink 3 and CORE its uplink 2. The shared name now
+    names both, and its pairs only add links: SW-A's port 6 is an uplink as well (more protection, never less)."""
+    core = await add(net, "CORE", "10.0.0.1", "procurve", W_SAMPLE, lldp("1", FACTORY, "6", "6"), fdb("1", MAC_SW_A), base_mac=MAC_CORE)
+    a = await add(net, "SW-A", "10.0.0.2", "procurve", W_SAMPLE, fdb(BP3, MAC_CORE), base_mac=MAC_SW_A)
+    b = await add(net, "SW-B", "10.0.0.3", "procurve", W_SAMPLE, base_mac=MAC_SW_B)
+    await factory_sys_name(net, a, "10.0.0.2")
+    await factory_sys_name(net, b, "10.0.0.3")
+    m = await main.build_map()
+    assert sorted((x["b"], x["a"], x["A"]["ports"], x["B"]["ports"]) for x in m["links"]) == [
+        (a, core, ["1", "2"], ["3", "6"]), (b, core, ["1"], ["6"])]
+    assert (await changes.inventory(core))["uplinks"] == {"1", "2"}
+    assert (await changes.inventory(a))["uplinks"] == {"3", "6"}
+    assert (await changes.inventory(b))["uplinks"] == {"6"}
+
+
+async def test_two_switches_of_one_model_with_one_name_keep_their_own_uplinks(net):
+    """Review Focus 2 with switches of one model: both "SW" have the same ports. CORE:1 names "SW" port 6 (the first SW's), CORE:2 <->
+    the second SW's port 3 only base MACs see. The LLDP pair to the second SW (it has a port 6 too) displaces no MAC link: each SW
+    keeps its real uplink, the second one has port 6 as an uplink as well."""
+    core = await add(net, "CORE", "10.0.0.1", "procurve", W_SAMPLE, lldp("1", "SW", "6", "6"), fdb("1", MAC_SW_B), base_mac=MAC_CORE)
+    sw1 = await add(net, "SW", "10.0.0.2", "procurve", W_SAMPLE, base_mac=MAC_SW_A)
+    sw2 = await add(net, "SW", "10.0.0.3", "procurve", W_SAMPLE, fdb(BP3, MAC_CORE), base_mac=MAC_SW_B)
+    m = await main.build_map()
+    assert sorted((x["a"], x["A"]["ports"], x["b"], x["B"]["ports"]) for x in m["links"]) == [
+        (core, ["1"], sw1, ["6"]), (core, ["1", "2"], sw2, ["3", "6"])]
+    assert (await changes.inventory(core))["uplinks"] == {"1", "2"}
+    assert (await changes.inventory(sw1))["uplinks"] == {"6"}
+    assert (await changes.inventory(sw2))["uplinks"] == {"3", "6"}
 
 
 async def test_links_carry_ids_and_names(net):
@@ -105,6 +148,25 @@ def test_an_lldp_name_two_switches_carry_is_tried_at_each():
     switches = [sw(1, "CORE", "1", ["SW", "6", "6"]), sw(2, "SW", "6", ["x", "1", "1"]), sw(3, "SW", "24", ["x", "1", "1"]),
                 sw(4, "SW", "6", ["x", "1", "1"])]
     assert [(x["a"], x["A"]["ports"], x["b"], x["B"]["ports"]) for x in main._links(switches, {})] == [(1, ["1"], 2, ["6"]), (1, ["1"], 4, ["6"])]
+
+
+def test_the_switches_of_a_shared_name_are_tried_in_id_order():
+    """The ids of a shared name are a set: {9, 2} iterates 9 first. The links come in id order all the same."""
+    switches = [sw(1, "CORE", "1", ["SW", "6", "6"]), sw(9, "SW", "6", ["x", "1", "1"]), sw(2, "SW", "6", ["x", "1", "1"])]
+    assert [(x["a"], x["b"]) for x in main._links(switches, {})] == [(1, 2), (1, 9)]
+
+
+def test_a_pair_from_a_shared_name_displaces_no_base_mac_pair():
+    """Unique names, a shared sysName: CORE:1 names "HP-2530" port 6, which switch 2 (the MAC-linked one, first in order) and switch 3
+    both have; CORE:2 <-> 2:3 only base MACs see. The MAC pair stays, the shared name's pairs come after it."""
+    def s(sid, k, base, ports):
+        return {"id": sid, "k": k, "sys": FACTORY if sid > 1 else k, "baseMac": base,
+                "ports": [{"n": n, "tr": "", "u": ["1"], "t": [], "s": 1000, "l": e} for n, e in ports]}
+    switches = [s(1, "CORE", "mac-core", [("1", [[FACTORY, "6", "6"]]), ("2", [])]), s(2, "SW-A", "mac-a", [("3", []), ("6", [])]),
+                s(3, "SW-B", "mac-b", [("3", []), ("6", [])])]
+    links = main._links(switches, {(1, "2"): {"mac-a"}, (2, "3"): {"mac-core"}})
+    assert [(x["a"], x["A"]["ports"], x["b"], x["B"]["ports"], x["src"]) for x in links] == [
+        (1, ["1", "2"], 2, ["3", "6"], "mac"), (1, ["1"], 3, ["6"], "lldp")]
 
 
 def test_links_join_by_id_and_order_a_before_b_by_id():

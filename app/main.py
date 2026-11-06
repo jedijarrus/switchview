@@ -1543,7 +1543,7 @@ def confirmed_endpoints(switches: list[dict], all_macs: dict[tuple[int, str], se
     for s in switches:
         for p in s["ports"]:
             for entry in p["l"]:
-                for nid in keys.get(entry[0], ()):
+                for nid in sorted(keys.get(entry[0], ())):
                     if nid != s["id"]:
                         claims |= {((s["id"], p["n"]), (nid, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nid]}
     out = {end for here, there in claims if (there, here) in claims for end in (here, there)}
@@ -1560,10 +1560,12 @@ def confirmed_endpoints(switches: list[dict], all_macs: dict[tuple[int, str], se
 def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> list[dict]:
     """The links between the switches, by switch id (a name is not unique): per link the ids in "a" < "b", their names in "an" / "bn"
     for display; all_macs by (id, port). An LLDP entry of a port is [sysName, PortDesc (else PortId), PortId] (R40; a row from before
-    the upgrade has only the first two). A sysName several switches carry (switch_keys) is tried at each of them that has the port it
-    names. The neighbour's port is looked up by the PortDesc first, then by the PortId: with other vendors the PortDesc is often the
-    long name or the description of the port, the PortId its ifName. A pair only the PortId finds is added after the base-MAC pairs
-    and displaces none of them: it only adds links."""
+    the upgrade has only the first two). A sysName several switches carry (switch_keys; the factory sysName of one model, or two
+    switches of one name) is tried at each of them that has the port it names, in id order. The neighbour's port is looked up by the
+    PortDesc first, then by the PortId: with other vendors the PortDesc is often the long name or the description of the port, the
+    PortId its ifName. A pair only the PortId finds, and every pair from a name more than one switch carries (the own one counted), is
+    added after the base-MAC pairs and displaces none of them: it only adds links. Otherwise a shared name's pair to a switch that has
+    the named port only by chance hid that switch's real link, one only base MACs see, and its real uplink lost its protection (R40)."""
     by_id = {s["id"]: s for s in switches}
     sys2 = switch_keys(switches)
     base2 = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
@@ -1572,7 +1574,7 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
         return next((p for p in by_id[sid]["ports"] if p["n"] == n), None)
 
     pairs: dict[tuple, str] = {}
-    by_port_id: dict[tuple, str] = {}    # Paare, die erst die PortId findet
+    late: dict[tuple, str] = {}    # pairs that only add links: found by the PortId, or from a name several switches carry
     lldp_ports = set()
     for s in switches:
         for p in s["ports"]:
@@ -1580,18 +1582,19 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
                 continue
             for entry in p["l"]:
                 nsys, nport = entry[0], entry[1]
-                for nid in sys2.get(nsys, ()):
-                    if nid == s["id"]:
-                        continue
+                nids = sys2.get(nsys, set())
+                for nid in sorted(nids - {s["id"]}):
                     np_ = port(nid, nport.strip())
-                    if np_:
+                    if np_ and len(nids) == 1:
                         pairs[tuple(sorted([(s["id"], p["n"]), (nid, nport.strip())]))] = "lldp"
                         for kk, pp in ((s["id"], p), (nid, np_)):
                             lldp_ports.add((kk, pp["n"]))
                             if pp["tr"]:
                                 lldp_ports.add((kk, pp["tr"]))
+                    elif np_:
+                        late[tuple(sorted([(s["id"], p["n"]), (nid, nport.strip())]))] = "lldp"
                     elif len(entry) > 2 and entry[2].strip() and port(nid, entry[2].strip()):
-                        by_port_id[tuple(sorted([(s["id"], p["n"]), (nid, entry[2].strip())]))] = "lldp"
+                        late[tuple(sorted([(s["id"], p["n"]), (nid, entry[2].strip())]))] = "lldp"
     # Ohne LLDP: Port, an dem die Basis-MAC eines anderen Switches gelernt wird, und umgekehrt
     seen_at: dict[tuple, str] = {}
     for (sid, pname), macset in all_macs.items():
@@ -1608,7 +1611,7 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
         if any({a, b} == {x[0][0], x[1][0]} for x in pairs):
             continue
         pairs[tuple(sorted([(a, pa), (b, pb)]))] = "mac"
-    for key, src in by_port_id.items():
+    for key, src in late.items():
         pairs.setdefault(key, src)
 
     groups: dict[tuple, dict] = {}
