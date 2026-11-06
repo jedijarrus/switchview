@@ -673,11 +673,12 @@ async def _step(cid: int, steps: list, text: str, level: str = "info"):
 
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
-    ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte."""
+    ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
+    and _run_snmp set it to 1 right before anything does)."""
     async with db() as conn:
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
-            "mechanism) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "mechanism, sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
              int(bool(plan.get("expert"))), revert_of, plan.get("mechanism")))
@@ -690,7 +691,12 @@ async def run_change(cid: int):
 
     Auf dem Schreibweg der Vorschau (changes.mechanism; NULL heisst ssh, eine Zeile von vor der Spalte): "snmp" faehrt _run_snmp, ein
     unbekannter bricht ab, ohne den Switch anzufassen (nie still per SSH). Der Rest hier ist der SSH-Weg; ab dem Lock gilt die Switch-Zeile
-    von dann, und ohne SSH-CLI in ihrem Treiber endet er failed, ohne Sitzung (R39)."""
+    von dann, und ohne SSH-CLI in ihrem Treiber endet er failed, ohne Sitzung (R39).
+
+    sent = 1 goes into the row right before send_config_set and right before write memory: from there on the switch may have taken
+    something. An exception after that point ends "unclear", not "failed" (the SNMP way's rule): netmiko's ReadTimeout from
+    send_config_set, say, comes after the lines went out. A line the switch refused (ConfigInvalidException) stays "failed", with
+    sent = 1 (the lines before it can be in effect). A revert that ends ok marks the change it took back (_mark_reverted)."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
             ch = await cur.fetchone()
@@ -715,6 +721,14 @@ async def run_change(cid: int):
 
     pre = post = None
     status, error, saved, output = "failed", None, 0, ""
+    sent = False    # from here on the switch may have taken something (changes.sent)
+
+    async def going_out():
+        nonlocal sent
+        if not sent:
+            await _upd(cid, sent=1)    # before it goes out: if writing the row fails, nothing is sent
+            sent = True
+
     try:
         inv = await inventory(sid) if kind == "ports" else None
         lock = sshcli.lock(sid)
@@ -755,6 +769,7 @@ async def run_change(cid: int):
                     await _upd(cid, before=json.dumps(plan["before"]))
                 if plan["commands"]:
                     await step(f"Sende {len(plan['commands'])} Befehle")
+                    await going_out()
                     try:
                         output = await asyncio.to_thread(conn.send_config_set, plan["commands"], read_timeout=30,
                                                          error_pattern=ERROR_PATTERN, cmd_verify=True)
@@ -778,6 +793,7 @@ async def run_change(cid: int):
                         return
                     await step("Prüfung ok")
                 await step("Speichere (write memory)")
+                await going_out()
                 await asyncio.to_thread(conn.save_config)
                 saved, status = 1, "ok"
                 await step("Gespeichert", "ok")
@@ -786,7 +802,7 @@ async def run_change(cid: int):
     except Exception as e:  # noqa: BLE001
         if pre is None:  # R27: per SSH nicht bis zur running-config gekommen (Verbinden oder erstes Lesen scheiterte)
             invalidate_cfg(sid)
-        status, error = ("unclear" if post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        status, error = ("unclear" if sent or post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
         _log_masked(cid, e, mask)
         await step(error, "error")
     finally:
@@ -801,6 +817,7 @@ async def run_change(cid: int):
             invalidate_cfg(sid)
         if kind == "save" and status == "ok" and req.get("of"):
             await _upd(int(req["of"]), saved=1)
+        await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))
         # "Speichern" (also "Trotzdem speichern") writes the whole running configuration, not only what change "of" sent: the audit
         # names the state it read before, the start of the sha of its backup "vor #cid" (or of the equal one before it)
         stand = f", Stand {sshcli.backup_sha(pre)[:12]}" if kind == "save" and pre else ""
@@ -847,7 +864,9 @@ async def _run_snmp(cid: int, ch, row):
       5. Zuruecklesen und pruefen (verify_snmp, die ganze VLAN-Zugehoerigkeit, R32): scheitert der Read oder weicht etwas ab, unclear.
          Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
     Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed; ein
-    abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". Nie SSH, keine Sicherung, kein
+    abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". The row gets sent = 1 right
+    before the SET is handed over (changes.sent), so a restart (mark_interrupted) and the follow-up actions (actions_of) know it too; a
+    revert that ends ok marks the change it took back (_close, _mark_reverted). Nie SSH, keine Sicherung, kein
     switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg, und age_cfg fuer die
     Zeit nach einem Neustart)."""
     sid = ch["switch_id"]
@@ -916,6 +935,7 @@ async def _run_snmp(cid: int, ch, row):
             await step(f"Setze {n} {'Wert' if n == 1 else 'Werte'} per SNMP (ein SET)")
             await age_cfg(sid)    # vor sent: scheitert das Schreiben in die DB, ist nichts gesendet
             unsaved = await unsaved_ssh_changes(sid) if autosave else []    # R42: was dieses SET mitspeichert, im Lock festgestellt
+            await _upd(cid, sent=1)    # changes.sent, before the SET goes out: if writing the row fails, nothing is sent
             sent = True
             invalidate_cfg(sid)
             set_failed = False
@@ -973,12 +993,13 @@ def change_refs(ids: list[int]) -> str:
 async def unsaved_ssh_changes(sid: int) -> list[int]:
     """Die Aenderungen von Switch sid, die ein SNMP-SET auf einem Treiber mit snmp_autosave mitspeichern wuerde (R42): per SSH gelaufen
     (mechanism ssh, oder NULL von vor der Spalte), mit Folgen in der laufenden Konfiguration (Status ok / unclear / failed, nicht
-    zurueckgenommen) und absichtlich nicht gespeichert (saved 0). Ohne Speichern-Aenderungen: ein gescheitertes write memory hat keinen
-    eigenen Stand, den traegt die Aenderung, die es speichern sollte. Ids aufsteigend."""
+    zurueckgenommen, and sent: 1, or NULL from before the column; one that sent nothing has nothing to be saved, R48) und absichtlich
+    nicht gespeichert (saved 0). Ohne Speichern-Aenderungen: ein gescheitertes write memory hat keinen eigenen Stand, den traegt die
+    Aenderung, die es speichern sollte. Ids aufsteigend."""
     async with db() as conn:
         async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND (mechanism IS NULL OR mechanism = 'ssh') AND saved = 0 "
-                                "AND reverted_by IS NULL AND status IN ('ok', 'unclear', 'failed') AND kind != 'save' ORDER BY id",
-                                (sid,)) as cur:
+                                "AND reverted_by IS NULL AND status IN ('ok', 'unclear', 'failed') AND kind != 'save' "
+                                "AND (sent IS NULL OR sent = 1) ORDER BY id", (sid,)) as cur:
             return [r["id"] for r in await cur.fetchall()]
 
 
@@ -1026,12 +1047,51 @@ async def _refuse(cid: int, ch, error: str):
 
 async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str, steps: list):
     """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis und Schritte in EINEM Schreiben in die Zeile, Audit wie auf dem
-    SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config."""
+    SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config. A
+    revert that ended ok marks the change it took back (_mark_reverted), as on the SSH way."""
     sid = ch["switch_id"]
     await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
+    await _mark_reverted(ch, cid, status)
     await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
     if status in ("ok", "unclear", "failed") and ch["kind"] != "save":
         asyncio.create_task(_repoll(sid))
+
+
+async def _mark_reverted(ch, cid: int, status: str):
+    """Change cid (its row ch) took back change ch["revert_of"]: only a revert that ended ok marks that one reverted_by = cid (review
+    §2). An unclear or failed revert leaves it revertable: another revert plans against a fresh read and does only what is missing."""
+    if ch["revert_of"] and status == "ok":
+        await _upd(int(ch["revert_of"]), reverted_by=cid)
+
+
+def may_have_sent(ch) -> bool:
+    """Whether change ch may have reached its switch: sent is 1, or NULL (a row from before the column, unknown, counted as sent)."""
+    return ch["sent"] != 0
+
+
+def actions_of(ch) -> dict[str, bool]:
+    """The follow-up actions of change ch, as the UI offers them (main._change_out serves both): "Rückgängig" (can_revert) for a port
+    change that ended ok / unclear / failed, is not reverted yet and may have sent something; "Trotzdem speichern" (can_save, write
+    memory) for an SSH change (NULL = ssh) that ended unclear / failed, is not saved and may have sent something. The same rules as
+    main._plan_revert and main._plan_save, which refuse the rest."""
+    sent = may_have_sent(ch)
+    return {"can_revert": ch["kind"] == "ports" and not ch["reverted_by"] and ch["status"] in ("ok", "unclear", "failed") and sent,
+            "can_save": (ch["mechanism"] or "ssh") == "ssh" and ch["status"] in ("unclear", "failed") and not ch["saved"] and sent}
+
+
+INTERRUPTED = "Abgebrochen durch Neustart von SwitchView"
+
+
+async def mark_interrupted() -> int:
+    """At start: every change the last process left queued or running ends now. One that never sent anything (sent 0) is "aborted"
+    (INTERRUPTED + ", nichts gesendet"), every other one "unclear" as before (sent 1, or NULL from before the column). Returns how many."""
+    async with db() as conn:
+        aborted = await conn.execute("UPDATE changes SET status = 'aborted', error = ?, finished_at = datetime('now') "
+                                     "WHERE status IN ('queued', 'running') AND sent = 0", (f"{INTERRUPTED}, nichts gesendet",))
+        unclear = await conn.execute("UPDATE changes SET status = 'unclear', error = ?, finished_at = datetime('now') "
+                                     "WHERE status IN ('queued', 'running')", (INTERRUPTED,))
+        await conn.commit()
+    return aborted.rowcount + unclear.rowcount
 
 
 async def _repoll(sid: int):

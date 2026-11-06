@@ -84,10 +84,7 @@ async def lifespan(app: FastAPI):
         log.warning(warning)
     await init_db()
     await auth.prune_sessions()    # expired sessions of before the start; the scheduler prunes hourly from here on
-    async with db() as conn:  # nach Neustart haengen gebliebene Aenderungen markieren
-        await conn.execute("UPDATE changes SET status = 'unclear', error = 'Abgebrochen durch Neustart von SwitchView', "
-                           "finished_at = datetime('now') WHERE status IN ('queued', 'running')")
-        await conn.commit()
+    await changes.mark_interrupted()    # changes the last process left queued or running: aborted if nothing went out, else unclear
     await _schedule()
     scheduler.start()
     yield
@@ -967,8 +964,9 @@ async def _make_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
 
 async def _warn_unsaved(row, driver: drivers.Driver, plan: dict):
     """R42: ein SNMP-SET auf einem Treiber mit snmp_autosave laesst den Switch seine gesamte laufende Konfiguration speichern, auch jede
-    per SSH absichtlich nicht gespeicherte Aenderung (changes.unsaved_ssh_changes). Das sagt die Vorschau laut, vor den Hinweisen zu den
-    Ports. Keine Sperre: per SNMP geht es gerade dann, wenn SSH weg ist und sich die SSH-Aenderung weder zuruecknehmen noch speichern laesst."""
+    per SSH absichtlich nicht gespeicherte Aenderung, die etwas gesendet hat (changes.unsaved_ssh_changes; R48: one that sent nothing
+    is not named). Das sagt die Vorschau laut, vor den Hinweisen zu den Ports. Keine Sperre: per SNMP geht es gerade dann, wenn SSH weg
+    ist und sich die SSH-Aenderung weder zuruecknehmen noch speichern laesst."""
     if not drivers.can(driver, "snmp_autosave"):
         return
     ids = await changes.unsaved_ssh_changes(row["id"])
@@ -1033,12 +1031,13 @@ def _refuse_ssh_way(row, driver: drivers.Driver, ch, verb: str):
 async def _plan_save(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict, dict, str, str]:
     """Speichern (write memory) nach einer Aenderung, die unklar oder fehlgeschlagen endete; nur per SSH, und es plant nie etwas. Eine
     SNMP-Aenderung speichert ein Treiber mit snmp_autosave selbst; bei jedem anderen geht Speichern per SNMP nicht, das bleibt dem
-    Switch (R26). Beides vor der Pruefung des Status: eine SNMP-Aenderung, die ok endete, ist dort nicht unbedingt gespeichert."""
+    Switch (R26). Beides vor der Pruefung des Status: eine SNMP-Aenderung, die ok endete, ist dort nicht unbedingt gespeichert. A
+    change that sent nothing (changes.may_have_sent) has nothing to save either: the same 409. The rules of changes.actions_of."""
     if mech == "snmp":
         if drivers.can(driver, "snmp_autosave"):
             raise HTTPException(409, "SNMP-Änderungen werden automatisch gespeichert")
         raise HTTPException(409, "Per SNMP nicht speicherbar – bitte am Switch speichern (z. B. write memory / copy running-config startup-config)")
-    if ch["status"] not in ("unclear", "failed") or ch["saved"]:
+    if ch["status"] not in ("unclear", "failed") or ch["saved"] or not changes.may_have_sent(ch):    # sent nothing: nothing to save
         raise HTTPException(409, "Diese Änderung muss nicht gespeichert werden")
     _refuse_ssh_way(row, driver, ch, "speichern")
     try:
@@ -1053,9 +1052,13 @@ async def _plan_save(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict, 
 async def _plan_revert(row, driver: drivers.Driver, ch, mech: str) -> tuple[dict, dict, str, str]:
     """Rueckgaengig: plan_ports mit desired = before der Aenderung gegen einen frischen Read auf ihrem Weg mech. Geht der gerade nicht,
     409 mit dem Grund; per SSH auch, wenn before Felder hat, die der SSH-Weg nicht kennt (SSH_FIELDS; der Planer liefe sonst in einen
-    KeyError). Was ein Treiber per SNMP nicht schreiben kann, sperrt plan_ports je Port (snmpwrite.snmp_block_reason)."""
+    KeyError). Was ein Treiber per SNMP nicht schreiben kann, sperrt plan_ports je Port (snmpwrite.snmp_block_reason). A change that
+    sent nothing (changes.may_have_sent, e.g. failed before connecting) has nothing to take back: 409, before any read. The rules of
+    changes.actions_of."""
     if ch["kind"] != "ports" or ch["reverted_by"] or ch["status"] in ("queued", "running", "aborted"):
         raise HTTPException(409, "Diese Änderung lässt sich nicht zurücknehmen")
+    if not changes.may_have_sent(ch):    # e.g. failed before connecting: the switch is as it was
+        raise HTTPException(409, f"Änderung #{ch['id']} hat nichts an den Switch gesendet – es gibt nichts zurückzunehmen")
     req = {"desired": json.loads(ch["before"] or "{}"), "expert": bool(ch["expert"])}
     if mech == "snmp":
         reason = _snmp_unwritable(row, driver, set())
@@ -1107,12 +1110,9 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
         raise HTTPException(409, "Die Vorschau ist veraltet, bitte neu laden")
     if not plan["shown"] and kind != "save":
         raise HTTPException(422, "Es gibt nichts zu ändern")
+    # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,
                                       revert_of=body.of if body.mode == "revert" else None)
-    if body.mode == "revert":
-        async with db() as conn:
-            await conn.execute("UPDATE changes SET reverted_by = ? WHERE id = ?", (cid, body.of))
-            await conn.commit()
     t = asyncio.create_task(changes.run_change(cid))
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
@@ -1122,8 +1122,9 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
 def _change_out(r, secrets: list[str]) -> dict:
     """A changes row as the API serves it: error, output and the text of every step masked again (cfgparse.mask_secrets with
     secrets, changes._secrets_of of its switch). A row from before Phase 2 was stored unmasked; on one that run_change stored masked
-    the masking changes nothing. The row in the database stays as it is (E26, as for backups)."""
-    d = dict(r)
+    the masking changes nothing. The row in the database stays as it is (E26, as for backups). Plus can_revert and can_save
+    (changes.actions_of): the UI offers "Rückgängig" and "Trotzdem speichern" by these flags alone."""
+    d = dict(r) | changes.actions_of(r)
     for k in ("ports", "desired", "before", "commands", "steps"):
         d[k] = json.loads(d[k] or ("[]" if k in ("ports", "commands", "steps") else "{}"))
     d.pop("request", None)

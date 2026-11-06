@@ -548,6 +548,32 @@ async def test_revert_of_an_snmp_change_runs_snmp_and_restores_the_pvid(env):
     assert env.ssh == []
 
 
+async def test_a_failed_revert_leaves_the_change_revertable(env):
+    sid, cid = await forward_port3(env)
+    rid, _ = await apply(sid, {"mode": "revert", "of": cid})
+    env.agent.read_error = snmp.SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")    # forward_port3 cleared agent.sets: read_error applies
+    assert (await run(env, rid))["status"] == "failed" and (await change(cid))["reverted_by"] is None
+
+
+async def test_a_successful_revert_marks_the_change_reverted(env):
+    sid, cid = await forward_port3(env)
+    rid, _ = await apply(sid, {"mode": "revert", "of": cid})
+    assert (await run(env, rid))["status"] == "ok" and (await change(cid))["reverted_by"] == rid
+
+
+@pytest.mark.parametrize("set_mode, read_error, status, sent", [
+    ("apply", None, "ok", 1), ("timeout", None, "unclear", 1), ("lost", None, "ok", 1), ("apply", TIMEOUT, "failed", 0)],
+    ids=["ok", "set-timeout", "set-answer-lost", "pre-read-fails"])
+async def test_snmp_records_whether_the_set_went_out(env, set_mode, read_error, status, sent):
+    """changes.sent over SNMP: 1 from the moment the SET is handed over, whatever comes back; 0 when the change ends before it."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.set_mode = set_mode
+    env.agent.read_error = read_error and snmp.SnmpError(read_error)
+    ch = await run(env, cid)
+    assert (ch["status"], ch["sent"]) == (status, sent)
+
+
 async def test_snmp_before_comes_from_the_live_read(env):
     """`before` is taken from the read in the run, not from the preview (as on the SSH path): port 3's PVID changed from 1 to 30
     after the preview. shown does not carry the PVID of a u change, so the token still matches and the change runs; its `before` keeps
@@ -972,14 +998,14 @@ def unsaved_warning(refs: str, many: bool = False) -> str:
 
 
 async def old_change(sid: int, *, status: str = "unclear", mechanism: str | None = "ssh", saved: int = 0, kind: str = "ports",
-                     reverted_by: int | None = None) -> int:
-    """A finished change of the switch as an earlier run left it (mechanism NULL: a row from before the column)."""
+                     reverted_by: int | None = None, sent: int | None = None) -> int:
+    """A finished change of the switch as an earlier run left it (mechanism NULL, sent NULL: a row from before the column)."""
     async with db.db() as conn:
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, saved, steps, expert, "
-            "mechanism, reverted_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "mechanism, reverted_by, sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, USER, kind, "Port 6: VLAN 20", "{}", "[]", "{}", "{}", "[]", status, saved, json.dumps([["2026-11-01 10:00:00", "Gesendet",
-             "info"]]), 0, mechanism, reverted_by))
+             "info"]]), 0, mechanism, reverted_by, sent))
         await conn.commit()
         return cur.lastrowid
 
@@ -1016,6 +1042,16 @@ async def test_snmp_revert_preview_warns_too_and_the_fallback_warning_stays_firs
     env.ssh_fails = "connect"
     _, plan = await apply(sid, PC_PROBE)
     assert plan["warnings"] == [f"SSH nicht verfügbar ({SSH_DOWN}), die Änderung geht per SNMP", unsaved_warning(f"#{old}")]
+
+
+async def test_the_unsaved_warning_skips_changes_that_sent_nothing(env):
+    sid = await env.switch("procurve")
+    listed, silent = await old_change(sid, status="failed"), await old_change(sid, status="failed", sent=0)
+    plan = (await main._make_plan(await switch_row(sid), main.PlanIn(**PC_PROBE)))[0]
+    assert plan["warnings"] == [unsaved_warning(f"#{listed}")]
+    cid, _ = await apply(sid, PC_PROBE)
+    assert (await run(env, cid))["status"] == "ok"
+    assert [(await change(i))["saved"] for i in (listed, silent)] == [1, 0]     # and the SET marks only what it saved
 
 
 @pytest.mark.parametrize("set_mode", ["apply", "lost"])

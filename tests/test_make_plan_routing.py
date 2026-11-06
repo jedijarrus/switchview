@@ -255,17 +255,25 @@ def refused(r, status: int, detail: str):
 
 
 def add_change(tmp_path, sid: int, *, before: dict, mechanism: str | None, status: str = "ok", kind: str = "ports", saved: int = 0,
-               summary: str = "Port 2: VLAN 99") -> int:
-    """A changes row as a finished change leaves it (mechanism NULL: a row from before the column)."""
+               summary: str = "Port 2: VLAN 99", sent: int | None = None) -> int:
+    """A changes row as a finished change leaves it (mechanism NULL, sent NULL: a row from before the column)."""
     conn = sqlite3.connect(tmp_path / "switchview.db")
     try:
         cur = conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, saved, steps, "
-            "expert, mechanism) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "expert, mechanism, sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, "tester", kind, summary, "{}", json.dumps(sorted(before)), "{}", json.dumps(before), "[]", status, saved, "[]", 0,
-             mechanism))
+             mechanism, sent))
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def reverted_by_of(tmp_path, cid: int) -> int | None:
+    conn = sqlite3.connect(tmp_path / "switchview.db")
+    try:
+        return conn.execute("SELECT reverted_by FROM changes WHERE id = ?", (cid,)).fetchone()[0]
     finally:
         conn.close()
 
@@ -879,6 +887,37 @@ def test_revert_of_an_unrevertable_change_is_409(api, fake, tmp_path):
     sid = switch(api, "procurve")
     cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism=None, status="aborted")
     refused(plan(api, sid, {"mode": "revert", "of": cid}), 409, "Diese Änderung lässt sich nicht zurücknehmen")
+
+
+# ── Revert and save only of a change that sent something (changes.sent; NULL, a row from before the column, counts as sent) ──────
+def test_revert_of_a_failed_change_that_sent_nothing_is_refused(api, fake, tmp_path):
+    sid = switch(api, "procurve", ssh=True)
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism="ssh", status="failed", sent=0)
+    refused(plan(api, sid, {"mode": "revert", "of": cid}), 409, f"Änderung #{cid} hat nichts an den Switch gesendet – es gibt nichts zurückzunehmen")
+    assert fake.calls == []                  # nothing read, nothing planned
+
+
+def test_save_of_a_failed_change_that_sent_nothing_is_refused(api, fake, tmp_path):
+    sid = switch(api, "procurve", ssh=True)
+    cid = add_change(tmp_path, sid, before={}, mechanism="ssh", status="failed", sent=0)
+    refused(plan(api, sid, {"mode": "save", "of": cid}), 409, "Diese Änderung muss nicht gespeichert werden")
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("sent", [1, None], ids=["sent", "from-before-the-column"])
+def test_revert_and_save_of_a_failed_change_that_sent_stay(api, fake, tmp_path, sent):
+    sid = switch(api, "procurve", ssh=True)
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism="ssh", status="failed", sent=sent)
+    assert preview(api, sid, {"mode": "revert", "of": cid})["commands"] == ["vlan 20 untagged 2"]
+    assert preview(api, sid, {"mode": "save", "of": cid})["kind"] == "save"
+
+
+def test_apply_of_a_revert_leaves_the_original_unreverted(api, fake, tmp_path):   # only the end of the revert sets reverted_by
+    sid = switch(api, "procurve", ssh=True)
+    cid = add_change(tmp_path, sid, before={"2": {"u": "20"}}, mechanism="ssh")     # port 2 is in 99 in SSH_CONFIG: "vlan 20 untagged 2"
+    r = preview(api, sid, {"mode": "revert", "of": cid})
+    assert apply(api, sid, {"mode": "revert", "of": cid}, r["token"]).status_code == 200
+    assert reverted_by_of(tmp_path, cid) is None                                 # run_change is a fake here: the revert never ran
 
 
 # ── Summary, drivers ──────────────────────────────────────────────────────────────────────────────────────────────────────────────

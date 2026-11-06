@@ -98,7 +98,7 @@ async def test_a_read_timeout_does_not_leak_the_radius_key(ssh_env):         # N
     cmd = "radius-server host 203.0.113.10 key S3cr3t.Key!"
     ssh_env.on_send = ReadTimeout(f"\n\nPattern not detected: {re.escape(cmd)!r} in output.")
     row = ssh_env.change(await ssh_env.run_prepare(radius_server="203.0.113.10", radius_key="S3cr3t.Key!"))
-    assert row["status"] == "failed" and "S3cr3t" not in json.dumps(row) and "***" in row["error"]
+    assert row["status"] == "unclear" and "S3cr3t" not in json.dumps(row) and "***" in row["error"]
 
 
 async def test_the_log_gets_the_traceback_masked(ssh_env, caplog):

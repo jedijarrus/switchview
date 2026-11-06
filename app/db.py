@@ -187,6 +187,10 @@ ADDED_COLUMNS = (
     # would be an oracle for the masked secrets in a copy of the database). sshcli.store_backup compares it to tell a change of
     # secrets alone, which the masked sha cannot see. Existing rows have NULL: the next backup of the same masked text fills it in.
     ("config_backups", "raw_mac", "TEXT"),
+    # Whether a change may have reached its switch: 0 while nothing has gone out (changes.create_change writes 0), 1 from the moment
+    # the switch may have taken something (right before send_config_set / write memory over SSH, right before the SET over SNMP).
+    # Existing rows have NULL: unknown, and counted as sent (changes.may_have_sent), so they keep revert and save as before.
+    ("changes", "sent", "INTEGER"),
 )
 
 

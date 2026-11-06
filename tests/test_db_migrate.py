@@ -44,8 +44,10 @@ NEW_COLUMNS = {
     },
     "changes": {
         "mechanism": ("TEXT", 0, None),
+        "sent": ("INTEGER", 0, None),    # Phase 3 appends sent
     },
 }
+# config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by Task 6's migration test.
 
 
 async def _table_info(conn, table: str) -> list[tuple]:

@@ -514,9 +514,10 @@
       $("#prog").innerHTML = `<p style="margin:0 0 10px"><b>${esc(c.summary)}</b></p>${head}<div style="margin-top:10px">${stepsHtml(c)}</div>${done && c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`;
       if (done) {
         const btns = [];
-        if (["unclear", "failed"].includes(c.status) && c.kind === "ports" && !c.reverted_by) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
-        // Speichern (write memory) gibt es nur per SSH; eine SNMP-Änderung speichert der Switch selbst oder gar nicht (der Server lehnt ab)
-        if (["unclear", "failed"].includes(c.status) && !c.saved && c.mechanism !== "snmp") btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
+        // Which follow-up actions a change has is the server's rule (can_revert / can_save, changes.actions_of): none for a change that
+        // sent nothing, no save (write memory) over SNMP. Here "Rückgängig" only after unclear / failed, as before; the list offers it after ok
+        if (["unclear", "failed"].includes(c.status) && c.can_revert) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
+        if (c.can_save) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
         btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
         const foot = $("#m-foot"); foot.innerHTML = "";
         btns.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
@@ -535,7 +536,7 @@
     if (!rows.length) { el.innerHTML = `<div class="empty">Noch keine Änderungen.</div>`; return; }
     el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Zeit</th><th>Benutzer</th>${switchId ? "" : "<th>Switch</th>"}<th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(c =>
       `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}</td><td>${chPill(c)}</td>
-        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${c.kind === "ports" && !c.reverted_by && ["ok", "unclear", "failed"].includes(c.status) ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>`;
+        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${c.can_revert ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>`;
     el.onclick = async e => {
       const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]");
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
