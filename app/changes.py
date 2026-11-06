@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import re
+import traceback
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -747,10 +748,10 @@ async def run_change(cid: int):
             finally:
                 await asyncio.to_thread(sshcli.disconnect, conn)
     except Exception as e:  # noqa: BLE001
-        log.exception("Änderung %s", cid)
         if pre is None:  # R27: per SSH nicht bis zur running-config gekommen (Verbinden oder erstes Lesen scheiterte)
             invalidate_cfg(sid)
         status, error = ("unclear" if post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        _log_masked(cid, e, mask)
         await step(error, "error")
     finally:
         await _upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=_now(), output=mask(output or ""))
@@ -767,6 +768,13 @@ async def run_change(cid: int):
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}")
         if status in ("ok", "unclear", "failed") and kind != "save":
             asyncio.create_task(_repoll(sid))
+
+
+def _log_masked(cid: int, e: BaseException, mask) -> None:
+    """Logs the exception e that ends change cid with its whole traceback, through mask like every stored text of the change: an
+    exception text can carry a secret (netmiko's ReadTimeout names the command, the RADIUS key in it), and a container log often goes
+    to a collector with more readers than the host."""
+    log.error("Änderung %s: %s", cid, mask("".join(traceback.format_exception(e))))
 
 
 async def _logged(cid: int, what: str, aw) -> bool:
@@ -904,8 +912,8 @@ async def _run_snmp(cid: int, ch, row):
             else:
                 await step(SNMP_UNSAVED, "warn")
     except Exception as e:  # noqa: BLE001
-        log.exception("Änderung %s", cid)
         status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        _log_masked(cid, e, mask)
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:
         if status is None:  # nicht zu Ende gelaufen: der Task wurde abgebrochen

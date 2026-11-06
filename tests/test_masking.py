@@ -12,6 +12,7 @@ run. Each test gets its own database under tmp_path, set up by the app's own ini
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections import defaultdict
@@ -205,6 +206,20 @@ async def test_a_read_timeout_does_not_leak_the_radius_key(ssh_env):         # N
     assert row["status"] == "failed" and "S3cr3t" not in json.dumps(row) and "***" in row["error"]
 
 
+async def test_the_log_gets_the_traceback_masked(ssh_env, caplog):
+    """The exception that ends a change goes to the container log with its whole traceback, masked like the stored texts: here the
+    ReadTimeout of a RADIUS preparation, which names the key."""
+    cmd = "radius-server host 203.0.113.10 key S3cr3t.Key!"
+    ssh_env.on_send = ReadTimeout(f"\n\nPattern not detected: {re.escape(cmd)!r} in output.")
+    with caplog.at_level(logging.ERROR, logger="switchview.changes"):
+        cid = await ssh_env.run_prepare(radius_server="203.0.113.10", radius_key="S3cr3t.Key!")
+    assert "S3cr3t" not in caplog.text
+    [rec] = [r for r in caplog.records if r.name == "switchview.changes"]
+    text = rec.getMessage()
+    assert (rec.levelname, rec.exc_info) == ("ERROR", None) and text.startswith(f"Änderung {cid}: Traceback (most recent call last):")
+    assert 'netmiko.exceptions.ReadTimeout: \n\nPattern not detected: ' in text and 'key\\\\ "***"' in text
+
+
 async def test_the_ssh_password_never_lands_in_a_change(ssh_env):
     ssh_env.on_connect = RuntimeError("login manager/ssh-s3cret refused")
     row = ssh_env.change(await ssh_env.run_prepare(radius_server="203.0.113.10", radius_key="S3cretKey1"))
@@ -336,6 +351,18 @@ async def test_an_snmp_change_masks_with_the_row_of_after_the_lock(ssh_env, monk
     await task
     row = ssh_env.change(cid)
     assert (row["status"], row["output"]) == ("unclear", "SET: ***") and "n3w" not in json.dumps(row)
+
+
+async def test_an_snmp_change_logs_its_traceback_masked(ssh_env, monkeypatch, caplog):
+    """_run_snmp logs like run_change: an exception none of its steps expects (here from the SET) with its traceback, masked."""
+    cid = await snmp_change(ssh_env, monkeypatch, "-")
+    monkeypatch.setattr(snmpwrite, "apply_ops", raising_async_fn(RuntimeError("boom rw-s3cret ro-s3cret")))
+    with caplog.at_level(logging.ERROR, logger="switchview.changes"):
+        await changes.run_change(cid)
+    assert ssh_env.change(cid)["error"] == "RuntimeError: boom *** ***" and "s3cret" not in caplog.text
+    [rec] = [r for r in caplog.records if r.name == "switchview.changes"]
+    assert rec.exc_info is None and "Traceback (most recent call last):" in rec.getMessage()
+    assert rec.getMessage().endswith("RuntimeError: boom *** ***\n")
 
 
 # ── A change row from before this update ──────────────────────────────────────────────────────────────────────────────────────────
