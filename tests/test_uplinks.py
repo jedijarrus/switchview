@@ -318,7 +318,8 @@ async def test_procurve_only_links_and_uplinks_are_what_they_were(net):
                      fdb("2", "00:1a:2b:00:00:0b"), base_mac="00:1a:2b:00:00:0c")]
     m = await main.build_map()
     old = legacy_links(two_elements(m["switches"]), await all_macs())
-    assert m["links"] == old
+    assert [{k: v for k, v in link.items() if k != "confirmed"} for link in m["links"]] == old    # F3 adds "confirmed" (Task 6)
+    assert all(link["confirmed"] for link in m["links"])    # both sides report every one of them
     assert link_ports(m) == [("HP-A", ["4", "5"], "Trk1", "HP-C", ["4", "5"], "Trk1", "lldp"), ("HP-A", ["6"], "", "HP-B", ["6"], "", "lldp"),
                              ("HP-B", ["2"], "", "HP-C", ["3"], "", "mac")]
     for sid, sw in zip(ids, m["switches"]):

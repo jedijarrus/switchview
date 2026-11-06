@@ -138,6 +138,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .topo .edge.thick { stroke-width: 3; }
 .topo .edge.warn { stroke: var(--warn); }
 .topo .edge.mac { stroke-dasharray: 5 4; }
+.topo .edge.unconf { stroke-dasharray: 1 5; }
 .topo .elabel { fill: var(--fg-2); font: 400 10.5px var(--mono); paint-order: stroke; stroke: var(--surface-2); stroke-width: 4px; stroke-linejoin: round; }
 
 /* Tables */

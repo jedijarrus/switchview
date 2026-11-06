@@ -1278,14 +1278,15 @@ async def test_poll_of_a_driver_without_snmp_poe_walks_no_poe(world, monkeypatch
 
 
 async def test_map_shows_poe_only_where_there_is_some(world, monkeypatch):
-    """build_map (the display API): a port with PoE gets "poe" {on, status, mw}; a port without has exactly the keys it had before."""
+    """build_map (the display API): a port with PoE gets "poe" {on, status, mw}; a port without has exactly the keys it had before
+    and "uc" (F3, every port)."""
     row = await world.switch("procurve", W_POE)
     monkeypatch.setattr(snmp, "walk", PollAgent(recording(W_POE) | {HP_POE_POWER: HP_POWER_SAMPLE}).walk)
     await poller.poll_switch(row["id"])
     ports = {p["n"]: p for p in (await main.build_map())["switches"][0]["ports"]}
     assert ports["1"]["poe"] == {"on": True, "status": 3, "mw": 5400}
     assert ports["3"]["poe"] == {"on": False, "status": 1, "mw": 0}
-    assert set(ports["Trk1"]) == {"st", "lim", "n", "a", "o", "ad", "s", "pv", "u", "t", "tr", "mb", "l", "mc", "d"}
+    assert set(ports["Trk1"]) == {"st", "lim", "n", "a", "o", "ad", "s", "pv", "u", "t", "tr", "mb", "l", "mc", "d", "uc"}
     assert set(ports["1"]) == set(ports["Trk1"]) | {"poe"}
 
 

@@ -1168,13 +1168,17 @@ async def unknown_devices(user=Depends(auth.current_user)):
     out = []
     for s in m["switches"]:
         for p in s["ports"]:
-            # Uplinks, Trunks und Ports mit LLDP-Nachbar (APs, Telefone mit PC) auslassen: dort lernt der Switch fremde MACs
-            if p["n"].startswith("Trk") or p["tr"] or p.get("up") or p["l"] or p["mc"] > 4:
+            # F3: only trunks and confirmed uplinks are skipped. An LLDP frame or a MAC flood on an access port no longer hides the
+            # devices behind it; such entries are flagged and listed after the unflagged ones, so they push no one past the cap.
+            if p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]):
                 continue
+            flags = [f for f, on in (("uplink_lldp", p.get("up")), ("lldp", p["l"]), ("many", p["mc"] > 4)) if on]
             for d in p["d"]:
                 if d[0] in known or d[0] in base:
                     continue
-                out.append({"mac": d[0], "vlan": d[1], "ip": d[2], "name": d[3], "vendor": d[4], "sw": s["k"], "port": p["n"], "st": p["st"]})
+                out.append({"mac": d[0], "vlan": d[1], "ip": d[2], "name": d[3], "vendor": d[4], "sw": s["k"], "port": p["n"], "st": p["st"],
+                            "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"]})
+    out.sort(key=lambda e: bool(e["flags"]))  # stable: poll order within each group
     return out[:500]
 
 
@@ -1328,6 +1332,15 @@ async def build_map() -> dict:
             for p in next(x for x in switches if x["k"] == k)["ports"]:
                 if p["n"] in ups or (p["tr"] and p["tr"] in ups):
                     p["up"] = True
+    # F3: "uc" = the port, its trunk or (for a trunk) one of its members is an endpoint both switches confirm; a link is confirmed
+    # when every port of both sides is. Display and the unknown-device list only: the uplink protection (changes.inventory) is unchanged.
+    confirmed = confirmed_endpoints(switches, all_macs)
+    for s in switches:
+        for p in s["ports"]:
+            p["uc"] = any((s["k"], n) in confirmed for n in (p["n"], p["tr"], *p["mb"]) if n)
+    uc = {(s["k"], p["n"]) for s in switches for p in s["ports"] if p["uc"]}
+    for l in links:
+        l["confirmed"] = all((k, n) in uc for k, side in ((l["a"], l["A"]), (l["b"], l["B"])) for n in side["ports"])
     return {"generated": datetime.now(timezone.utc).isoformat(), "vlans": vlans, "switches": switches, "links": links}
 
 
@@ -1338,6 +1351,28 @@ def switch_keys(switches: list[dict]) -> dict[str, str]:
     for s in switches:
         keys[s["sys"]] = s["k"]; keys[s["k"]] = s["k"]
     return keys
+
+
+def confirmed_endpoints(switches: list[dict], all_macs: dict) -> set[tuple[str, str]]:
+    """(switch k, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
+    LLDP: port P of A has an entry whose sysName maps (switch_keys) to another switch B and whose element 1 or 2 (stripped) is B's port
+    Q, and Q has an entry that maps back to A and P in the same way: P and Q. MAC: B's base MAC is learned on P (all_macs[(A, P)], a
+    trunk under its own name) and A's base MAC on any port of B: P. A claim only one side makes confirms nothing, not even the foreign
+    port an LLDP entry names: otherwise a device on an access port would decide which port of another switch counts as confirmed."""
+    keys = switch_keys(switches)
+    names = {s["k"]: {p["n"] for p in s["ports"]} for s in switches}
+    claims = set()  # ((A, P), (B, Q)): an LLDP entry on A's port P names B's port Q
+    for s in switches:
+        for p in s["ports"]:
+            for entry in p["l"]:
+                nk = keys.get(entry[0])
+                if nk and nk != s["k"]:
+                    claims |= {((s["k"], p["n"]), (nk, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nk]}
+    out = {end for here, there in claims if (there, here) in claims for end in (here, there)}
+    base = {s["baseMac"]: s["k"] for s in switches if s["baseMac"]}
+    learned = {(k, base[mac]) for (k, _), macs in all_macs.items() for mac in macs if base.get(mac) not in (None, k)}  # (A, B): A learns B's base MAC
+    out |= {(k, pname) for (k, pname), macs in all_macs.items() if any((base.get(mac), k) in learned for mac in macs)}
+    return out
 
 
 def _links(switches: list[dict], all_macs: dict) -> list[dict]:

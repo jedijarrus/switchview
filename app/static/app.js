@@ -99,6 +99,9 @@
   const physOf = s => s.ports.filter(p => !p.n.startsWith("Trk"));
   const isPeer = p => p.l.some(x => MAP.switches.some(s => s.sys === x[0] || s.k === x[0]));
   const isUplink = p => isPeer(p) || !!p.tr || !!p.up;
+  const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && isPeer(p)));
+  const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="Nur per LLDP gemeldet, die Gegenseite bestätigt es nicht. Ein Gerät am Port kann LLDP fälschen – vor Ort prüfen.">Uplink (unbestätigt)</span>`
+    : isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : "";
   const linkIssue = l => l.onlyA.length + l.onlyB.length + l.native.length;
   const stDot = s => `<span class="st-dot ${s.ok ? "" : "bad"}" aria-hidden="true"></span>`;
   function zones() { const z = []; MAP.switches.forEach(s => { const k = s.zone || "Ohne Zone"; if (!z.includes(k)) z.push(k); }); return z; }
@@ -170,7 +173,7 @@
       const det = issue ? `<details class="lk"><summary><span class="pill warn">${issue} Abweichung${issue > 1 ? "en" : ""}</span> <span class="linkbtn">Details</span></summary><div style="display:grid;gap:4px;margin-top:6px">
         ${l.onlyA.length ? `<div>nur ${esc(l.a)}: ${chips(l.onlyA)}</div>` : ""}${l.onlyB.length ? `<div>nur ${esc(l.b)}: ${chips(l.onlyB)}</div>` : ""}${l.native.length ? `<div>ungetaggt verschieden: ${chips(l.native)}</div>` : ""}</div></details>` : `<span class="pill ok">gleich</span>`;
       const side = (k, x) => `${esc(k)} <span class="mono muted">${esc(x.trunk || x.ports.join(","))}</span>`;
-      return `<tr><td><b>${esc(focus && l.b === focus ? l.b : l.a)}</b> ⇄ <b>${esc(focus && l.b === focus ? l.a : l.b)}</b></td><td>${side(l.a, l.A)}<br>${side(l.b, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td>${l.src === "mac" ? "MAC-Tabellen" : "LLDP"}</td><td>${det}</td></tr>`;
+      return `<tr><td><b>${esc(focus && l.b === focus ? l.b : l.a)}</b> ⇄ <b>${esc(focus && l.b === focus ? l.a : l.b)}</b></td><td>${side(l.a, l.A)}<br>${side(l.b, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
   }
 
@@ -187,7 +190,7 @@
     let edges = "";
     MAP.links.forEach(l => {
       const a = pos[l.a], b = pos[l.b]; if (!a || !b) return;
-      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.a)} ⇄ ${esc(l.b)}</title></line>`;
+      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""} ${l.confirmed ? "" : "unconf"}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.a)} ⇄ ${esc(l.b)}</title></line>`;
     });
     let nodes = "";
     MAP.switches.forEach(s => {
@@ -195,7 +198,7 @@
       nodes += `<g class="node ${s.ok ? "" : "bad"}" tabindex="0" role="link" data-goto="${esc(s.k)}" aria-label="${esc(s.k)} öffnen"><rect x="${p[0] - NW / 2}" y="${p[1] - NH / 2}" width="${NW}" height="${NH}" rx="7"/>
         <text class="nname" x="${p[0]}" y="${p[1] - 3}" text-anchor="middle">${esc(s.k)}</text><text class="nmeta" x="${p[0]}" y="${p[1] + 13}" text-anchor="middle">${ph.filter(x => x.o).length}/${ph.length} aktiv</text></g>`;
     });
-    t.innerHTML = `<svg viewBox="0 0 ${x0 - 30} ${maxH + 20}" role="img" aria-label="Topologie">${svg}${edges}${nodes}</svg><p class="note">Dicke Linie = Trunk · orange = VLANs unterschiedlich · gestrichelt = ohne LLDP erkannt</p>`;
+    t.innerHTML = `<svg viewBox="0 0 ${x0 - 30} ${maxH + 20}" role="img" aria-label="Topologie">${svg}${edges}${nodes}</svg><p class="note">Dicke Linie = Trunk · orange = VLANs unterschiedlich · gestrichelt = ohne LLDP erkannt · gepunktet = unbestätigt (nur eine Seite meldet LLDP)</p>`;
     const openNode = e => { const g = e.target.closest("[data-goto]"); if (g) go("switches", g.dataset.goto); };
     t.addEventListener("click", openNode);
     t.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openNode(e); } });
@@ -326,7 +329,7 @@
     });
     const dev = p => p.l.length ? p.l.map(x => `${esc(x[0])} <span class="mono muted">${esc(x[1])}</span>`).join(", ") : p.tr && !p.n.startsWith("Trk") ? `<span class="muted">über ${esc(p.tr)}</span>` : p.mc > 3 ? `<span class="muted">${p.mc} Geräte</span>` : p.d.map(d => esc(d[3] || d[2] || d[4] || d[0])).join(", ") || `<span class="muted">–</span>`;
     const ck = p => writable(s) && !p.tr ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
-    $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(stOf(s, p.st))}${isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : ""}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
+    $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(stOf(s, p.st))}${uplinkPill(p)}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="muted">Keine Ports für diesen Filter.</td></tr>`;
     if ($("#pick-all")) $("#pick-all").checked = false;
   }
@@ -773,7 +776,7 @@
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
           <button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button></div></div>
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
-      <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">gelernt an Ports mit wenigen Geräten, noch nicht in der Datenbank</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>`;
+      <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>`;
     const rows = () => {
       const t = devText.toLowerCase();
       const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "err" && d.pf_state === "fehler"))
@@ -791,10 +794,12 @@
     $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     try {
       const un = await api("GET", "/api/devices/unknown");
+      const flagText = { uplink_lldp: () => "Port gilt per LLDP als Uplink (unbestätigt)", lldp: d => d.lldp ? `hinter LLDP-Gerät „${d.lldp}“` : "hinter LLDP-Gerät", many: d => `Port mit ${d.mc} Geräten` };
+      const unknownFlags = d => (d.flags || []).filter(f => flagText[f]).map(f => `<div class="muted">${esc(flagText[f](d))}</div>`).join("");
       if (!$("#ulist")) return;
       $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th></th></tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}</td><td>${stPill(stOf(MAP && MAP.switches.find(x => x.k === d.sw), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && MAP.switches.find(x => x.k === d.sw), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
