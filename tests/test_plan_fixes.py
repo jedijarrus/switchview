@@ -125,6 +125,22 @@ def test_a_member_of_an_uplink_trunk_the_poll_does_not_know_needs_expert_mode_ov
     assert (plan["blocked"], plan["ops"]) == ([{"port": "4", "reason": "Uplink/Trunk: nur im Expertenmodus"}], [])
 
 
+def test_a_new_trunk_member_whose_sibling_is_the_uplink_needs_expert_mode():
+    """Final review: the trunk was formed after the last poll, so the poll knows neither A5 nor A6 as members and changes.inventory lists
+    only A6 (the uplink port itself), not Trk1. The running-config puts A5 next to A6 in Trk1, so A5 is a member of an uplink trunk:
+    switching it off needs expert mode (R40). Before Task 4 such a member was refused outright."""
+    req = {"ports": ["A5"], "set": {"status": "off"}}
+    port_inv = make_inv(uplinks={"A6"}, stale={"A5", "A6"})
+    plan = changes.plan_ports(FW, port_inv, cfg, req)
+    assert (plan["blocked"], plan["commands"]) == ([{"port": "A5", "reason": "Uplink/Trunk: nur im Expertenmodus"}], [])
+    assert changes.plan_ports(FW, port_inv, cfg, {**req, "expert": True})["commands"] == ["interface A5 disable"]
+
+
+def test_a_new_trunk_member_whose_sibling_is_the_uplink_needs_expert_mode_over_snmp():
+    plan = plan_snmp(SAMPLE, PROCURVE, {"ports": ["4"], "set": {"status": "off"}}, uplinks={"5"}, stale={"4", "5"})
+    assert (plan["blocked"], plan["ops"]) == ([{"port": "4", "reason": "Uplink/Trunk: nur im Expertenmodus"}], [])
+
+
 def test_a_trunk_member_takes_name_and_on_off_over_snmp():                      # W_SAMPLE: 4 + 5 in Trk1, without a bridge port of their own
     plan = plan_snmp(SAMPLE, PROCURVE, {"ports": ["4"], "set": {"status": "off"}, "expert": True})
     assert plan["blocked"] == [] and plan["ops"] == [(f"{IF_ADMIN}.4", "i", "2")]

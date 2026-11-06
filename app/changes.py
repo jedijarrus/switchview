@@ -259,8 +259,10 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
             continue
         x_new, m_new = d.get("x", cur["x"]), d.get("m", cur["m"])
         # A member of an uplink trunk is an uplink, by the poll's trunk or the fresh read's (R40): inventory lists it only when the poll
-        # knows it as a member of that trunk
-        uplink = p in inv["uplinks"] or (member and bool({ip["tr"], member_of.get(p)} & inv["uplinks"]))
+        # knows it as a member of that trunk. A trunk formed since the poll: inventory may list only a sibling (the uplink port itself),
+        # not the trunk, so a sibling in the fresh read's trunk counts as well
+        fresh_trk = member_of.get(p)
+        uplink = p in inv["uplinks"] or (member and bool({ip["tr"], fresh_trk, *trunks.get(fresh_trk, ())} & inv["uplinks"]))
         if (d.get("x") or d.get("m")) and (is_trk or uplink):
             blocked.append({"port": p, "reason": "RADIUS/bekannte Geräte gehen nicht auf Uplinks und Trunks"})
             continue
