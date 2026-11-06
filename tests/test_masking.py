@@ -183,6 +183,20 @@ def old_backup(sid: int, text: str) -> int:
         conn.close()
 
 
+def old_change(sid: int, error: str, steps: list, output: str) -> int:
+    """A failed RADIUS preparation of switch sid as a changes row from before this update: error, steps and output stored as they
+    are, without the masking of today."""
+    conn = _connect()
+    try:
+        cur = conn.execute("INSERT INTO changes(switch_id, username, kind, summary, commands, status, steps, output, error, finished_at) "
+                           "VALUES (?, 'tester', 'prepare', 'RADIUS vorbereiten', '[]', 'failed', ?, ?, ?, datetime('now'))",
+                           (sid, json.dumps(steps), output, error))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
 # ── A change over SSH ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async def test_a_read_timeout_does_not_leak_the_radius_key(ssh_env):         # NV, Eingabe: netmikos ReadTimeout-Text
     cmd = "radius-server host 203.0.113.10 key S3cr3t.Key!"
@@ -322,6 +336,38 @@ async def test_an_snmp_change_masks_with_the_row_of_after_the_lock(ssh_env, monk
     await task
     row = ssh_env.change(cid)
     assert (row["status"], row["output"]) == ("unclear", "SET: ***") and "n3w" not in json.dumps(row)
+
+
+# ── A change row from before this update ──────────────────────────────────────────────────────────────────────────────────────────
+def test_old_change_rows_are_masked_on_output(api):                          # NV, Eingabe: Altzeile mit netmikos ReadTimeout-Text
+    """A row stored before the masking of this update (written by sqlite here) is served masked with the secrets SwitchView knows now:
+    the RADIUS key in the form netmiko's ReadTimeout gives it (repr(re.escape(cmd)), which no pattern of mask_secrets finds), and each
+    switch's own secrets in the rows of that switch. What is no secret stays as stored, and so does the row in the database (E26)."""
+    asyncio.run(db.set_setting("radius_key", crypto.encrypt("Old.Rad!Key1")))
+    sid, other = add_switch(), add_switch(name="SW-VK-02", host="203.0.113.42", ssh_pass=crypto.encrypt("ssh-z2"))
+    leak = f"ReadTimeout: \n\nPattern not detected: {re.escape('radius-server host 203.0.113.10 key Old.Rad!Key1')!r} in output."
+    masked = leak.replace("Old\\\\.Rad!Key1", '"***"')
+    steps = [["2026-11-01 08:00:00", "Verbinde mit 203.0.113.21", "info"], ["2026-11-01 08:00:09", leak, "error"]]
+    cid = old_change(sid, leak, steps, "login manager/ssh-s3cret\nradius-server host 203.0.113.10 key Old.Rad!Key1\n")
+    cid2 = old_change(other, "RuntimeError: login manager/ssh-z2 refused", [["2026-11-01 08:01:00", "ssh-z2", "error"]], "")
+    served = {c["id"]: c for c in api.get("/api/changes").json()}
+    assert (served[cid]["error"], served[cid]["steps"]) == (masked, [steps[0], ["2026-11-01 08:00:09", masked, "error"]])
+    assert served[cid]["output"] == 'login manager/***\nradius-server host 203.0.113.10 key "***"\n'
+    assert (served[cid2]["error"], served[cid2]["steps"][0][1]) == ("RuntimeError: login manager/*** refused", "***")
+    for path in (f"/api/changes/{cid}", f"/api/changes?switch_id={sid}", f"/api/changes/{cid2}"):
+        assert not re.search(r"Old\W*Rad|ssh-s3cret|ssh-z2", api.get(path).text), path
+    assert query("SELECT error, steps FROM changes WHERE id = ?", (cid,)) == [(leak, json.dumps(steps))]
+
+
+def test_an_old_change_row_hides_a_radius_key_changed_since(api):
+    """The advice for such a row is to change the RADIUS key; after that SwitchView no longer knows the old one. mask_secrets still
+    finds it behind "key" in netmiko's escaped form (key\\\\ <key>, up to the closing quote of the repr), as it finds "key <key>"."""
+    asyncio.run(db.set_setting("radius_key", crypto.encrypt("New.Rad!Key2")))
+    sid = add_switch()
+    leak = f"ReadTimeout: \n\nPattern not detected: {re.escape('radius-server host 203.0.113.10 key Old.Rad!Key1')!r} in output."
+    cid = old_change(sid, leak, [["2026-11-01 08:00:09", leak, "error"]], "")
+    served = api.get(f"/api/changes/{cid}").json()
+    assert served["error"] == leak.replace("Old\\\\.Rad!Key1", '"***"') and served["steps"][0][1] == served["error"]
 
 
 # ── changes._secrets_of ───────────────────────────────────────────────────────────────────────────────────────────────────────────

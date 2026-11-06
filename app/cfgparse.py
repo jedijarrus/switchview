@@ -100,6 +100,9 @@ _SECRETS = [
     # SNMPv3 passphrases behind every protocol spelling: sha, sha1, sha256, sha-256, des, des56, 3des, aes, aes128, aes-256, ... (§6 (d))
     re.compile(r'(\b(?:auth|priv)\s+(?:md5|sha(?:-?\d+)?|des\d*|3des|aes(?:-?\d+)?)\s+)("[^"]*"|\S+)', re.I),
     re.compile(r'(\bpassword\s+(?:manager|operator|port-access)\b.*?\b(?:sha1|sha256|plaintext)\s+)("[^"]*"|\S+)'),
+    # "key" in a command as netmiko writes it into a ReadTimeout, repr(re.escape(cmd)): key\\ <key>, up to the closing quote; so a
+    # stored text keeps no RADIUS key that SwitchView no longer knows (a change row from before Phase 2, the key changed since)
+    re.compile(r"(\bkey\\+\s+)([^\s']+)"),
     # Tabelle aus 'show radius': IP, Auth-Port, Acct-Port, DM/CoA, Time Window, Key im Klartext
     re.compile(r'(?m)^(\s*\d{1,3}(?:\.\d{1,3}){3}\s+\d+\s+\d+\s+(?:Yes|No)\s+\d+\s+)(\S+)[ \t]*$'),
 ]

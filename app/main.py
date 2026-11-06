@@ -1083,12 +1083,31 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
     return {"id": cid}
 
 
-def _change_out(r) -> dict:
+def _change_out(r, secrets: list[str]) -> dict:
+    """A changes row as the API serves it: error, output and the text of every step masked again (cfgparse.mask_secrets with
+    secrets, changes._secrets_of of its switch). A row from before Phase 2 was stored unmasked; on one that run_change stored masked
+    the masking changes nothing. The row in the database stays as it is (E26, as for backups)."""
     d = dict(r)
     for k in ("ports", "desired", "before", "commands", "steps"):
         d[k] = json.loads(d[k] or ("[]" if k in ("ports", "commands", "steps") else "{}"))
     d.pop("request", None)
+    for k in ("error", "output"):
+        if d[k]:
+            d[k] = cfgparse.mask_secrets(d[k], secrets)
+    d["steps"] = [[s[0], cfgparse.mask_secrets(s[1], secrets), *s[2:]] if isinstance(s, list) and len(s) > 1 and isinstance(s[1], str)
+                  else s for s in d["steps"]]
     return d
+
+
+async def _changes_out(conn, rows) -> list[dict]:
+    """_change_out of each row, with the RADIUS key read once and the secrets of each switch once."""
+    rs = await changes.radius_settings()
+    secrets: dict[int, list[str]] = {}
+    for r in rows:
+        if r["switch_id"] not in secrets:
+            async with conn.execute("SELECT * FROM switches WHERE id = ?", (r["switch_id"],)) as cur:
+                secrets[r["switch_id"]] = changes._secrets_of(await cur.fetchone(), rs)
+    return [_change_out(r, secrets[r["switch_id"]]) for r in rows]
 
 
 @app.get("/api/changes")
@@ -1101,7 +1120,8 @@ async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depe
     args.append(max(1, min(limit, 500)))
     async with db() as conn:
         async with conn.execute(q, args) as cur:
-            return [_change_out(r) for r in await cur.fetchall()]
+            rows = await cur.fetchall()
+        return await _changes_out(conn, rows)
 
 
 @app.get("/api/changes/{cid}")
@@ -1109,9 +1129,9 @@ async def get_change(cid: int, user=Depends(auth.current_user)):
     async with db() as conn:
         async with conn.execute("SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id WHERE c.id = ?", (cid,)) as cur:
             r = await cur.fetchone()
-    if not r:
-        raise HTTPException(404, "Änderung nicht gefunden")
-    return _change_out(r)
+        if not r:
+            raise HTTPException(404, "Änderung nicht gefunden")
+        return (await _changes_out(conn, [r]))[0]
 
 
 @app.post("/api/switches/{sid}/config/refresh")
