@@ -644,9 +644,16 @@ async def cached_cfg(sid: int) -> tuple[dict | None, str | None, bool]:
     return (json.loads(row["parsed"]), row["taken_at"], bool(row["stale"])) if row else (None, None, False)
 
 
+class HostKeyRefused(RuntimeError):
+    """fresh_cfg's SSH read was refused because the switch offered another host key than the pinned one (sshcli.HostKeyMismatch,
+    backup_config's "host_key"): whoever answers at the address may be an attacker. main._choose_mechanism lets SNMP take over then
+    only with an SNMPv3 authPriv write identity. The message is backup_config's error."""
+
+
 async def fresh_cfg(sid: int, max_age_s: int = CFG_MAX_AGE_S) -> dict:
     """Die geparste running-config: aus switch_cfg, wenn sie juenger als max_age_s ist und weder verworfen (R27, invalidate_cfg) noch
     veraltet (stale, mark_cfg_stale), sonst per SSH neu gelesen. RuntimeError, wenn das Lesen scheitert; dann ist der Cache verworfen.
+    If the read was refused for the switch's host key, the error is HostKeyRefused (a RuntimeError) with the same message.
     RuntimeError ohne Read und ohne Cache fuer einen Switch, dessen Treiber keine SSH-CLI hat (R39): ein Eintrag in switch_cfg waere
     dort eine Fehldeutung oder von vor einem Treiberwechsel. Die Aufrufer fragen das schon vorher; diese Sperre gilt unabhaengig davon."""
     row = await _switch_row(sid)
@@ -660,7 +667,7 @@ async def fresh_cfg(sid: int, max_age_s: int = CFG_MAX_AGE_S) -> dict:
     res = await sshcli.backup_config(sid, "lesen")
     if not res.get("ok"):
         invalidate_cfg(sid)
-        raise RuntimeError(res.get("error") or "Konfiguration konnte nicht gelesen werden")
+        raise (HostKeyRefused if res.get("host_key") else RuntimeError)(res.get("error") or "Konfiguration konnte nicht gelesen werden")
     cfg, _, _ = await cached_cfg(sid)
     return cfg
 
@@ -848,7 +855,7 @@ async def run_change(cid: int):
     except Exception as e:  # noqa: BLE001
         if pre is None:  # R27: per SSH nicht bis zur running-config gekommen (Verbinden oder erstes Lesen scheiterte)
             invalidate_cfg(sid)
-        status, error = ("unclear" if sent or post or output else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        status, error = ("unclear" if sent or post or output else "failed"), _error_text(e, mask)
         _log_masked(cid, e, mask)
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:
@@ -875,6 +882,14 @@ async def run_change(cid: int):
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}")
         if status in ("ok", "unclear", "failed") and kind != "save":
             asyncio.create_task(_repoll(sid))
+
+
+def _error_text(e: BaseException, mask) -> str:
+    """The error of a change that ends with the exception e (run_change, _run_snmp): its type and its text through mask, the text cut
+    to 300 characters after masking (a secret that straddles the cut leaves nothing of itself), except for an sshcli.HostKeyMismatch:
+    SwitchView's own text, bounded by the 64-character host, whose end says what to do."""
+    text = mask(str(e))
+    return f"{type(e).__name__}: {text if isinstance(e, sshcli.HostKeyMismatch) else text[:300]}"
 
 
 def _log_masked(cid: int, e: BaseException, mask) -> None:
@@ -1026,7 +1041,7 @@ async def _run_snmp(cid: int, ch, row):
             else:
                 await step(SNMP_UNSAVED, "warn")
     except Exception as e:  # noqa: BLE001
-        status, error = ("unclear" if sent else "failed"), f"{type(e).__name__}: {mask(str(e))[:300]}"    # masked, then cut
+        status, error = ("unclear" if sent else "failed"), _error_text(e, mask)
         _log_masked(cid, e, mask)
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:

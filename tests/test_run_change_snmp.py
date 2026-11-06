@@ -855,6 +855,19 @@ async def test_snmp_error_raised_by_the_set_itself_is_unclear(env):
     assert len(env.agent.sets) == 1
 
 
+@pytest.mark.parametrize("cut", [True, False], ids=["long-error-cut", "host-key-mismatch-whole"])
+async def test_the_snmp_way_cuts_the_error_like_the_ssh_way(env, cut):
+    """changes._error_text on both ways: an exception's text is cut to 300 characters, a HostKeyMismatch's never (its end says what to
+    do). Here the SET raises it; no SNMP step raises a HostKeyMismatch, the test pins that both ways share the one rule."""
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    env.agent.set_raises = RuntimeError("x" * 400) if cut else sshcli.HostKeyMismatch("sw-" + "a" * 57 + ".org", "ssh-ed25519 AAAA")
+    ch = await run(env, cid)
+    text = str(env.agent.set_raises)
+    assert len(text) > 300
+    assert ch["error"] == f"{type(env.agent.set_raises).__name__}: {text[:300] if cut else text}"
+
+
 async def test_snmp_before_is_stored_before_the_set(env):
     """By the time the SET reaches the switch, the change row already holds the `before` of the live read (here PVID 30, drifted since
     the preview's 1): a run that dies during the SET can still be taken back to the true state."""

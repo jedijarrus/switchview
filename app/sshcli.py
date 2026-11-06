@@ -29,8 +29,10 @@ from db import db, execute_sync, query_sync
 log = logging.getLogger("switchview.ssh")
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1bE|\x1b[=>]")
-# show commands that print secrets in clear text even with encrypt-credentials: SwitchView never runs them (E27)
-SECRET_SHOWS = re.compile(r"^\s*show\s+(radius|tech|tacacs)\b", re.I)
+# show commands that print secrets in clear text even with encrypt-credentials: SwitchView never runs them (E27). The CLI takes
+# abbreviations, so: sh, sho or show, then radius / tech / tacacs or an abbreviation of one of them from three letters on, but no
+# longer other word (show radiusx and show technical still run).
+SECRET_SHOWS = re.compile(r"^\s*sh(?:ow?)?\s+(?:rad(?:i(?:us?)?)?|tec(?:h)?|tac(?:a(?:cs?)?)?)\b", re.I)
 
 
 _locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -83,16 +85,24 @@ def fingerprints(key: str | None) -> dict | None:
 
 class HostKeyMismatch(RuntimeError):
     """The switch offered another SSH host key than the pinned one (pinned: the key line stored for it), so no session: paramiko
-    compares the key after the key exchange and before the login, nothing is sent, not even the password. Without pinned (None) the
-    key of a first contact could not be pinned, because the switch entry changed during the login (another address, or deleted)."""
+    compares the key after the key exchange and before the login, nothing is sent, not even the password. With after_login the
+    mismatch showed after the AutoAdd login of a first contact (another key was pinned meanwhile, _open): the password went out
+    then, no command did. Without pinned (None) the key of a first contact could not be pinned, because the switch entry changed
+    during the login (another address, or deleted)."""
 
-    def __init__(self, host: str, pinned: str | None):
+    def __init__(self, host: str, pinned: str | None, after_login: bool = False):
         if pinned:
             fp = fingerprints(pinned)
             sha = fp["sha256"] if fp else "unlesbar"
-            text = (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({sha}). Möglicher Angriff oder neuer Schlüssel am "
-                    "Switch – nichts gesendet. Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
-                    "„SSH-Hostschlüssel vergessen“.")
+            if after_login:
+                text = (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({sha}): während der Anmeldung wurde ein anderer "
+                        "gemerkt. Möglicher Angriff oder neuer Schlüssel am Switch – Sitzung beendet, kein Befehl gesendet (das "
+                        "Kennwort ging schon hinaus). Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
+                        "„SSH-Hostschlüssel vergessen“.")
+            else:
+                text = (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({sha}). Möglicher Angriff oder neuer Schlüssel am "
+                        "Switch – nichts gesendet. Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
+                        "„SSH-Hostschlüssel vergessen“.")
         else:
             text = (f"SSH-Hostschlüssel von {host} ließ sich nicht merken: der Switch-Eintrag hat sich inzwischen geändert (Adresse oder "
                     "gelöscht) – Sitzung beendet, kein Befehl gesendet. Bitte erneut versuchen.")
@@ -146,8 +156,8 @@ def _open(row):
     a caller may have read row before the lock, before another contact pinned the key. With a pinned key paramiko gets it as the
     only known host key and refuses any other before the login (HostKeyMismatch). Without one the first contact takes the key it is
     offered and pins it, but only while the entry still has row's host and no key; is a different key stored afterwards, or none
-    (the entry changed meanwhile), the session is closed and refused. A driver without CLI fails first (NoCliError), before anything
-    else; a switch that is gone gets no session."""
+    (the entry changed meanwhile), the session is closed and refused (HostKeyMismatch after_login: the password went out already, no
+    command does). A driver without CLI fails first (NoCliError), before anything else; a switch that is gone gets no session."""
     reason = cli_refusal(row)
     if reason:
         raise NoCliError(reason)
@@ -178,7 +188,7 @@ def _open(row):
     stored = found[0][0] if found else None
     if stored != key:
         disconnect(conn)
-        raise HostKeyMismatch(row["host"], stored)
+        raise HostKeyMismatch(row["host"], stored, after_login=True)
     return conn
 
 
@@ -205,10 +215,14 @@ def _run_show(row, commands: list[str]) -> dict[str, str]:
     return out
 
 
-def _error(e: Exception) -> str:
-    """An error as the connection test and the backup report it: its type and text, the text cut to 200 characters, except for a
-    HostKeyMismatch (SwitchView's own text, bounded by the 64-character host), whose end says what to do."""
+def error_text(e: Exception) -> str:
+    """An error as the connection test, the backup and "Anmeldungen anzeigen" (main.port_access) report it: its type and text, the
+    text cut to 200 characters, except for a HostKeyMismatch (SwitchView's own text, bounded by the 64-character host), whose end
+    says what to do."""
     return f"{type(e).__name__}: {e if isinstance(e, HostKeyMismatch) else str(e)[:200]}"
+
+
+_error = error_text    # the name of before
 
 
 async def test_ssh(row) -> dict:
@@ -221,7 +235,7 @@ async def test_ssh(row) -> dict:
         first = next((line for line in res["show version"].splitlines() if line.strip()), "")
         return {"ok": True, "detail": first[:120]}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": _error(e)}
+        return {"ok": False, "error": error_text(e)}
 
 
 def backup_sha(content: str) -> str:
@@ -258,7 +272,8 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
 async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
     """Read the running-config of the switch, store it (masked, store_backup) and its parse (changes.store_cfg, the cache of
     changes.fresh_cfg). A configuration that does not parse is still kept as a backup: it is the evidence, all the more for a switch
-    that sends something odd (E24); the answer is then ok False with the parse error."""
+    that sends something odd (E24); the answer is then ok False with the parse error. A read the switch's host key refused
+    (HostKeyMismatch) answers with "host_key": True as well: changes.fresh_cfg tells it from any other failure by that."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM switches WHERE id = ?", (switch_id,)) as cur:
             row = await cur.fetchone()
@@ -274,7 +289,7 @@ async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
             res = await asyncio.to_thread(_run_show, row, ["show running-config"])
     except Exception as e:  # noqa: BLE001
         log.warning("Sicherung %s fehlgeschlagen: %s", row["host"], e)
-        return {"ok": False, "error": _error(e)}
+        return {"ok": False, "error": error_text(e), **({"host_key": True} if isinstance(e, HostKeyMismatch) else {})}
     content = res["show running-config"]
     if "hostname" not in content and "vlan" not in content:
         return {"ok": False, "error": "Antwort sieht nicht nach einer Konfiguration aus"}

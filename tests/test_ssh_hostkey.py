@@ -237,8 +237,14 @@ def listed(api, sid: int) -> dict:
     return next(s for s in r.json() if s["id"] == sid)
 
 
-def mismatch_text(host: str, key: str) -> str:
-    """HostKeyMismatch's message, written out by hand."""
+def mismatch_text(host: str, key: str, after_login: bool = False) -> str:
+    """HostKeyMismatch's message, written out by hand: refused before the login (nothing sent), or after the AutoAdd login of a first
+    contact, when meanwhile another key was pinned (the password went out, no command did)."""
+    if after_login:
+        return (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({pkey(key).fingerprint}): während der Anmeldung wurde ein "
+                "anderer gemerkt. Möglicher Angriff oder neuer Schlüssel am Switch – Sitzung beendet, kein Befehl gesendet (das Kennwort "
+                "ging schon hinaus). Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
+                "„SSH-Hostschlüssel vergessen“.")
     return (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({pkey(key).fingerprint}). Möglicher Angriff oder neuer Schlüssel "
             "am Switch – nichts gesendet. Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
             "„SSH-Hostschlüssel vergessen“.")
@@ -377,8 +383,74 @@ async def test_the_nightly_backup_refuses_a_changed_key(world, sid):
     """backup_config (nightly, manual, the preview's read): no login, no backup, the pin stays; the answer carries the whole text."""
     pin(sid, KEY_A)
     world.offer(KEY_B)
-    assert await sshcli.backup_config(sid) == {"ok": False, "error": f"HostKeyMismatch: {mismatch_text(HOST, KEY_A)}"}
+    assert await sshcli.backup_config(sid) == {"ok": False, "error": f"HostKeyMismatch: {mismatch_text(HOST, KEY_A)}", "host_key": True}
     assert world.logins == 0 and query("SELECT count(*) FROM config_backups")[0][0] == 0 and row(sid)["ssh_host_key"] == KEY_A
+
+
+async def test_fresh_cfg_names_a_refused_host_key(world, sid):
+    pin(sid, KEY_A)
+    world.offer(KEY_B)
+    with pytest.raises(changes.HostKeyRefused, match="passt nicht zum gemerkten"):
+        await changes.fresh_cfg(sid)
+
+
+async def test_other_failures_of_the_read_are_no_host_key_refusal(world, sid):
+    """A switch that does not answer: backup_config's answer has no host_key, fresh_cfg raises a plain RuntimeError (main may then fall
+    back to any write identity), with the message of the backup."""
+    pin(sid, KEY_A)
+    world.refuse = NetmikoTimeoutException("TCP connection to device failed.")
+    assert await sshcli.backup_config(sid) == {"ok": False, "error": "NetmikoTimeoutException: TCP connection to device failed."}
+    with pytest.raises(RuntimeError, match="^NetmikoTimeoutException: TCP connection to device failed.$") as caught:
+        await changes.fresh_cfg(sid)
+    assert not isinstance(caught.value, changes.HostKeyRefused)
+
+
+async def test_fresh_cfg_refuses_with_the_whole_message(world, sid):
+    """HostKeyRefused carries backup_config's error as it is: the remedy at its end included."""
+    pin(sid, KEY_A)
+    world.offer(KEY_B)
+    with pytest.raises(changes.HostKeyRefused) as caught:
+        await changes.fresh_cfg(sid)
+    assert str(caught.value) == f"HostKeyMismatch: {mismatch_text(HOST, KEY_A)}"
+
+
+async def test_a_long_host_keeps_the_remedy_in_the_change(world):
+    sid = add_switch("sw-" + "a" * 57 + ".org")    # 64 characters: the message is longer than 300
+    pin(sid, KEY_A)
+    world.offer(KEY_B)
+    cid = await changes.create_change(sid, "tester", "save", "Speichern", {}, {"shown": [], "desired": {}, "before": {}, "mechanism": "ssh"})
+    await changes.run_change(cid)
+    assert change_row(cid)["error"] == f"HostKeyMismatch: {mismatch_text('sw-' + 'a' * 57 + '.org', KEY_A)}"
+
+
+def test_port_access_shows_the_whole_mismatch(api, world):
+    sid = create(api, ssh_user="manager", ssh_pass="ssh-s3cret")
+    pin(sid, KEY_A)
+    world.offer(KEY_B)
+    r = api.post(f"/api/switches/{sid}/port-access")
+    assert (r.status_code, r.json()["detail"]) == (502, f"HostKeyMismatch: {mismatch_text('203.0.113.42', KEY_A)}")
+
+
+def test_error_text_is_what_the_connection_test_and_the_backup_report():
+    """sshcli.error_text (before: _error, which stays as an alias): type and text, the text cut to 200 characters, except for a
+    HostKeyMismatch."""
+    long_host = "sw-" + "a" * 57 + ".org"
+    assert sshcli._error is sshcli.error_text
+    assert sshcli.error_text(RuntimeError("x" * 250)) == "RuntimeError: " + "x" * 200
+    assert sshcli.error_text(sshcli.HostKeyMismatch(long_host, KEY_A)) == f"HostKeyMismatch: {mismatch_text(long_host, KEY_A)}"
+
+
+def test_the_error_of_a_change_is_masked_then_cut_except_for_a_host_key_mismatch():
+    """changes._error_text, the error of a change that ends with an exception (run_change and _run_snmp): masked, then cut to 300
+    characters, except for a HostKeyMismatch, whose end says what to do."""
+    long_host = "sw-" + "a" * 57 + ".org"
+
+    def mask(text: str) -> str:    # a stand-in for the change's mask
+        return text.replace("s3cret", "***")
+    assert changes._error_text(RuntimeError("s3cret " + "x" * 400), mask) == "RuntimeError: *** " + "x" * 296
+    mismatch = sshcli.HostKeyMismatch(long_host, KEY_A)
+    assert len(str(mismatch)) > 300
+    assert changes._error_text(mismatch, mask) == f"HostKeyMismatch: {mismatch_text(long_host, KEY_A)}"
 
 
 async def test_a_matching_key_lets_the_change_run(world, sid):
@@ -395,7 +467,7 @@ async def test_a_key_pinned_meanwhile_wins_over_the_first_contact(world, sid):
     the session's key differs from the stored one, so the session is closed and refused."""
     world.during_login = lambda: pin(sid, KEY_B)
     res = await sshcli.test_ssh(row(sid))
-    assert res == {"ok": False, "error": f"HostKeyMismatch: {mismatch_text(HOST, KEY_B)}"}
+    assert res == {"ok": False, "error": f"HostKeyMismatch: {mismatch_text(HOST, KEY_B, after_login=True)}"}
     assert row(sid)["ssh_host_key"] == KEY_B and world.disconnects == 1
 
 

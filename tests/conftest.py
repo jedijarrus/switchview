@@ -93,8 +93,8 @@ def _never(*args, **kwargs):
 def login_api(tmp_path, monkeypatch):
     """A TestClient on main.app that sends the CSRF header, without dependency_overrides: every request goes through the real login
     and session code. Its database is a fresh one under tmp_path, set up by the app's own init_db; the settings switch on the
-    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle is a fresh one, no JWKS reload is
-    on record, and the scheduler is booby-trapped. The client is created without `with`, so the app's lifespan never runs. The app
+    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle is a fresh one, no JWKS reload and no
+    failed JWKS fetch is on record, and the scheduler is booby-trapped. The client is created without `with`, so the app's lifespan never runs. The app
     modules are imported here, not at the top, like in _test_environment."""
     import asyncio
 
@@ -113,6 +113,7 @@ def login_api(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "settings", s)
     monkeypatch.setattr(main, "_LOGIN", throttle.LoginThrottle())
     monkeypatch.setattr(auth, "_jwks_refreshed", {})
+    monkeypatch.setattr(auth, "_jwks_failed", {})
     monkeypatch.setattr(main.scheduler, "start", _never)
     asyncio.run(db.init_db())
     return TestClient(main.app, headers=CSRF)

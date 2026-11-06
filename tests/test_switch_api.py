@@ -267,6 +267,34 @@ def test_good_host_is_accepted(api, tmp_path, host):
     assert stored(tmp_path, create(api, host=host))["host"] == host
 
 
+@pytest.mark.parametrize("host, status", [("fe80::1%eth0", 200), ("fe80::1%br-lan.10", 200), ("fe80::1%eth0 10.0.0.9", 422),
+                                          ("fe80::1%x\nfoo", 422), ("fe80::1%" + "a" * 16, 422)])
+def test_a_zone_id_must_be_an_interface_name(api, host, status):
+    assert api.post("/api/switches", json=body(host=host)).status_code == status
+
+
+ZONE_INVALID = "Zonen-Angabe der Adresse ungültig (erlaubt: Buchstaben, Ziffern, . _ -, höchstens 15 Zeichen)"
+
+
+@pytest.mark.parametrize("host", ["fe80::1%eth0 10.0.0.9 ssh-ed25519 AAAA", "fe80::1%x\nfoo", "fe80::1%" + "a" * 16, "fe80::1%ä",
+                                  "fe80::1%eth0\t"])
+def test_a_bad_zone_id_says_why_on_post_and_put(api, tmp_path, host):
+    """The zone lands in the known_hosts line of sshcli._open: whitespace or a line break would end that line. POST and PUT refuse it
+    with the reason, the stored address stays."""
+    r = api.post("/api/switches", json=body(host=host))
+    assert (r.status_code, r.json()["detail"]) == (422, ZONE_INVALID)
+    sid = create(api)
+    r = api.put(f"/api/switches/{sid}", json=body(host=host))
+    assert (r.status_code, r.json()["detail"]) == (422, ZONE_INVALID)
+    assert stored(tmp_path, sid)["host"] == "203.0.113.42"
+
+
+def test_a_zone_id_of_15_characters_is_accepted(api, tmp_path):
+    """15 is IFNAMSIZ - 1 on Linux, the longest interface name."""
+    host = "fe80::1%" + "a" * 15
+    assert stored(tmp_path, create(api, host=host))["host"] == host
+
+
 @pytest.mark.parametrize("field, value", [
     ("snmp_rw_auth_proto", "SHA1"), ("snmp_rw_auth_proto", "sha"), ("snmp_rw_priv_proto", "3DES"), ("snmp_rw_priv_proto", "aes"),
     ("snmp_rw_community", "c" * 65), ("snmp_rw_user", "u" * 65), ("snmp_rw_auth_pass", "p" * 129), ("snmp_rw_priv_pass", "p" * 129),

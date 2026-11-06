@@ -125,7 +125,9 @@ stops the start. HSTS belongs on the TLS-terminating proxy. Sessions are stored 
 **Emergency login.** The emergency login (`ADMIN_USER` / `ADMIN_PASSWORD`) is throttled: after 10 failed attempts within 60 seconds
 from browsers without a device cookie, it refuses such browsers (HTTP 429) until those failures are older than 60 seconds. A browser
 in which the emergency login succeeded once keeps a device cookie and with it a quota of its own, so an attack does not lock it out.
-Entra SSO is never throttled; an access token is refused where an id_token is expected.
+Entra SSO is never throttled; an access token is refused where an id_token is expected. The fetch of Microsoft's signing keys
+(JWKS) waits at most 5 seconds; after a fetch that could not reach Microsoft, SSO logins are refused for 30 seconds without a new
+fetch (the emergency login still works). A refused token is one warning line in the log, without a traceback.
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
@@ -148,9 +150,12 @@ never reaches a device that only pretends to be the switch. The switch form show
 compare them once with the switch (`show crypto host-public-key fingerprint`). The pinned key stays when the switch's address
 changes. If a key changes as expected (replacement, new firmware), every SSH access to that switch fails with "passt nicht zum
 gemerkten" until you choose "SSH-Hostschlüssel vergessen" in the switch form; the next SSH session then pins the key it is offered.
-A refused key counts as "SSH not available": on a ProCurve with SNMP writes on, a port change then falls back to SNMP, and its
-preview starts with "SSH nicht verfügbar (… passt nicht zum gemerkten … Möglicher Angriff …)". Do not confirm such a preview before
-you have checked the fingerprint on the switch; a v2c write community would go to whoever answers at that address.
+A refused key falls back to SNMP only when SNMP writes to that switch with an SNMPv3 authPriv identity: a port change then goes
+over SNMP, and its preview starts with "SSH nicht verfügbar (… passt nicht zum gemerkten … Möglicher Angriff …)". With any other
+write identity (a v2c community, SNMPv3 without privacy) the preview is refused with 502 and the host key message ("Kein Ausweichen
+auf SNMP …"): a v2c community, or the SETs of SNMPv3 without privacy, would go readable to whoever answers at that address. Either
+way, check the fingerprint on the switch before you confirm anything or forget the key. The message is shown whole wherever it
+appears (connection test, backup, change, "Anmeldungen anzeigen"), the remedy at its end included.
 
 **TLS.** "TLS-Zertifikat prüfen" (PacketFence, OPNsense) is on for a new installation; an existing one keeps its stored setting.
 `http://` addresses stay allowed. The settings warn while a check is off or an address uses `http://`: anyone on the network could
@@ -163,7 +168,8 @@ and "Namen jetzt aktualisieren" in the settings.
 
 **Masking.** Secrets are masked in stored backups, in the backup and diff views, in CLI previews and in the error, steps and output
 of every change, also of changes stored before the update (masked when they are served; the rows in the database stay as they were),
-and in the log line of a change that ends with an exception; SwitchView never runs `show radius`, `show tech` or `show tacacs`.
+and in the log line of a change that ends with an exception; SwitchView never runs `show radius`, `show tech` or `show tacacs`,
+nor an abbreviation of them such as `sh rad` or `sho tech`.
 Switch output is parsed within fixed limits (SNMP output per call, values per walk, port ranges and configuration size), so a hostile
 switch cannot exhaust the single worker's memory with one answer.
 

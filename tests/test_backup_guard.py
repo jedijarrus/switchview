@@ -158,6 +158,23 @@ async def test_no_command_that_prints_secrets_opens_a_session(world, cmd):
     assert world.hosts == []
 
 
+@pytest.mark.parametrize("cmd", ["sh rad", "sho tech", "show tac", "SH RADIUS host", "  show radius", "sh radi"])
+async def test_no_abbreviation_that_prints_secrets_opens_a_session(world, cmd):
+    """The CLI takes every abbreviation of show and of radius / tech / tacacs from three letters on: each is refused like the full
+    word."""
+    with pytest.raises(ValueError, match="gibt Geheimnisse im Klartext aus"):
+        await sshcli.run_shows(row_of(add_switch("203.0.113.21")), [cmd])
+    assert world.hosts == []
+
+
+@pytest.mark.parametrize("cmd", ["sh run", "sho ver", "sh ra", "sh tacx", "shower radius"])
+async def test_other_abbreviations_still_run(world, cmd):
+    """The guard of the test above: another abbreviated command, two letters of radius, a longer word and a longer verb get their
+    session."""
+    res = await sshcli.run_shows(row_of(add_switch("203.0.113.21")), [cmd])
+    assert res == {cmd: RUNNING_CONFIG} and world.hosts == ["203.0.113.21"]
+
+
 @pytest.mark.parametrize("cmd", ["show running-config", "show version", "show port-access authenticator clients", "show radiusx",
                                  "show technical"])
 async def test_other_show_commands_still_run(world, cmd):

@@ -46,6 +46,8 @@ scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
 # (sshcli._locks) und Abfrage (poller._locks). Mehrere Worker haetten je ihren eigenen Satz: Jobs liefen mehrfach, das
 # Ratelimit gaelte je Prozess, zwei Worker koennten gleichzeitig per SSH am selben Switch arbeiten (max. 5 Sessions),
 # und der Start (lifespan) markiert die laufende Aenderung eines anderen Workers als abgebrochen.
+# The SSO key cache is in-process as well (auth._jwks, its reload marks auth._jwks_refreshed and the marks of a failed fetch
+# auth._jwks_failed): each worker would fetch from Microsoft and wait out the 30 s after a failed fetch on its own.
 
 
 async def _schedule():
@@ -174,6 +176,9 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
         claims = await asyncio.to_thread(auth.verify_id_token, body.id_token)
     except PermissionError as e:
         raise HTTPException(403, str(e))
+    except auth.TOKEN_ERRORS as e:    # an expected refusal (bad token, JWKS unreachable): one line, no traceback (a flood fills no log)
+        log.warning("Anmeldung über Microsoft abgelehnt: %s", e)
+        raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
     except Exception:  # noqa: BLE001
         log.exception("id_token ungültig")
         raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
@@ -255,6 +260,10 @@ PUBLIC_FIELDS = ("id", "name", "host", "zone", "sort", "enabled", "snmp_version"
                  "created_at", "driver", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto")
 # Hostname: das erste Zeichen kein "-" (und kein "."). net-snmp bekommt den Host als eigenes Argument und laese "-..." als Option.
 HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,63}")
+# The zone id of an IPv6 address (fe80::1%eth0) as an interface name: 15 characters at most (IFNAMSIZ - 1 on Linux), no whitespace and
+# no line break. The host lands in the known_hosts line of sshcli._open, which such a character would end.
+ZONE_RE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
+ZONE_INVALID = "Zonen-Angabe der Adresse ungültig (erlaubt: Buchstaben, Ziffern, . _ -, höchstens 15 Zeichen)"
 # Felder einer Anfrage, deren Wert eine 422-Antwort nie zuruecksendet (pydantic legt ihn in "input" ab): die Geheimnisse der Switches
 # und die der anderen Formulare (Anmeldung, Einstellungen).
 SECRET_INPUTS = frozenset(SECRET_FIELDS) | {"password", "id_token", "opnsense_key", "opnsense_secret", "radius_key", "pf_pass"}
@@ -318,10 +327,14 @@ SNMP_CREDENTIAL_FIELDS = ("snmp_community", "snmp_user", "snmp_auth_pass", "snmp
 
 def _validate(body: SwitchIn):
     try:
-        ipaddress.ip_address(body.host)
+        ip = ipaddress.ip_address(body.host)
     except ValueError:
         if not HOST_RE.fullmatch(body.host):
             raise HTTPException(422, "Adresse ist weder IP noch gültiger Hostname")
+    else:
+        zone = getattr(ip, "scope_id", None)    # ip_address takes any text after "%", whitespace and line breaks included
+        if zone is not None and not ZONE_RE.fullmatch(zone):
+            raise HTTPException(422, ZONE_INVALID)
     if body.driver not in drivers.DRIVERS:
         raise HTTPException(422, "Unbekannter Treiber")
     for proto in (body.snmp_auth_proto, body.snmp_rw_auth_proto):
@@ -866,7 +879,10 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
          noch geht, sonst 409 STALE: nie still der andere Weg. Was nur die CLI kann, lehnt auch ein mitgeschicktes "snmp" mit seinem
          eigenen Grund ab.
       2. Treiber mit CLI und SSH-Zugang: SSH, das Lesen der Konfiguration (changes.fresh_cfg) ist der Pre-Flight. Scheitert es, geht die
-         Aenderung per SNMP, wenn sie dort geht (mit Hinweis), sonst 502 wie bisher, mit dem Grund, warum SNMP nicht geht.
+         Aenderung per SNMP, wenn sie dort geht (mit Hinweis), sonst 502 wie bisher, mit dem Grund, warum SNMP nicht geht. If the read
+         was refused for the switch's host key (changes.HostKeyRefused, Phase 2 F-b), SNMP takes over only with an SNMPv3 authPriv
+         write identity (poller.write_authpriv), otherwise 502: whoever answers at the address may be an attacker, and a v2c community
+         or v3 without privacy would go to it in the clear. A request SNMP cannot take anyway keeps the 502 of before.
       3. Sonst SNMP, wenn die Anfrage dort geht, sonst 409 / 422 mit dem Grund (_snmp_refusal), bei einem Treiber mit CLI (dann fehlt
          der SSH-Zugang) hinter der Meldung von bisher (SSH_NEEDED).
     PoE (R30) geht bei jedem Treiber nur per SNMP, auch bei ProCurve mit SSH: eine Port-Aenderung mit PoE geht als Ganzes per SNMP (u, t,
@@ -906,6 +922,10 @@ async def _choose_mechanism(row, driver: drivers.Driver, body: PlanIn) -> tuple[
             refusal = _snmp_refusal(row, driver, body)
             if refusal:
                 raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {error} (per SNMP geht es auch nicht: {refusal[1]})")
+            if isinstance(e, changes.HostKeyRefused) and not poller.write_authpriv(row):
+                # one period between the host key message (it ends with one) and the reason
+                raise HTTPException(502, f"Konfiguration des Switches nicht lesbar: {error.removesuffix('.')}. Kein Ausweichen auf SNMP: "
+                                         "der Schlüssel kann von einem Angreifer stammen, und SNMP schriebe hier nicht mit SNMPv3 authPriv.")
             return "snmp", None, error
     refusal = _snmp_refusal(row, driver, body)
     if refusal:
@@ -1214,7 +1234,7 @@ async def port_access(sid: int, user=Depends(auth.current_user)):
     try:
         out = await sshcli.run_shows(row, cmds)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"{type(e).__name__}: {str(e)[:200]}")
+        raise HTTPException(502, sshcli.error_text(e))
     return {c: cfgparse.mask_secrets(out.get(c, "")) for c in cmds}
 
 

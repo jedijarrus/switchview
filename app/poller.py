@@ -162,6 +162,16 @@ def write_identity(row) -> tuple[str, dict]:
     raise snmp.SnmpError(NO_WRITE_CREDS)
 
 
+def write_authpriv(row) -> bool:
+    """Whether SNMP SETs to this switch go out with SNMPv3 authPriv (write_identity, its level as snmp._level computes it): neither a
+    v2c community nor v3 without privacy shows to whoever answers at the address. False also without a write identity (snmp.SnmpError).
+    main._choose_mechanism lets SNMP take over after a refused SSH host key only then."""
+    try:
+        return snmp._level(write_identity(row)[1]) == "authPriv"
+    except snmp.SnmpError:
+        return False
+
+
 def _write_secret(row, key: str) -> str | None:
     """Das Geheimnis row[key] im Klartext fuer die Schreib-Identitaet, None wenn keins gespeichert ist. Ein gespeichertes, das sich nicht
     entschluesseln laesst (decrypt gibt dann None), ist ein Fehler und nie "nicht gesetzt"."""

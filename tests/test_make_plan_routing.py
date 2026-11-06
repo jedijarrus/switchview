@@ -10,7 +10,8 @@ The routing rule (spec §5 / Q5: fixed at plan time, never switched mid-apply):
     veraltet" - never a silent switch between preview and apply. /plan ignores an echo (R28): the preview always chooses itself.
   * otherwise: a driver with the `cli` cap and stored SSH credentials goes over SSH, and reading its configuration (changes.fresh_cfg)
     is the pre-flight. If that read fails, SNMP takes over only if the request can go over SNMP (a warning says so), else today's 502
-    plus the reason SNMP cannot. Without `cli` or without SSH credentials: SNMP if possible, else 409 / 422 with the reason.
+    plus the reason SNMP cannot; a read refused for the switch's host key (changes.HostKeyRefused) hands over only to a write identity
+    with SNMPv3 authPriv, else 502. Without `cli` or without SSH credentials: SNMP if possible, else 409 / 422 with the reason.
   * "possible over SNMP": nothing CLI-only in the request (802.1X / MAC auth: status known / radius, limit, guest VLAN, "Protected" on a
     NAC-capable driver, RADIUS prepare -> 409, before any read), the driver has every cap the request needs (needed_ops) and
     poller.creds_of(row, write=True) finds a write identity (else its reason, 422).
@@ -34,9 +35,11 @@ import auth
 import cfgparse
 import changes
 import config
+import crypto
 import db
 import drivers
 import main
+import poller
 import snmp
 import snmpwrite
 import sshcli
@@ -553,6 +556,98 @@ def test_an_ssh_failure_without_a_message_never_falls_back_silently(api, fake):
     refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches nicht lesbar: TimeoutError (per SNMP auch nicht: {SNMP_DOWN})")
     sid = switch(api, "procurve", snmp_write=False, host="203.0.113.22")
     refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches nicht lesbar: TimeoutError (per SNMP geht es auch nicht: {WRITE_DISABLED})")
+
+
+# ── A refused SSH host key (Phase 2 F-b) ──────────────────────────────────────────────────────────────────────────────────────────
+# The SSH read failed because the switch offered another host key than the pinned one (changes.HostKeyRefused): whoever answers at the
+# address may be an attacker, so SNMP takes over only when it writes with SNMPv3 authPriv; a v2c community or v3 without privacy would
+# go to that address in the clear. A request SNMP cannot take anyway keeps today's 502.
+MISMATCH = ("SSH-Hostschlüssel von 203.0.113.21 passt nicht zum gemerkten (SHA256:3f9mUu0QpZ0bXgq3l2yq1b1n2kQe0m7GJmS4ckT8b0E). "
+            "Möglicher Angriff oder neuer Schlüssel am Switch – nichts gesendet. Ist der neue Schlüssel erwartet (Tausch, Firmware): "
+            "Switch → Zugang bearbeiten → „SSH-Hostschlüssel vergessen“.")
+V3_AUTHPRIV_RW = {"snmp_rw_user": "rw", "snmp_rw_auth_proto": "SHA", "snmp_rw_auth_pass": "authpass1", "snmp_rw_priv_proto": "AES",
+                  "snmp_rw_priv_pass": "privpass1"}
+V3_AUTHNOPRIV_RW = {"snmp_rw_user": "rw", "snmp_rw_auth_proto": "SHA", "snmp_rw_auth_pass": "authpass1"}
+V2C_READ = {"snmp_community": "ro-s3cret"}
+V3_AUTHPRIV_READ = {"snmp_version": "3", "snmp_user": "ro", "snmp_auth_proto": "SHA", "snmp_auth_pass": "authpass1",
+                    "snmp_priv_proto": "AES", "snmp_priv_pass": "privpass1"}
+NO_FALLBACK = ("Kein Ausweichen auf SNMP: der Schlüssel kann von einem Angreifer stammen, und SNMP schriebe hier nicht mit SNMPv3 "
+               "authPriv.")
+
+
+def test_a_refused_host_key_does_not_fall_back_to_a_v2c_write(api, fake):
+    sid = switch(api, "procurve", ssh=True, snmp_write=True)
+    fake.ssh_up, fake.ssh_exc = False, changes.HostKeyRefused(f"HostKeyMismatch: {MISMATCH}")
+    r = plan(api, sid, PC_PROBE)
+    assert r.status_code == 502 and r.json()["detail"].endswith("Kein Ausweichen auf SNMP: der Schlüssel kann von einem Angreifer stammen, "
+                                                                "und SNMP schriebe hier nicht mit SNMPv3 authPriv.")
+
+
+def test_a_refused_host_key_still_falls_back_with_authpriv(api, fake):
+    sid = switch(api, "procurve", ssh=True, snmp_write=True, creds=V3_AUTHPRIV_RW)
+    fake.ssh_up, fake.ssh_exc = False, changes.HostKeyRefused(f"HostKeyMismatch: {MISMATCH}")
+    p = preview(api, sid, PC_PROBE)
+    assert p["mechanism"] == "snmp" and p["warnings"][0].startswith("SSH nicht verfügbar (HostKeyMismatch: ")
+
+
+def test_the_refusal_names_the_whole_host_key_message_and_reads_nothing_over_snmp(api, fake):
+    """The 502 carries the host key message with its remedy, then why there is no fallback (one period between them); nothing is read
+    or planned over SNMP."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=True)
+    fake.ssh_up, fake.ssh_exc = False, changes.HostKeyRefused(f"HostKeyMismatch: {MISMATCH}")
+    refused(plan(api, sid, PC_PROBE), 502, f"Konfiguration des Switches nicht lesbar: HostKeyMismatch: {MISMATCH} {NO_FALLBACK}")
+    assert fake.kinds() == ["ssh"]
+
+
+@pytest.mark.parametrize("creds, falls_back", [(RW, False), (V3_AUTHNOPRIV_RW, False), (V2C_READ, False), (V3_AUTHPRIV_READ, True),
+                                               (V3_AUTHPRIV_RW, True)],
+                         ids=["v2c-rw", "v3-authnopriv-rw", "v2c-read", "v3-authpriv-read", "v3-authpriv-rw"])
+def test_only_a_v3_authpriv_write_identity_takes_over_after_a_refused_host_key(api, fake, creds, falls_back):
+    """Whichever identity writes (poller.write_identity: the RW one, else the read one) decides, by its level alone."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=True, creds=creds)
+    fake.ssh_up, fake.ssh_exc = False, changes.HostKeyRefused(f"HostKeyMismatch: {MISMATCH}")
+    r = plan(api, sid, PC_PROBE)
+    if falls_back:
+        assert r.status_code == 200 and r.json()["warnings"] == [f"SSH nicht verfügbar (HostKeyMismatch: {MISMATCH}), die Änderung geht per SNMP"]
+        assert fake.kinds() == ["ssh", "snmp", "plan"]
+    else:
+        refused(r, 502, f"Konfiguration des Switches nicht lesbar: HostKeyMismatch: {MISMATCH} {NO_FALLBACK}")
+
+
+def test_a_refused_host_key_where_snmp_cannot_write_keeps_todays_502(api, fake):
+    """SNMP could not take the request anyway (writing off, or a CLI-only request): the 502 of before, which names why SNMP cannot."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=False)
+    fake.ssh_up, fake.ssh_exc = False, changes.HostKeyRefused(f"HostKeyMismatch: {MISMATCH}")
+    refused(plan(api, sid, PC_PROBE), 502,
+            f"Konfiguration des Switches nicht lesbar: HostKeyMismatch: {MISMATCH} (per SNMP geht es auch nicht: {WRITE_DISABLED})")
+    sid = switch(api, "procurve", ssh=True, snmp_write=True, creds=V3_AUTHPRIV_RW, host="203.0.113.22")
+    refused(plan(api, sid, {"ports": ["2"], "change": {"status": "radius"}}), 502,
+            f"Konfiguration des Switches nicht lesbar: HostKeyMismatch: {MISMATCH} (per SNMP geht es auch nicht: {RADIUS_CLI})")
+
+
+def test_another_ssh_failure_still_falls_back_to_a_v2c_write(api, fake):
+    """Only a refused host key changes the rule: an SSH read that fails otherwise (a RuntimeError, as from fresh_cfg) still hands over to
+    the v2c write identity, with the warning (Spec Q5)."""
+    sid = switch(api, "procurve", ssh=True, snmp_write=True)
+    fake.ssh_up, fake.ssh_exc = False, RuntimeError(f"HostKeyMismatch: {MISMATCH}")    # the same text, but no refusal of the key
+    p = preview(api, sid, PC_PROBE)
+    assert (p["mechanism"], p["warnings"]) == ("snmp", [f"SSH nicht verfügbar (HostKeyMismatch: {MISMATCH}), die Änderung geht per SNMP"])
+
+
+@pytest.mark.parametrize("cols, want", [
+    ({"snmp_write": 0, **V3_AUTHPRIV_RW}, False),               # no write identity at all (snmp.SnmpError): False, never raises
+    ({"snmp_write": 1, "snmp_rw_community": None}, False),      # nor without credentials
+    ({"snmp_write": 1, **V3_AUTHNOPRIV_RW}, False),
+    ({"snmp_write": 1, **V3_AUTHPRIV_RW}, True),
+    ({"snmp_write": 1, "snmp_rw_user": None, **V3_AUTHPRIV_READ}, True),
+], ids=["write-off", "no-creds", "authnopriv", "authpriv-rw", "authpriv-read"])
+def test_write_authpriv(cols, want):
+    secret = ("snmp_rw_auth_pass", "snmp_rw_priv_pass", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_community", "snmp_community")
+    row = {"snmp_version": "2c", "snmp_community": None, "snmp_user": None, "snmp_auth_proto": None, "snmp_auth_pass": None,
+           "snmp_priv_proto": None, "snmp_priv_pass": None, "snmp_rw_community": None, "snmp_rw_user": None, "snmp_rw_auth_proto": None,
+           "snmp_rw_auth_pass": None, "snmp_rw_priv_proto": None, "snmp_rw_priv_pass": None, **cols}
+    row = {k: crypto.encrypt(v) if k in secret and v else v for k, v in row.items()}
+    assert poller.write_authpriv(row) is want
 
 
 # ── Port names per mechanism ──────────────────────────────────────────────────────────────────────────────────────────────────────

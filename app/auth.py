@@ -19,8 +19,17 @@ DEVICE_COOKIE = "sv_device"
 DEVICE_DAYS = 180
 # A kid the cached JWKS lacks reloads the set from Microsoft at most this often per tenant (seconds).
 JWKS_REFRESH_S = 300
+# A JWKS fetch waits at most JWKS_TIMEOUT_S for Microsoft (PyJWKClient's own default is 30 s, a worker thread each). After a fetch that
+# could not reach Microsoft, no check of that tenant fetches for JWKS_FAIL_COOLDOWN_S: each fails at once with JWKS_DOWN (PyJWT drops
+# its cached set after a failed fetch, so every SSO attempt during an outage would fetch and wait again).
+JWKS_TIMEOUT_S = 5
+JWKS_FAIL_COOLDOWN_S = 30
+JWKS_DOWN = "Microsoft-Schlüssel gerade nicht abrufbar, bitte in einer halben Minute erneut anmelden"
+# What a token check raises for a token it refuses, or while the JWKS cannot be fetched: expected, main.login_azure logs it in one line
+TOKEN_ERRORS = (jwt.PyJWTError, ValueError)
 _jwks: dict[str, tuple[object, float]] = {}
 _jwks_refreshed: dict[str, float] = {}      # tenant -> time.monotonic() of its last forced reload
+_jwks_failed: dict[str, float] = {}         # tenant -> time.monotonic() of its last fetch that could not reach Microsoft
 _jwks_lock = threading.Lock()               # the token checks run in worker threads (main.login_azure)
 
 
@@ -28,22 +37,38 @@ def _jwks_client(tenant: str):
     entry = _jwks.get(tenant)
     if entry and time.time() - entry[1] < 3600:
         return entry[0]
-    client = jwt.PyJWKClient(f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys")
+    client = jwt.PyJWKClient(f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys", timeout=JWKS_TIMEOUT_S)
     _jwks[tenant] = (client, time.time())
     return client
 
 
 def _signing_key(tenant: str, token: str):
     """The key for the token's kid from the tenant's cached JWKS. A kid the cached set lacks (Microsoft rolled its keys) reloads the
-    set, but at most once per JWKS_REFRESH_S and tenant: otherwise every token with a made-up kid would cost a fetch from Microsoft."""
+    set, but at most once per JWKS_REFRESH_S and tenant: otherwise every token with a made-up kid would cost a fetch from Microsoft.
+    Within JWKS_FAIL_COOLDOWN_S of a fetch that could not reach Microsoft (jwt.PyJWKClientConnectionError, recorded here) it raises
+    ValueError(JWKS_DOWN) without fetching."""
     kid = jwt.get_unverified_header(token).get("kid")
+    if _jwks_down(tenant):
+        raise ValueError(JWKS_DOWN)
     client = _jwks_client(tenant)
-    key = client.match_kid(client.get_signing_keys(), kid)
-    if key is None and _may_reload(tenant):
-        key = client.match_kid(client.get_signing_keys(refresh=True), kid)
+    try:
+        key = client.match_kid(client.get_signing_keys(), kid)
+        if key is None and _may_reload(tenant):
+            key = client.match_kid(client.get_signing_keys(refresh=True), kid)
+    except jwt.PyJWKClientConnectionError:
+        with _jwks_lock:
+            _jwks_failed[tenant] = time.monotonic()
+        raise
     if key is None:
         raise ValueError("Signaturschlüssel unbekannt")
     return key
+
+
+def _jwks_down(tenant: str) -> bool:
+    """Whether a fetch of the tenant's JWKS failed to reach Microsoft less than JWKS_FAIL_COOLDOWN_S ago."""
+    with _jwks_lock:
+        failed = _jwks_failed.get(tenant)
+    return failed is not None and time.monotonic() - failed < JWKS_FAIL_COOLDOWN_S
 
 
 def _may_reload(tenant: str) -> bool:

@@ -1,7 +1,8 @@
 """Login hardening (Phase 2, Task 1): the emergency login's throttle counts failures per identity, never per client address (F1); the
 image trusts no proxy headers by default; a request body over 64 KiB is refused before any endpoint reads it; a non-ASCII login is a
 clean, audited 401 (F6), compared without a length or user-name oracle; the Entra check reloads the JWKS for an unknown kid at most
-once per 5 minutes and refuses an access token in place of an id_token. SSO is never throttled.
+once per 5 minutes and refuses an access token in place of an id_token. SSO is never throttled. Phase 3: the JWKS fetch has a 5 s
+timeout, a failed one blocks further fetches of that tenant for 30 s, and expected token errors are logged as one warning line.
 
 The app runs in-process through FastAPI's TestClient (the login_api fixture in conftest.py: a fresh database under tmp_path, the
 emergency account and SSO switched on, no dependency_overrides, the scheduler booby-trapped). Nothing reaches Microsoft: the JWKS
@@ -9,6 +10,7 @@ client and the token check are faked where a test needs them.
 """
 import asyncio
 import json
+import logging
 import pathlib
 import time
 import types
@@ -258,3 +260,89 @@ async def test_a_declared_length_over_the_cap_is_refused_unread():      # Phase 
     scope = {"type": "http", "method": "POST", "path": "/", "headers": [(b"content-length", b"11")]}
     await bodylimit.BodyLimit(app, max_bytes=10)(scope, receive, send)
     assert sent[0]["status"] == 413 and app_called == []
+
+
+# ── Phase 3, Task 7: the JWKS fetch is bounded, expected token errors are logged without a traceback ─────────────────────────────
+def failing_jwks(calls: list):
+    """A tenant's JWKS client whose fetch fails as jwt.PyJWKClient's does when Microsoft cannot be reached (it raises
+    PyJWKClientConnectionError); records each fetch in calls."""
+    def fetch(refresh=False):
+        calls.append(refresh)
+        raise jwt.PyJWKClientConnectionError('Fail to fetch data from the url, err: "<urlopen error timed out>"')
+    return types.SimpleNamespace(get_signing_keys=fetch, match_kid=jwt.PyJWKClient.match_kid)
+
+
+def test_the_jwks_client_has_a_short_timeout(monkeypatch):
+    made = []
+    monkeypatch.setattr(auth.jwt, "PyJWKClient", lambda url, **kw: made.append(kw) or object())
+    monkeypatch.setattr(auth, "_jwks", {})
+    auth._jwks_client("t")
+    assert made == [{"timeout": 5}]
+
+
+def test_a_failed_jwks_fetch_blocks_further_fetches_for_a_while(login_api, monkeypatch):
+    calls = []
+    monkeypatch.setattr(auth, "_jwks_client", lambda tenant: failing_jwks(calls))
+    token = jwt.encode({"sub": "s"}, "k", algorithm="HS256", headers={"kid": "a"})
+    assert [login_api.post("/api/auth/azure", json={"id_token": token}).status_code for _ in range(2)] == [401, 401] and len(calls) == 1
+
+
+def test_an_invalid_token_is_logged_without_a_traceback(login_api, caplog):
+    with caplog.at_level(logging.WARNING, logger="switchview"):
+        login_api.post("/api/auth/azure", json={"id_token": "kaputt"})
+    [rec] = [r for r in caplog.records if r.name == "switchview"]
+    assert (rec.levelname, rec.exc_info) == ("WARNING", None)
+
+
+def test_within_the_cooldown_the_check_says_why_and_fetches_nothing(login_api, monkeypatch):
+    """The second check fails with JWKS_DOWN, without a fetch; once JWKS_FAIL_COOLDOWN_S (30 s) have passed, the next check fetches
+    again. Per tenant: another tenant is not held back."""
+    calls = []
+    monkeypatch.setattr(auth, "_jwks_client", lambda tenant: failing_jwks(calls))
+    token = jwt.encode({"sub": "s"}, "k", algorithm="HS256", headers={"kid": "a"})
+    with pytest.raises(jwt.PyJWKClientConnectionError):
+        auth._signing_key("t", token)
+    with pytest.raises(ValueError, match="^Microsoft-Schlüssel gerade nicht abrufbar, bitte in einer halben Minute erneut anmelden$"):
+        auth._signing_key("t", token)
+    assert len(calls) == 1 and (auth.JWKS_TIMEOUT_S, auth.JWKS_FAIL_COOLDOWN_S) == (5, 30)
+    with pytest.raises(jwt.PyJWKClientConnectionError):
+        auth._signing_key("other", token)
+    auth._jwks_failed["t"] = time.monotonic() - 31
+    with pytest.raises(jwt.PyJWKClientConnectionError):
+        auth._signing_key("t", token)
+    assert len(calls) == 3
+
+
+def test_a_failed_forced_reload_blocks_too(login_api, monkeypatch):
+    """The reload for an unknown kid (refresh=True) is a fetch as well: its connection error starts the cooldown."""
+    calls = []
+
+    def keys(refresh=False):
+        calls.append(refresh)
+        if refresh:
+            raise jwt.PyJWKClientConnectionError("timed out")
+        return []
+    monkeypatch.setattr(auth, "_jwks_client", lambda tenant: types.SimpleNamespace(get_signing_keys=keys, match_kid=lambda k, kid: None))
+    token = jwt.encode({"sub": "s"}, "k", algorithm="HS256", headers={"kid": "a"})
+    with pytest.raises(jwt.PyJWKClientConnectionError):
+        auth._signing_key("t", token)
+    with pytest.raises(ValueError, match="^Microsoft-Schlüssel gerade nicht abrufbar"):
+        auth._signing_key("t", token)
+    assert calls == [False, True]
+
+
+def test_the_expected_token_errors(login_api, caplog, monkeypatch):
+    """A PyJWT error and a ValueError of the checks are a WARNING naming the reason; anything else is logged with its traceback, as
+    before. All three are the same 401."""
+    for exc, level, traceback in [(jwt.InvalidAudienceError("Audience doesn't match"), "WARNING", False),
+                                  (ValueError("Falscher Tenant"), "WARNING", False), (KeyError("sub"), "ERROR", True)]:
+        caplog.clear()
+        monkeypatch.setattr(auth, "verify_id_token", raising(exc))
+        with caplog.at_level(logging.WARNING, logger="switchview"):
+            resp = login_api.post("/api/auth/azure", json={"id_token": "x"})
+        assert (resp.status_code, resp.json()["detail"]) == (401, "Anmeldung über Microsoft fehlgeschlagen")
+        [rec] = [r for r in caplog.records if r.name == "switchview"]
+        assert (rec.levelname, rec.exc_info is not None) == (level, traceback)
+        if not traceback:
+            assert rec.getMessage() == f"Anmeldung über Microsoft abgelehnt: {exc}"
+    assert auth.TOKEN_ERRORS == (jwt.PyJWTError, ValueError)
