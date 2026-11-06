@@ -254,8 +254,11 @@ async def test_the_conf_dir_is_removed_on_an_error_and_on_a_cancel(spawn):
     assert not os.path.exists(spawn.last[1]["SNMPCONFPATH"])
     spawn.answer(FakeProcess(hang=True))
     task = asyncio.create_task(snmp.walk(HOST, V3, IF_NAME))
-    while len(spawn.started) < 2:
+    for _ in range(1000):    # bounded: a walk that ends or stalls before its start fails here instead of hanging the suite
+        if len(spawn.started) == 2 or task.done():
+            break
         await asyncio.sleep(0)
+    assert len(spawn.started) == 2, task
     assert os.path.exists(spawn.last[1]["SNMPCONFPATH"])
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
