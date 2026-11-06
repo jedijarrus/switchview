@@ -9,8 +9,11 @@
     (poller._display_text, snmp.octets_text): umlauts show as text.
   * Numbers the poller cannot use never stop it (_build), VLAN rows without a VLAN ID 1-4094 are skipped and counted, more than
     poller.MAX_PORTS ports are refused (_build and snmpwrite._synth).
-  * A failed FDB or LLDP walk keeps the MACs and LLDP neighbours of the last poll (both carry the uplink protection), and the poll says
-    "Teilweise gelesen"; a walk the driver does not use (ifType at a ProCurve) says nothing.
+  * A failed FDB or LLDP walk keeps the MACs and LLDP neighbours of the last poll (both carry the uplink protection), and what the
+    poll read of the same table joins them, so a link only the fresh rows show stays protected; bp2if counts for both (for LLDP at a
+    driver by ifType), and a failed baseMac walk keeps the stored base MAC. A lenient walk that broke off after some rows
+    (snmp.Rows.broken_off) counts as failed there. The poll says "Teilweise gelesen", and "behalten" only where the last poll had
+    something to keep; a walk the driver does not use (ifType at a ProCurve) says nothing.
 
 No network, no net-snmp: the process is a switchfix.FakeProcess (spawn), the switches are the test network of tests/netfix.py (the
 `net` fixture of tests/conftest.py), the database a fresh one under tmp_path.
@@ -86,19 +89,23 @@ def net_hexing(net, monkeypatch):
 
 @pytest.fixture
 def failing(monkeypatch):
-    """failing(net, host, oid, error=TIMEOUT): from now on the walk of oid at host raises SnmpError(error); every other walk goes to
-    net.walk as before. Each call adds one more failing walk."""
-    broken: dict[tuple[str, str], str] = {}
+    """failing(net, host, oid, error=TIMEOUT, rows=None): from now on the walk of oid at host raises SnmpError(error), or, with rows,
+    returns them as a lenient snmp.walk returns a walk that broke off after them (snmp.Rows with broken_off=error: snmpbulkwalk ended
+    with an exit code != 0 after it had printed these rows); every other walk goes to net.walk as before. Each call adds one more."""
+    broken: dict[tuple[str, str], tuple[str, list | None]] = {}
 
-    def fail(net, host: str, oid: str, error: str = TIMEOUT) -> None:
+    def fail(net, host: str, oid: str, error: str = TIMEOUT, rows: list | None = None) -> None:
         async def walk(h, cred, o, hex_values=False, timeout=60, strict=False):
             if (h, o) in broken:
-                raise snmp.SnmpError(broken[(h, o)])
+                message, partial = broken[(h, o)]
+                if partial is None:
+                    raise snmp.SnmpError(message)
+                return snmp.Rows(walk_answer(partial, o, hex_values), broken_off=message)
             return await net.walk(h, cred, o, hex_values=hex_values, timeout=timeout, strict=strict)
 
         if not broken:
             monkeypatch.setattr(snmp, "walk", walk)
-        broken[(host, oid)] = error
+        broken[(host, oid)] = (error, rows)
 
     return fail
 
@@ -400,14 +407,15 @@ def test_the_write_path_still_refuses_a_vlan_index_that_is_no_number():
 
 
 async def test_a_failed_fid_walk_keeps_the_macs_and_their_counts(net, failing):
-    """The FDB rows need dot1qVlanFdbId to name their VLAN: without it the MAC rows and counts of the last poll stay, row for row."""
+    """The FDB rows need dot1qVlanFdbId to name their VLAN: without it the MAC rows and counts of the last poll stay, row for row (the
+    switch still learns the same MAC, so the row read now is the same row)."""
     a, _ = await mac_linked_pair(net)
-    macs = query("SELECT port, mac, vlan, last_seen FROM macs WHERE switch_id = ?", (a,))
+    macs = query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,))
     counts = query("SELECT name, mac_count FROM ports WHERE switch_id = ? ORDER BY ifindex", (a,))
     assert ("2", 1) in counts and macs
     failing(net, A_HOST, poller.O["fid"])
     assert (await poller.poll_switch(a))["ok"] is True
-    assert query("SELECT port, mac, vlan, last_seen FROM macs WHERE switch_id = ?", (a,)) == macs
+    assert query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,)) == macs
     assert query("SELECT name, mac_count FROM ports WHERE switch_id = ? ORDER BY ifindex", (a,)) == counts
     assert last_error(a) == f"Teilweise gelesen: fid fehlgeschlagen ({TIMEOUT}); MAC-Tabelle vom letzten Poll behalten"
 
@@ -427,13 +435,14 @@ async def test_the_next_good_poll_reads_the_macs_again(net, failing, monkeypatch
 @pytest.mark.parametrize("key", ["lldpSys", "lldpPortDesc", "lldpPortId", *poller.LLDP_LOC])
 async def test_a_failed_lldp_walk_keeps_the_neighbours_at_every_driver(net, failing, key):
     """At a Catalyst (ports by ifType, lldpLocPortTable walked as well) each of the LLDP walks keeps the neighbours of the last poll
-    when it fails, even though the other LLDP walks now name another neighbour."""
+    when it fails, and the neighbour the other LLDP walks now name joins them (first): without lldpSys there is none."""
     c = await add(net, "C", C_HOST, "cisco", CATALYST, lldp("1", "B", "Gi1/0/2", "Gi1/0/2"))    # number 1 = bridge port 1 = Gi1/0/1
     assert port(await main.build_map(), "Gi1/0/1", "C")["l"] == [["B", "Gi1/0/2", "Gi1/0/2"]]
     net.rec[C_HOST].update(lldp("1", "D", "Gi1/0/3", "Gi1/0/3"))
     failing(net, C_HOST, {**poller.O, **poller.LLDP_LOC}[key])
     assert (await poller.poll_switch(c))["ok"] is True
-    assert port(await main.build_map(), "Gi1/0/1", "C")["l"] == [["B", "Gi1/0/2", "Gi1/0/2"]]
+    neighbours = port(await main.build_map(), "Gi1/0/1", "C")["l"]
+    assert neighbours[-1] == ["B", "Gi1/0/2", "Gi1/0/2"] and [n[0] for n in neighbours] == (["B"] if key == "lldpSys" else ["D", "B"])
     assert last_error(c) == f"Teilweise gelesen: {key} fehlgeschlagen ({TIMEOUT}); LLDP vom letzten Poll behalten"
 
 
@@ -473,3 +482,177 @@ async def test_a_failed_needed_walk_still_fails_the_poll(net, failing):
     assert await poller.poll_switch(a) == {"ok": False, "error": TIMEOUT}
     assert query("SELECT last_poll_ok, last_error FROM switches WHERE id = ?", (a,)) == [(0, TIMEOUT)]
     assert query("SELECT port, mac FROM macs WHERE switch_id = ?", (a,)) == [("2", MAC_B)]
+
+
+# ── Review round 1: kept values never cost a fresh uplink, and every walk that carries the protection keeps ──────────────────────
+FDB_OID = poller.O["fdb"]
+BROKE_OFF = f"Timeout: No Response from {A_HOST}"
+# The switch of the next test by driver: (host, walks, LLDP local port number, the port it means)
+LLDP_PORT = {"procurve": (A_HOST, W_SAMPLE, "6", "6"), "cisco": (C_HOST, CATALYST, "1", "Gi1/0/1")}
+
+
+async def test_a_new_mac_link_during_a_failed_fid_walk_is_an_uplink(net, failing):
+    """Only the VLAN of the FDB rows is missing, the walk of the rows went through: the MACs it read join the kept ones (here none), so
+    a base MAC A first learns in this poll protects its port, as before Task 10."""
+    a = await add(net, "A", A_HOST, "procurve", W_SAMPLE, base_mac=MAC_A)
+    await add(net, "B", B_HOST, "procurve", W_SAMPLE, base_mac=MAC_B)
+    assert "2" not in (await changes.inventory(a))["uplinks"]
+    net.rec[A_HOST][FDB_OID] = fdb("1", MAC_B)[FDB_OID]    # bridge port 1 = port 2
+    failing(net, A_HOST, poller.O["fid"])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert "2" in (await changes.inventory(a))["uplinks"]
+    assert query("SELECT port, mac FROM macs WHERE switch_id = ?", (a,)) == [("2", MAC_B)]
+
+
+async def test_the_macs_read_join_the_kept_ones(net, failing):
+    """A failed fid walk: the rows of the last poll stay, the rows read now are added (MAC1 on port 6), and mac_count counts the
+    port's rows of the merged table."""
+    a, _ = await mac_linked_pair(net)
+    net.rec[A_HOST][FDB_OID] = fdb("5", MAC1)[FDB_OID]    # MAC_B no longer read, MAC1 on bridge port 5 = port 6
+    failing(net, A_HOST, poller.O["fid"])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert sorted(query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,))) == [("2", MAC_B, "1"), ("6", MAC1, "1")]
+    assert query("SELECT name, mac_count FROM ports WHERE switch_id = ? AND mac_count > 0 ORDER BY ifindex", (a,)) == [("2", 1), ("6", 1)]
+    assert "2" in (await changes.inventory(a))["uplinks"]
+
+
+@pytest.mark.parametrize("driver, key", [("procurve", "lldpPortDesc"), ("procurve", "lldpPortId"), ("cisco", "lldpPortDesc"),
+                                         ("cisco", "lldpPortId"), ("cisco", "lldpLocPortId"), ("cisco", "lldpLocPortDesc")])
+async def test_a_new_lldp_neighbour_during_a_failed_lldp_walk_is_an_uplink(net, failing, driver, key):
+    """lldpSys went through, another LLDP walk failed: the neighbours this poll read join the kept ones (here none), so a managed
+    switch first seen by LLDP in this poll protects its port, as before Task 10."""
+    host, W, num, name = LLDP_PORT[driver]
+    sid = await add(net, "A", host, driver, W)
+    await add(net, "B", B_HOST, "procurve", W_SAMPLE)
+    assert name not in (await changes.inventory(sid))["uplinks"]
+    net.rec[host].update(lldp(num, "B", "6", "6"))
+    failing(net, host, {**poller.O, **poller.LLDP_LOC}[key])
+    assert (await poller.poll_switch(sid))["ok"] is True
+    assert name in (await changes.inventory(sid))["uplinks"]
+    assert [n[0] for n in port(await main.build_map(), name)["l"]] == ["B"]
+
+
+async def test_a_failed_bp2if_walk_keeps_the_mac_uplink_protected(net, failing):
+    """bp2if ties the FDB rows to their ports: without it no MAC is read, and the MAC rows of the last poll stay. A ProCurve counts its
+    LLDP ports by ifIndex, so the note says nothing about LLDP."""
+    a, _ = await mac_linked_pair(net)
+    failing(net, A_HOST, poller.O["bp2if"])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert "2" in (await changes.inventory(a))["uplinks"]
+    assert query("SELECT port, mac FROM macs WHERE switch_id = ?", (a,)) == [("2", MAC_B)]
+    assert last_error(a) == f"Teilweise gelesen: bp2if fehlgeschlagen ({TIMEOUT}); MAC-Tabelle vom letzten Poll behalten"
+
+
+async def test_a_failed_bp2if_walk_keeps_the_neighbours_at_a_driver_by_iftype(net, failing):
+    """At a Catalyst the LLDP port number is a bridge port (lldp_ports): without bp2if the neighbour of the last poll stays."""
+    c = await add(net, "C", C_HOST, "cisco", CATALYST, lldp("1", "B", "Gi1/0/2", "Gi1/0/2"))
+    failing(net, C_HOST, poller.O["bp2if"])
+    assert (await poller.poll_switch(c))["ok"] is True
+    assert port(await main.build_map(), "Gi1/0/1", "C")["l"] == [["B", "Gi1/0/2", "Gi1/0/2"]]
+    assert last_error(c).endswith("; LLDP vom letzten Poll behalten")
+
+
+async def test_a_failed_base_mac_walk_keeps_the_neighbours_uplink_protected(net, failing):
+    """B protects its port 3 only through A's base MAC: a failed baseMac walk at A keeps A's stored base MAC."""
+    a, b = await mac_linked_pair(net)
+    assert "3" in (await changes.inventory(b))["uplinks"]
+    failing(net, A_HOST, poller.O["baseMac"])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert "3" in (await changes.inventory(b))["uplinks"]
+    assert query("SELECT base_mac FROM switches WHERE id = ?", (a,)) == [(MAC_A,)]
+    assert last_error(a) == f"Teilweise gelesen: baseMac fehlgeschlagen ({TIMEOUT}); Basis-MAC vom letzten Poll behalten"
+
+
+async def test_an_fdb_walk_that_breaks_off_keeps_the_mac_uplink_protected(net, failing):
+    """A lenient FDB walk that ended with an exit code != 0 after some rows (snmp.Rows.broken_off) is incomplete: it counts as failed,
+    the rows it read join those of the last poll, and the MAC-only uplink whose row it did not reach stays protected."""
+    a, _ = await mac_linked_pair(net)
+    failing(net, A_HOST, FDB_OID, BROKE_OFF, rows=fdb("5", MAC1)[FDB_OID])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert "2" in (await changes.inventory(a))["uplinks"]
+    assert sorted(query("SELECT port, mac FROM macs WHERE switch_id = ?", (a,))) == [("2", MAC_B), ("6", MAC1)]
+    assert last_error(a) == f"Teilweise gelesen: fdb fehlgeschlagen ({BROKE_OFF}); MAC-Tabelle vom letzten Poll behalten"
+
+
+async def test_an_lldp_walk_that_breaks_off_keeps_the_last_neighbours(net, failing):
+    """lldpSys broke off after the row of port 1: B, the neighbour on port 6 it did not reach, stays, and both ports are uplinks."""
+    a = await add(net, "A", A_HOST, "procurve", W_SAMPLE, lldp("6", "B", "6", "6"))
+    await add(net, "B", B_HOST, "procurve", W_SAMPLE)
+    new = lldp("1", "B", "5", "5")
+    for oid, rows in new.items():
+        net.rec[A_HOST][oid] = net.rec[A_HOST][oid] + rows
+    failing(net, A_HOST, poller.O["lldpSys"], BROKE_OFF, rows=new[poller.O["lldpSys"]])
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert {"1", "6"} <= (await changes.inventory(a))["uplinks"]
+    assert last_error(a) == f"Teilweise gelesen: lldpSys fehlgeschlagen ({BROKE_OFF}); LLDP vom letzten Poll behalten"
+
+
+@pytest.mark.parametrize("key", ["ifAlias", "vlanEgress"])
+async def test_a_walk_that_keeps_nothing_still_takes_what_came(net, failing, key):
+    """Only the walks with kept values count a walk that broke off as failed; the display takes the rows of every other one as before."""
+    a = await add(net, "A", A_HOST, "procurve", W_SAMPLE)
+    failing(net, A_HOST, poller.O[key], BROKE_OFF, rows=net.rec[A_HOST][poller.O[key]])
+    assert (await poller.poll_switch(a))["ok"] is True and last_error(a) is None
+
+
+async def test_a_lenient_walk_that_breaks_off_says_why(spawn):
+    """snmpbulkwalk exits != 0 after some rows (a timeout in the middle of a table): the lenient walk gives the rows and, in
+    broken_off, the last line of stderr (else the exit code); a complete walk has none."""
+    row = f".{FDB_OID}.1.0.26.43.0.0.11 1\n".encode()
+    spawn.answer(FakeProcess(out=row, err=f"Timeout: No Response from {HOST}\n".encode(), returncode=1))
+    rows = await snmp.walk(HOST, CRED, FDB_OID)
+    assert rows == [(f"{FDB_OID}.1.0.26.43.0.0.11", "1")] and rows.broken_off == f"Timeout: No Response from {HOST}"
+    spawn.answer(FakeProcess(out=row, returncode=2))
+    assert (await snmp.walk(HOST, CRED, FDB_OID)).broken_off == "snmp Exit-Code 2"
+    spawn.answer(FakeProcess(out=row))
+    assert (await snmp.walk(HOST, CRED, FDB_OID)).broken_off is None
+
+
+async def test_the_reason_a_walk_broke_off_shows_no_secret(spawn):
+    spawn.answer(FakeProcess(out=f".{FDB_OID}.1.0.26.43.0.0.11 1\n".encode(), err=b"Unknown community ro-s3cret\n", returncode=2))
+    assert (await snmp.walk(HOST, CRED, FDB_OID)).broken_off == "Unknown community ***"
+
+
+@pytest.mark.parametrize("first", [True, False])
+async def test_nothing_to_keep_is_not_called_kept(net, failing, first):
+    """With no MAC rows, no LLDP neighbour and no base MAC from the last poll (or no last poll at all) the note says what is missing,
+    not that something was kept."""
+    if first:
+        for key in ("baseMac", "fdb", "lldpSys"):
+            failing(net, A_HOST, poller.O[key])
+        a = await add(net, "A", A_HOST, "procurve", W_SAMPLE)
+    else:
+        a = await add(net, "A", A_HOST, "procurve", W_SAMPLE)
+        for key in ("baseMac", "fdb", "lldpSys"):
+            failing(net, A_HOST, poller.O[key])
+        assert (await poller.poll_switch(a))["ok"] is True
+    assert last_error(a) == (f"Teilweise gelesen: baseMac, fdb, lldpSys fehlgeschlagen ({TIMEOUT}); MAC-Tabelle unvollständig (nichts vom "
+                             "letzten Poll zu behalten); LLDP unvollständig (nichts vom letzten Poll zu behalten); Basis-MAC unbekannt "
+                             "(nichts vom letzten Poll zu behalten)")
+
+
+def test_one_rule_refuses_too_many_ports():
+    """The display and the write path refuse more than MAX_PORTS ports with the one message of poller.check_port_count."""
+    poller.check_port_count(["1"] * poller.MAX_PORTS)
+    with pytest.raises(snmp.SnmpError, match=f"^Mehr als {poller.MAX_PORTS} Ports gemeldet, Abfrage abgebrochen$"):
+        poller.check_port_count(["1"] * (poller.MAX_PORTS + 1))
+
+
+def fdb_row(fid: str, mac: str, bridge_port: str) -> tuple[str, str]:
+    """One dot1qTpFdbPort row: <fid>.<mac as 6 decimals> = bridge port (netfix.fdb takes the VLAN ID as FID)."""
+    return f"{FDB_OID}.{fid}.{'.'.join(str(int(x, 16)) for x in mac.split(':'))}", bridge_port
+
+
+async def test_a_failed_fid_walk_adds_no_second_row_under_the_fid(net, failing):
+    """Without dot1qVlanFdbId a row read now carries its FID as VLAN: a MAC the kept table has at that port already keeps its row (VLAN
+    20, last_seen now) and gets no second one under FID 5; a MAC on another port is added under its FID."""
+    fid = poller.O["fid"]
+    a = await add(net, "A", A_HOST, "procurve", W_SAMPLE, {FDB_OID: [fdb_row("5", MAC_B, "1")], fid: [(f"{fid}.0.20", "5")]})
+    assert query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,)) == [("2", MAC_B, "20")]
+    query("UPDATE macs SET last_seen = '2000-01-01 00:00:00' WHERE switch_id = ?", (a,))
+    net.rec[A_HOST][FDB_OID] = [fdb_row("5", MAC_B, "1"), fdb_row("5", MAC1, "5")]    # MAC1 on bridge port 5 = port 6
+    failing(net, A_HOST, fid)
+    assert (await poller.poll_switch(a))["ok"] is True
+    assert sorted(query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,))) == [("2", MAC_B, "20"), ("6", MAC1, "5")]
+    assert query("SELECT last_seen FROM macs WHERE switch_id = ? AND mac = ?", (a, MAC_B)) != [("2000-01-01 00:00:00",)]
+    assert query("SELECT name, mac_count FROM ports WHERE switch_id = ? AND mac_count > 0 ORDER BY ifindex", (a,)) == [("2", 1), ("6", 1)]

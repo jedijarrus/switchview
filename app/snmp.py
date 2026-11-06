@@ -40,6 +40,24 @@ class SnmpError(Exception):
     pass
 
 
+class Rows(list):
+    """What walk returns: its rows [(oid, value), ...], a plain list to every caller, and broken_off, why a lenient walk is incomplete:
+    snmpbulkwalk prints every row as it arrives, and when a timeout or an error packet stops it in the middle of a table it exits != 0
+    with the rows so far on stdout. Then broken_off is the reason (the last line of stderr, else the exit code), otherwise None. A
+    strict walk never returns such rows, it raises. The poller keeps the last good values of the walks that carry the uplink
+    protection when one of them is incomplete (poller.poll_switch)."""
+
+    def __init__(self, rows=(), broken_off: str | None = None):
+        super().__init__(rows)
+        self.broken_off = broken_off
+
+
+class _Output(str):
+    """The stdout of a call (_exec) with broken_off: the reason when a lenient call exited != 0 after it had printed something, else
+    None (see Rows). A str to _run's callers and to test fakes alike."""
+    broken_off: str | None = None
+
+
 class ByteBudget:
     """The stdout bytes one query may still read, over all of its walks (see byte_budget)."""
 
@@ -171,7 +189,8 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False, *, cred: di
     file is 0600 (_write_conf), in a directory of its own (_new_conf_dir), empty when cred has no secret to send, and SNMPCONFPATH
     points the process at that directory, so net-snmp reads no other snmp.conf. The directory goes when the call ends, however it ends
     (output, error, timeout, cancel, a failed write). A secret with a NUL, CR or LF is a SnmpError before anything is created or
-    started. No SnmpError message carries one of cred's secrets (_secrets): each one is "***"."""
+    started. No SnmpError message carries one of cred's secrets (_secrets): each one is "***", and neither does the reason a lenient
+    call broke off (the broken_off of the stdout _exec returns)."""
     if cred is None:
         return await _exec(cmd, timeout, strict, {})
     secrets = _secrets(cred)
@@ -180,7 +199,7 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False, *, cred: di
         conf_dir = _new_conf_dir()
         try:
             _write_conf(conf_dir, lines)
-            return await _exec(cmd, timeout, strict, {"SNMPCONFPATH": conf_dir})
+            text = await _exec(cmd, timeout, strict, {"SNMPCONFPATH": conf_dir})
         finally:
             _remove(conf_dir)
     except SnmpError as e:
@@ -188,15 +207,19 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False, *, cred: di
         if masked == str(e):
             raise
         raise SnmpError(masked) from None    # not chained: the original's message, in a logged traceback, would show the secret
+    if text.broken_off:
+        text.broken_off = _mask(text.broken_off, secrets)
+    return text
 
 
-async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -> str:
+async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -> _Output:
     """Start cmd without a shell, with os.environ plus MIBS="" plus extra_env, and return its stdout. stdout and stderr are read together,
     READ_CHUNK bytes at a time, up to EOF, then the exit is awaited, all under the one timeout. SnmpError on a timeout; when stdout
     grows beyond MAX_STDOUT or the query's byte budget (the process is killed, see _collect); and on an exit code != 0 without output,
     with strict on EVERY exit code != 0, even when stdout has rows already (see walk). The message of a failed call is the last line
-    of stderr, of which only the first MAX_STDERR bytes are kept. Every other exception while it waits, a cancel above all (a request
-    that went away, SwitchView stopping), kills the process as well and is raised on: no walk outlives its call."""
+    of stderr, of which only the first MAX_STDERR bytes are kept; a lenient call that exits != 0 with output returns it with that
+    message as its broken_off (_Output). Every other exception while it waits, a cancel above all (a request that went away,
+    SwitchView stopping), kills the process as well and is raised on: no walk outlives its call."""
     env = dict(os.environ, MIBS="", **extra_env)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
@@ -209,11 +232,14 @@ async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -
     except BaseException:
         _kill(proc)
         raise
-    text = out.decode("utf-8", "replace")
-    if returncode != 0 and (strict or not text.strip()):
+    text = _Output(out.decode("utf-8", "replace"))
+    if returncode != 0:
         msg = err.decode("utf-8", "replace").strip().splitlines()
         msg = [m for m in msg if "Cannot find module" not in m and "MIB search path" not in m]
-        raise SnmpError(msg[-1] if msg else f"snmp Exit-Code {returncode}")
+        reason = msg[-1] if msg else f"snmp Exit-Code {returncode}"
+        if strict or not text.strip():
+            raise SnmpError(reason)
+        text.broken_off = reason
     return text
 
 
@@ -365,12 +391,14 @@ def _parse(text: str, hex_strict: bool = False, text_strict: bool = False) -> li
     return out
 
 
-async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeout: float = 60, strict: bool = False) -> list[tuple[str, str]]:
+async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeout: float = 60, strict: bool = False) -> Rows:
     """snmpbulkwalk unter oid. snmpbulkwalk gibt jede Zeile sofort aus; bricht der Walk mittendrin ab (Timeout, Fehlerpaket), endet
     es mit Exit-Code != 0, die Zeilen bis dahin stehen aber schon in stdout. strict=False (Standard, der Poller): das gilt als
-    Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle;
-    dazu muss jede Zeile zu einem Wert gehoeren: mit hex_values ist jeder Wert reines Hex, ohne kann nur ein String umbrechen (siehe
-    _parse). Ein host mit "-" vorne: SnmpError, ohne Aufruf (_host).
+    Ergebnis, die Anzeige nimmt, was kam, und Rows.broken_off nennt den Grund des Abbruchs (Geheimnisse maskiert wie in einem
+    SnmpError; der Poller behaelt damit die letzten guten Werte der Walks, die den Uplink-Schutz tragen). strict=True (der
+    Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle; dazu muss jede Zeile zu einem Wert gehoeren: mit
+    hex_values ist jeder Wert reines Hex, ohne kann nur ein String umbrechen (siehe _parse). Ein host mit "-" vorne: SnmpError, ohne
+    Aufruf (_host).
     The output is parsed in a worker thread: up to MAX_STDOUT of crafted continuation lines cost seconds of CPU, which must not hold up
     the event loop, the UI and the other polls.
     """
@@ -379,7 +407,8 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
         cmd.append("-Ox")
     cmd += [_host(host), oid]
     text = await _run(cmd, timeout, strict=strict, cred=cred)
-    return await asyncio.to_thread(_parse, text, hex_strict=strict and hex_values, text_strict=strict and not hex_values)
+    rows = await asyncio.to_thread(_parse, text, hex_strict=strict and hex_values, text_strict=strict and not hex_values)
+    return Rows(rows, broken_off=getattr(text, "broken_off", None))    # getattr: a test's _run returns a plain str
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:

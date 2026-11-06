@@ -42,12 +42,21 @@ HEX = {"baseMac", "vlanEgress", "vlanUntagged"}
 # and the two cannot be told apart; with -Ox every value is hex, and _display_text turns it back into text. LLDP stays a text walk:
 # lldpRemPortId can be a binary value (a MAC), and _links compares it as the switch sends it.
 TEXT_AS_HEX = ("ifAlias", "vlanName")
-# The walks whose failure keeps the values of the last poll (poll_switch): the MAC table needs both FDB walks, the LLDP neighbours all
-# of the remote table's walks (and, at a driver that selects its ports by ifType, lldpLocPortTable, see lldp_walks). Both carry the
-# uplink protection (changes.inventory): an empty table would leave a link that only they show unprotected.
-MAC_WALKS = ("fdb", "fid")
+# The walks whose failure keeps the values of the last poll (poll_switch), a failure being an error or a walk that broke off after some
+# rows (snmp.Rows.broken_off): the MAC table needs both FDB walks and bp2if (which port a bridge port is), the LLDP neighbours all of
+# the remote table's walks (and, at a driver that selects its ports by ifType, bp2if and lldpLocPortTable, see lldp_walks). Both
+# carry the uplink protection (changes.inventory): an empty or cut table would leave a link that only they show unprotected. So does
+# the base MAC (baseMac) for every other switch that learns it: a failed baseMac walk keeps the stored one.
+MAC_WALKS = ("fdb", "fid", "bp2if")
 LLDP_WALKS = ("lldpSys", "lldpPortDesc", "lldpPortId")
-MAX_PORTS = 4096    # ports per switch (select_ports); more is refused by _build and snmpwrite._synth: no real switch has that many
+# What a partial poll says about a value it kept because its walk failed (partial_note): kept from the last poll, or, where that one
+# had none (or there was no last poll), what is missing instead
+KEPT_NOTES = {
+    "macs": ("MAC-Tabelle vom letzten Poll behalten", "MAC-Tabelle unvollständig (nichts vom letzten Poll zu behalten)"),
+    "lldp": ("LLDP vom letzten Poll behalten", "LLDP unvollständig (nichts vom letzten Poll zu behalten)"),
+    "baseMac": ("Basis-MAC vom letzten Poll behalten", "Basis-MAC unbekannt (nichts vom letzten Poll zu behalten)"),
+}
+MAX_PORTS = 4096    # ports per switch (select_ports); more is refused by check_port_count (_build, snmpwrite._synth): no real switch has that many
 # LLDP-MIB lldpLocPortTable (lldpLocalSystemData .7, Eintrag .1), Index lldpLocPortNum: welcher eigene Port hinter einer lokalen
 # LLDP-Portnummer steht, als PortId und PortDesc, wie der Switch sie sendet. Nicht in O: gewalkt nur fuer einen Treiber, der seine Ports
 # nach ifType waehlt (by_iftype), siehe lldp_ports; ProCurve zaehlt LLDP-Ports nach ifIndex.
@@ -260,9 +269,17 @@ def _fdb_mac(octets: list[str]) -> str | None:
 
 
 def lldp_walks(driver_name: str) -> tuple[str, ...]:
-    """The walks the LLDP neighbours of a poll come from (poll_switch): LLDP_WALKS, and LLDP_LOC where the driver selects its ports by
-    ifType (only there is lldpLocPortTable walked, see lldp_ports)."""
-    return LLDP_WALKS + (tuple(LLDP_LOC) if by_iftype(driver_name) else ())
+    """The walks the LLDP neighbours of a poll come from (poll_switch): LLDP_WALKS, and where the driver selects its ports by ifType
+    bp2if and LLDP_LOC, the tables lldp_ports finds a neighbour's port with (only there is lldpLocPortTable walked; a ProCurve counts
+    its LLDP ports by ifIndex)."""
+    return LLDP_WALKS + (("bp2if", *LLDP_LOC) if by_iftype(driver_name) else ())
+
+
+def check_port_count(ports: list[str]) -> None:
+    """snmp.SnmpError when select_ports found more than MAX_PORTS ports: the display (_build) and the write path (snmpwrite._synth)
+    refuse such a switch with this one message (no real switch has that many, and every port is tested against every VLAN)."""
+    if len(ports) > MAX_PORTS:
+        raise snmp.SnmpError(f"Mehr als {MAX_PORTS} Ports gemeldet, Abfrage abgebrochen")
 
 
 def by_iftype(driver_name: str) -> bool:
@@ -509,6 +526,7 @@ async def poll_switch(switch_id: int) -> dict:
         walks = {**O, **poe_walks(drivers.driver_for(row), power=True), **(LLDP_LOC if by_iftype(driver_name) else {})}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         failed: dict[str, Exception] = {}    # walks that failed and that _build uses for this driver, in walk order
+        keeping = set(MAC_WALKS) | set(lldp_walks(driver_name))    # the walks with kept values: one that broke off counts as failed
         try:
             keys = list(walks)
             # One byte budget for all the walks of this poll (the tasks of gather inherit it): a hostile agent fills at most
@@ -525,6 +543,11 @@ async def poll_switch(switch_id: int) -> dict:
                     if k != "ifType" or by_iftype(driver_name):    # a ProCurve does not use ifType (select_ports)
                         failed[k] = r
                     r = []
+                elif k in keeping and getattr(r, "broken_off", None):
+                    # A lenient walk that ended with an exit code != 0 after some rows (snmp.Rows): its table is cut, and a row it did
+                    # not reach may be the one that protects an uplink. Failed, like one without rows; its rows join the kept ones.
+                    log.warning("%s: Walk %s abgebrochen: %s", host, k, r.broken_off)
+                    failed[k] = snmp.SnmpError(r.broken_off)
                 W[k] = r
             if by_iftype(driver_name) and _tbl(W["ifName"], O["ifName"]) and not _tbl(W["ifType"], O["ifType"]):
                 # Kein Fehler, aber keine einzige Zeile (leere oder verbotene View): ohne ifType kaemen keine Ports heraus, und das
@@ -539,34 +562,63 @@ async def poll_switch(switch_id: int) -> dict:
             log.warning("Abfrage %s fehlgeschlagen: %s", host, e)
             return {"ok": False, "error": str(e)}
 
-        # A failed FDB or LLDP walk keeps what the last poll stored (both carry the uplink protection, an empty table would leave a
-        # link only they show unprotected): the MAC rows as they are, mac_count and lldp per port by its name
+        # A failed walk that carries the uplink protection keeps what the last poll stored, and what this poll read of the same table
+        # joins it (an empty or cut table would leave a link only it shows unprotected; a fresh row may be the only one that shows a
+        # new link): the MAC rows stay and the rows read now go on top (mac_count is then the port's rows of the merged table), the
+        # LLDP neighbours of a port (by its name) are the ones read now and then the kept ones; a failed baseMac walk keeps the stored
+        # base MAC, which every other switch that learns it protects its port with
         keep_macs = any(k in failed for k in MAC_WALKS)
         keep_lldp = any(k in failed for k in lldp_walks(driver_name))
-        note = partial_note(failed, keep_macs, keep_lldp, data["vlan_rows_skipped"])
+        keep_base = "baseMac" in failed
         async with db() as conn:
-            last: dict[str, tuple] = {}    # port name -> (mac_count, lldp) as the last poll stored them
-            if keep_macs or keep_lldp:
-                async with conn.execute("SELECT name, mac_count, lldp FROM ports WHERE switch_id = ?", (switch_id,)) as cur:
-                    last = {r["name"]: (r["mac_count"], r["lldp"]) for r in await cur.fetchall()}
-
-            def mac_count(p: dict) -> int:
-                old = last.get(p["name"], (None, None))[0] if keep_macs else None
-                return p["mac_count"] if old is None else old
-
-            def lldp(p: dict) -> str:
-                old = last.get(p["name"], (None, None))[1] if keep_lldp else None
-                return json.dumps(p["lldp"]) if old is None else old
+            kept: dict[str, bool] = {}    # KEPT_NOTES key -> whether the last poll had any of it (partial_note)
+            last_lldp: dict[str, list] = {}    # port name -> LLDP entries as the last poll stored them
+            if keep_macs:
+                async with conn.execute("SELECT 1 FROM macs WHERE switch_id = ? LIMIT 1", (switch_id,)) as cur:
+                    kept["macs"] = await cur.fetchone() is not None
+            if keep_lldp:
+                async with conn.execute("SELECT name, lldp FROM ports WHERE switch_id = ?", (switch_id,)) as cur:
+                    last_lldp = {r["name"]: json.loads(r["lldp"] or "[]") for r in await cur.fetchall()}
+                kept["lldp"] = any(last_lldp.values())
+            if keep_base:
+                kept["baseMac"] = bool(row["base_mac"])    # read under this switch's poll lock: no other poll wrote it since
+            note = partial_note(failed, kept, data["vlan_rows_skipped"])
+            base_mac = row["base_mac"] if keep_base else data["baseMac"]
 
             await conn.execute(
                 "UPDATE switches SET sys_name=?, sys_descr=?, model=?, firmware=?, base_mac=?, uptime=?, last_poll=?, last_poll_ok=1, "
                 "last_error=? WHERE id=?",
-                (data["sysName"], data["sysDescr"], data["model"], data["firmware"], data["baseMac"], data["uptime"], now, note, switch_id),
+                (data["sysName"], data["sysDescr"], data["model"], data["firmware"], base_mac, data["uptime"], now, note, switch_id),
             )
             await conn.execute("DELETE FROM ports WHERE switch_id = ?", (switch_id,))
             await conn.execute("DELETE FROM vlans WHERE switch_id = ?", (switch_id,))
+            fresh = data["macs"]
             if not keep_macs:
                 await conn.execute("DELETE FROM macs WHERE switch_id = ?", (switch_id,))
+            elif "fid" in failed:
+                # Without dot1qVlanFdbId a row read now carries its FID as VLAN (_build): a MAC the kept table has at that port already
+                # only refreshes the last_seen of its rows, a second row under the FID would show it twice
+                async with conn.execute("SELECT port, mac FROM macs WHERE switch_id = ?", (switch_id,)) as cur:
+                    known = {(r["port"], r["mac"]) for r in await cur.fetchall()}
+                await conn.executemany("UPDATE macs SET last_seen = ? WHERE switch_id = ? AND port = ? AND mac = ?",
+                                       [(now, switch_id, port, mac) for port, mac, _ in fresh if (port, mac) in known])
+                fresh = [(port, mac, vlan) for port, mac, vlan in fresh if (port, mac) not in known]
+            await conn.executemany(
+                "INSERT OR REPLACE INTO macs(switch_id, port, mac, vlan, last_seen) VALUES (?,?,?,?,?)",
+                [(switch_id, port, mac, vlan, now) for port, mac, vlan in fresh],
+            )
+            counts: dict[str, int] = {}    # port name -> its rows in the merged MAC table (keep_macs)
+            if keep_macs:
+                async with conn.execute("SELECT port, COUNT(*) AS n FROM macs WHERE switch_id = ? GROUP BY port", (switch_id,)) as cur:
+                    counts = {r["port"]: r["n"] for r in await cur.fetchall()}
+
+            def mac_count(p: dict) -> int:
+                # the MAC rows sit at the trunk of a member (as build_map reads them), and _build counts the trunk's for it
+                return counts.get(p["trunk"] or p["name"], 0) if keep_macs else p["mac_count"]
+
+            def lldp(p: dict) -> str:
+                return json.dumps(p["lldp"] + [e for e in last_lldp.get(p["name"], []) if e not in p["lldp"]])
+
             await conn.executemany(
                 "INSERT INTO ports(switch_id, ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, mac_count, "
                 "poe_admin, poe_status, poe_power) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -575,26 +627,19 @@ async def poll_switch(switch_id: int) -> dict:
                   p["poe_status"], p["poe_power"]) for p in data["ports"]],
             )
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
-            if not keep_macs:
-                await conn.executemany(
-                    "INSERT OR REPLACE INTO macs(switch_id, port, mac, vlan, last_seen) VALUES (?,?,?,?,?)",
-                    [(switch_id, port, mac, vlan, now) for port, mac, vlan in data["macs"]],
-                )
             await conn.commit()
         return {"ok": True, "ports": len(data["ports"]), "macs": len(data["macs"])}
 
 
-def partial_note(failed: dict[str, Exception], keep_macs: bool, keep_lldp: bool, vlan_rows_skipped: int) -> str | None:
+def partial_note(failed: dict[str, Exception], kept: dict[str, bool], vlan_rows_skipped: int) -> str | None:
     """last_error of a poll that went through with gaps ("Teilweise gelesen: ..."), None without any: the failed walks the driver uses
-    (in walk order, with the first one's error, at most 300 characters of it, as a failed poll stores), then what the poll kept of the
-    last one, then the VLAN rows _build skipped."""
+    (in walk order, with the first one's error, at most 300 characters of it, as a failed poll stores), then for each value the poll
+    kept of the last one (kept: KEPT_NOTES key -> whether the last poll had any) that it was kept, or, with nothing to keep, what is
+    missing, then the VLAN rows _build skipped."""
     parts = []
     if failed:
         parts.append(f"{', '.join(failed)} fehlgeschlagen ({str(next(iter(failed.values())))[:300]})")
-    if keep_macs:
-        parts.append("MAC-Tabelle vom letzten Poll behalten")
-    if keep_lldp:
-        parts.append("LLDP vom letzten Poll behalten")
+    parts += [KEPT_NOTES[what][0 if had else 1] for what, had in kept.items()]
     if vlan_rows_skipped:
         parts.append(f"{vlan_rows_skipped} VLAN-Zeilen ohne gültige VLAN-ID (1–4094) übersprungen")
     return "Teilweise gelesen: " + "; ".join(parts) if parts else None
@@ -661,8 +706,7 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
 
     iftype = _tbl(W["ifType"], O["ifType"]) if by_iftype(driver_name) else {}
     port_ifis, member_of, members = select_ports(ifname, iftype, _tbl(W["ifStack"], O["ifStack"]), driver_name)
-    if len(port_ifis) > MAX_PORTS:
-        raise snmp.SnmpError(f"Mehr als {MAX_PORTS} Ports gemeldet, Abfrage abgebrochen")
+    check_port_count(port_ifis)
     lldp: dict[str, list[list[str]]] = {}    # ifIndex -> LLDP-Eintraege
     if by_iftype(driver_name):
         loc = {k: _tbl(W.get(k, []), base) for k, base in LLDP_LOC.items()}

@@ -174,8 +174,7 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     egress = {k: snmp.portlist_bytes(v) for k, v in eg_hex.items()}
     untag = {k: snmp.portlist_bytes(v) for k, v in un_hex.items()}
     port_ifis, member_of, members = poller.select_ports(ifname, tbl.get("ifType", {}), tbl["ifStack"], driver_name)
-    if len(port_ifis) > poller.MAX_PORTS:
-        raise snmp.SnmpError(f"Mehr als {poller.MAX_PORTS} Ports gemeldet, Abfrage abgebrochen")
+    poller.check_port_count(port_ifis)
     poe, unmapped = poller.poe_ports(driver, poe_tables, ifname, port_ifis, members, strict=True)
 
     raw: dict = {"egress": egress, "untagged": untag,

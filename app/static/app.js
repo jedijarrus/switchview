@@ -132,7 +132,7 @@
     const bad = MAP.switches.filter(s => !s.ok);
     if (bad.length) g.push({ sev: "crit", t: "Abfrage fehlgeschlagen", sum: bad.map(s => s.k).join(", "), open: true,
       items: bad.map(s => ({ t: s.k, d: s.error || "keine Antwort", go: () => go("switches", s.id) })) });
-    // A poll that went through with gaps (poller.partial_note: failed walks, kept MACs / LLDP, skipped VLAN rows) keeps its note in error
+    // A poll that went through with gaps (poller.partial_note: failed walks, kept MACs / LLDP / base MAC, skipped VLAN rows) keeps its note in error
     const partial = MAP.switches.filter(s => s.ok && s.error);
     if (partial.length) g.push({ sev: "warn", t: "Abfrage unvollständig", sum: partial.map(s => s.k).join(", "),
       items: partial.map(s => ({ t: s.k, d: s.error, go: () => go("switches", s.id) })) });
