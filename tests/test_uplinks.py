@@ -1,7 +1,7 @@
 """R40 / I2: uplink protection for every driver. plan_ports refuses a change on an uplink or trunk outside expert mode ("Uplink/Trunk:
 nur im Expertenmodus"); which ports are uplinks says changes.inventory()["uplinks"]: the ports of the links main._links finds from the
 poll's LLDP entries (and base MACs). For switches of other vendors that found nothing, so a single-link uplink could be switched off by
-anyone (the review's probe_e2e.py). Three things changed, all scoped so that a ProCurve keeps exactly what it had:
+anyone (the review's probe_e2e.py). Three things changed, all scoped so that a ProCurve kept exactly what it had:
   * which local port an LLDP entry belongs to (poller._build). LLDP-MIB numbers local ports by LldpPortNumber, for a bridge the
     dot1dBasePort, not the ifIndex; a ProCurve uses the ifIndex and keeps exactly that. For every other driver (poller.by_iftype) an entry
     with local port number n belongs to the union of bp2if[n], the port with ifIndex n, and the port whose ifName is lldpLocPortId[n]
@@ -12,7 +12,9 @@ anyone (the review's probe_e2e.py). Three things changed, all scoped so that a P
   * a backstop in inventory() for those drivers: a port whose LLDP neighbour is another managed switch (the sysName / name lookup of
     _links) is an uplink, plus its trunk if it is a member.
 ProCurve-only networks keep the links and uplinks of before: the oracle is the code of 5aa8e90 (_links, inventory's uplink loop and
-_build's attribution), copied verbatim below.
+_build's attribution), copied verbatim below. Since Phase 3 Task 9 (tests/test_uplink_rules.py) the backstop covers every driver,
+ProCurve too (R48), and only a confirmed LLDP pair displaces a MAC pair (T6-F1c): where a network has a one-sided LLDP pair, links and
+uplinks are a superset of the oracle's, elsewhere still exactly the oracle's.
 
 End to end with the real poller (poll_switch, lenient walks), the real build_map / inventory and the real main._make_plan (the strict
 live SNMP read of the Catalyst) against recorded walks of tests/switchfix.py behind a fake snmp.walk; no network. The test network
@@ -104,7 +106,7 @@ async def test_lldp_loc_port_table_is_walked_only_where_ports_are_selected_by_if
     assert not {LOC_ID, LOC_DESC} & set(net.walked["10.0.0.3"])
 
 
-# ── The inventory backstop (by_iftype drivers) ────────────────────────────────────────────────────────────────────────────────────
+# ── The inventory backstop (every driver) ─────────────────────────────────────────────────────────────────────────────────────────
 async def test_a_port_whose_lldp_neighbour_is_a_managed_switch_is_an_uplink(net):
     """No port of CAT-B carries a name CAT-A's entries give (PortId a MAC address, PortDesc a description): no link. Still Gi1/0/2 sees a
     switch SwitchView manages, so it is an uplink (the backstop, the UI's isPeer rule); so is the LAG member Gi1/0/4 (bridge port 4),
@@ -124,11 +126,11 @@ async def test_the_backstop_counts_only_another_managed_switch(net):
     assert (await changes.inventory(a))["uplinks"] == set()
 
 
-async def test_no_backstop_for_procurve(net):
-    """A ProCurve keeps exactly its uplinks: an LLDP neighbour that is a managed switch but names no port of it makes none."""
+async def test_the_backstop_covers_procurve_too(net):
+    """A ProCurve port whose LLDP neighbour is a managed switch is an uplink, even when the entry names no port of it (R48)."""
     hp = await add(net, "HP-A", "10.0.0.3", "procurve", W_SAMPLE, lldp("6", "CAT-B", "00 1A 2B 3C 4D 5E", "to-core"))
     await add(net, "CAT-B", "10.0.0.2", "cisco", CATALYST)
-    assert (await changes.inventory(hp))["uplinks"] == set()
+    assert (await changes.inventory(hp))["uplinks"] == {"6"}
 
 
 # ── A ProCurve <-> Cisco link ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -307,7 +309,8 @@ def test_links_accept_rows_from_before_the_upgrade():
 def test_port_id_only_adds_links_on_random_networks():
     """On random networks (random LLDP entries whose PortDesc and PortId may or may not name a port of the neighbour, random base-MAC
     sightings, trunks), _links finds every link pair the code of 5aa8e90 found on the same entries cut to two elements, and so every
-    uplink of before stays one. With PortId never matching more than PortDesc, it finds exactly the same links."""
+    uplink of before stays one. With PortId never matching more than PortDesc, it still finds every link pair and uplink of before;
+    it may find more, since only an LLDP pair both sides report displaces a MAC pair (Task 9, T6-F1c)."""
     rng = random.Random(40)
     grew = 0
     for case in range(400):
@@ -334,7 +337,11 @@ def test_port_id_only_adds_links_on_random_networks():
             assert legacy_uplinks(s, old) <= legacy_uplinks(s, new), case
         grew += end_pairs(old) != end_pairs(new)
         same = [{**s, "ports": [{**p, "l": [[e[0], e[1], e[1]] for e in p["l"]]} for p in s["ports"]]} for s in switches]
-        assert named(main._links(same, by_id(same, macs)), same) == legacy_links(two_elements(same), macs), case
+        old = legacy_links(two_elements(same), macs)
+        new = named(main._links(same, by_id(same, macs)), same)
+        assert end_pairs(old) <= end_pairs(new), case    # only a confirmed LLDP pair displaces a MAC pair now (T6-F1c): links only grow
+        for s in same:
+            assert legacy_uplinks(s, old) <= legacy_uplinks(s, new), case
     assert grew > 40, grew
 
 

@@ -111,8 +111,8 @@
   const isTrunkPort = p => p.n.startsWith("Trk") || (!!p.tr && p.tr === p.n);
   const isMember = p => !!p && !!p.tr && p.tr !== p.n;
   const isPeer = p => p.l.some(x => MAP.switches.some(s => s.sys === x[0] || s.k === x[0]));
-  const isUplink = p => isPeer(p) || !!p.tr || !!p.up;
-  const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && isPeer(p)));
+  const isUplink = p => isPeer(p) || !!p.tr || !!p.up || !!p.bm;
+  const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && (isPeer(p) || p.bm)));
   const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="Nur per LLDP gemeldet, die Gegenseite bestätigt es nicht. Ein Gerät am Port kann LLDP fälschen – vor Ort prüfen.">Uplink (unbestätigt)</span>`
     : isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : "";
   // The ports of a link that build_map does not confirm ("uc": neither LLDP from both sides nor mutual base MACs), as "SW-A 3"; a link

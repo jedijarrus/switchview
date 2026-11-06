@@ -86,31 +86,34 @@ def status_of(st: dict) -> str:
 
 # ── Inventar (aus der SNMP-Abfrage) ───────────────────────────────────────────
 async def inventory(sid: int) -> dict:
-    """The switch's ports plus its uplinks: the ports of its links (LLDP or MAC link, main._links), with their trunk and its members.
-    For a driver that selects its ports by ifType (poller.by_iftype, every one but ProCurve) also every port whose LLDP neighbour is
-    another managed switch (the mapping of _links, main.switch_keys), even without a link found (R40): there a neighbour can name a
-    port _links does not find, and without uplink protection anyone could switch off the only uplink. Rather too many uplinks than one
-    too few. ProCurve stays as it was. All by the switch's id (a name is not unique): its links carry it in "a" / "b", and an LLDP name
-    it shares with another switch names that one too."""
+    """The switch's ports plus its uplinks: the ports of its links (LLDP or MAC link, main._links), each with its trunk (the trunk of
+    every port of a link side, not only the one trunk the side names: a side whose ports sit in two trunks keeps both). For every
+    driver (Phase 1 had this backstop only where poller.by_iftype, not for ProCurve, R48) also, even without a link found, every port
+    whose LLDP neighbour is another managed switch (the mapping of _links, main.switch_keys; R40: a neighbour can name a port _links
+    does not find, and without uplink protection anyone could switch off the only uplink) and every port on which the base MAC of
+    another managed switch is learned (build_map's "bm"; T6-RR1c: _links makes one link per switch pair, from one sighting, so a
+    device sending that base MAC on an access port could move the link off the real uplink), each with its trunk. Then the members of
+    every uplink trunk. Rather too many uplinks than one too few. All by the switch's id (a name is not unique): its links carry it in
+    "a" / "b", and an LLDP name it shares with another switch names that one too."""
     from main import build_map, switch_keys  # spaete Bindung, vermeidet Zyklus
     m = await build_map()
     sw = next((s for s in m["switches"] if s["id"] == sid), None)
     if not sw:
         raise LookupError("Switch nicht gefunden oder nicht aktiv")
+    trunk_of = {p["n"]: p["tr"] for p in sw["ports"]}
     uplinks: set[str] = set()
     for link in m["links"]:
         for end, side in ((link["a"], link["A"]), (link["b"], link["B"])):
             if end == sid:
-                uplinks |= set(side["ports"])
+                uplinks |= set(side["ports"]) | {trunk_of[n] for n in side["ports"] if trunk_of.get(n)}
                 if side["trunk"]:
                     uplinks.add(side["trunk"])
-    if poller.by_iftype(sw["driver"] or "procurve"):
-        keys = switch_keys(m["switches"])
-        for p in sw["ports"]:
-            if any(keys.get(entry[0], set()) - {sid} for entry in p["l"]):
-                uplinks.add(p["n"])
-                if p["tr"]:
-                    uplinks.add(p["tr"])
+    keys = switch_keys(m["switches"])
+    for p in sw["ports"]:
+        if p["bm"] or any(keys.get(entry[0], set()) - {sid} for entry in p["l"]):
+            uplinks.add(p["n"])
+            if p["tr"]:
+                uplinks.add(p["tr"])
     for p in sw["ports"]:
         if p["tr"] and p["tr"] in uplinks:
             uplinks.add(p["n"])

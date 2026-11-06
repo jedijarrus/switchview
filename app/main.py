@@ -1320,7 +1320,9 @@ async def unknown_devices(user=Depends(auth.current_user)):
             if p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]):
                 continue
             # "uplink_lldp" wherever the port table shows "Uplink (unbestätigt)" (app.js): an uplink nobody confirms (up, so not uc
-            # here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop protects such ports)
+            # here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop protects such ports).
+            # Not on a port that is an uplink only by a base MAC learned on it ("bm" without a link): the flag says "per LLDP" (Phase 3
+            # Task 9 left this list as it was, docs/logik-phase3.md "Bekannte Grenzen").
             peer = any(e[0] in keys for e in p["l"])
             flags = [f for f, on in (("uplink_lldp", p.get("up") or peer), ("lldp", p["l"]), ("many", p["mc"] > 4)) if on]
             # Of a port's devices, those the router knows (an IP or a name) come first, then poll order: a heuristic. A flood of made-up
@@ -1503,6 +1505,12 @@ async def build_map() -> dict:
     uc = {(s["id"], p["n"]) for s in switches for p in s["ports"] if p["uc"]}
     for link in links:
         link["confirmed"] = all((sid, n) in uc for sid, side in ((link["a"], link["A"]), (link["b"], link["B"])) for n in side["ports"])
+    # "bm" = the base MAC of another managed switch is learned on the port (on a member: on its trunk, where the poller files a member's
+    # MACs). changes.inventory counts every such port as an uplink (T6-RR1c), whichever port _links takes for the link.
+    base_of = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
+    for s in switches:
+        for p in s["ports"]:
+            p["bm"] = any(base_of.get(mac) not in (None, s["id"]) for mac in all_macs.get((s["id"], p["tr"] or p["n"]), ()))
     return {"generated": datetime.now(timezone.utc).isoformat(), "vlans": vlans, "switches": switches, "links": links}
 
 
@@ -1529,31 +1537,46 @@ def switch_keys(switches: list[dict]) -> dict[str, set[int]]:
     return dict(keys)
 
 
-def confirmed_endpoints(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> set[tuple[int, str]]:
-    """(switch id, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
-    LLDP: port P of A has an entry whose sysName maps (switch_keys) to another switch B and whose element 1 or 2 (stripped) is B's port
-    Q, and Q has an entry that maps back to A and P in the same way: P and Q. A name several switches carry maps to each of them. MAC:
-    B's base MAC is learned on P (all_macs[(A, P)], a trunk under its own name) and A's base MAC on any port of B: P, unless P carries
-    an LLDP claim like the above that the other switch does not make back. A claim only one side makes confirms nothing, not even the
-    foreign port an LLDP entry names: otherwise a device on an access port would decide which port of another switch counts as
-    confirmed."""
-    keys = switch_keys(switches)
+def _lldp_claims(switches: list[dict], keys: dict[str, set[int]]) -> set[tuple[tuple[int, str], tuple[int, str]]]:
+    """((A, P), (B, Q)) for every LLDP entry on port P of switch A whose sysName maps (keys, switch_keys) to another switch B and whose
+    element 1 or 2 (stripped) is B's port Q; a name several switches carry maps to each of them. A pair is reported by both sides
+    when ((B, Q), (A, P)) is a claim as well (confirmed_endpoints, _links)."""
     names = {s["id"]: {p["n"] for p in s["ports"]} for s in switches}
-    claims = set()  # ((A, P), (B, Q)): an LLDP entry on A's port P names B's port Q
+    claims = set()
     for s in switches:
         for p in s["ports"]:
             for entry in p["l"]:
                 for nid in sorted(keys.get(entry[0], ())):
                     if nid != s["id"]:
                         claims |= {((s["id"], p["n"]), (nid, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nid]}
+    return claims
+
+
+def confirmed_endpoints(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> set[tuple[int, str]]:
+    """(switch id, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
+    LLDP: port P of A names B's port Q (_lldp_claims), and Q names A and P back in the same way: P and Q. MAC (rule (b)): B's base MAC is
+    learned on P (all_macs[(A, P)], a trunk under its own name), A learns B's base MAC on exactly one port (P; a trunk and its members
+    count as one port) and B learns A's on exactly one port: P, unless P carries an LLDP claim like the above that the other switch
+    does not make back. A claim only one side makes confirms nothing, not even the foreign port an LLDP entry names: otherwise a device
+    on an access port would decide which port of another switch counts as confirmed. A base MAC learned on a second port confirms
+    neither port (T6-RR1c): one of them is a device sending it."""
+    claims = _lldp_claims(switches, switch_keys(switches))
     out = {end for here, there in claims if (there, here) in claims for end in (here, there)}
     # A device on an access port can send another switch's base MAC as its source in its own VLAN: the FDB is per VLAN, so that is a
     # second row and the switch's management is untouched. So base MACs confirm no port whose switch-LLDP claim is one-sided.
     one_sided = {here for here, _ in claims} - out
     base = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
-    learned = {(sid, base[mac]) for (sid, _), macs in all_macs.items() for mac in macs if base.get(mac) not in (None, sid)}  # (A, B): A learns B's base MAC
+    trunk_of = {(s["id"], p["n"]): p["tr"] or p["n"] for s in switches for p in s["ports"]}
+    seen: dict[tuple[int, int], set[str]] = defaultdict(set)    # (A, B) -> the ports (a trunk as one) on which A learns B's base MAC
+    for (sid, pname), macs in all_macs.items():
+        for mac in macs:
+            if base.get(mac) not in (None, sid):
+                seen[(sid, base[mac])].add(trunk_of.get((sid, pname), pname))
+
+    def one_port_each(a: int, b: int) -> bool:
+        return len(seen.get((a, b), ())) == 1 and len(seen.get((b, a), ())) == 1
     out |= {(sid, pname) for (sid, pname), macs in all_macs.items()
-            if (sid, pname) not in one_sided and any((base.get(mac), sid) in learned for mac in macs)}
+            if (sid, pname) not in one_sided and any(one_port_each(sid, base[mac]) for mac in macs if base.get(mac) not in (None, sid))}
     return out
 
 
@@ -1565,17 +1588,23 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
     PortDesc first, then by the PortId: with other vendors the PortDesc is often the long name or the description of the port, the
     PortId its ifName. A pair only the PortId finds, and every pair from a name more than one switch carries (the own one counted), is
     added after the base-MAC pairs and displaces none of them: it only adds links. Otherwise a shared name's pair to a switch that has
-    the named port only by chance hid that switch's real link, one only base MACs see, and its real uplink lost its protection (R40)."""
+    the named port only by chance hid that switch's real link, one only base MACs see, and its real uplink lost its protection (R40).
+    Of the other LLDP pairs only a confirmed one, which both sides report (A:P names B:Q and B:Q names A:P, as in _lldp_claims), and
+    its ports (with their trunks) displace a base-MAC pair: the MAC pair of the same switch pair, or one on those ports. A pair only
+    one side reports stays a link next to the MAC pair: otherwise one forged LLDP frame on an access port, naming a real port of the
+    neighbour, hid a link only base MACs see, and the real uplink lost its protection (T6-F1c)."""
     by_id = {s["id"]: s for s in switches}
     sys2 = switch_keys(switches)
     base2 = {s["baseMac"]: s["id"] for s in switches if s["baseMac"]}
+    claims = _lldp_claims(switches, sys2)
 
     def port(sid, n):
         return next((p for p in by_id[sid]["ports"] if p["n"] == n), None)
 
     pairs: dict[tuple, str] = {}
     late: dict[tuple, str] = {}    # pairs that only add links: found by the PortId, or from a name several switches carry
-    lldp_ports = set()
+    confirmed: set[tuple] = set()  # the LLDP pairs in pairs that both sides report
+    lldp_ports = set()             # their ports and trunks
     for s in switches:
         for p in s["ports"]:
             if p["n"].startswith("Trk"):
@@ -1586,11 +1615,15 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
                 for nid in sorted(nids - {s["id"]}):
                     np_ = port(nid, nport.strip())
                     if np_ and len(nids) == 1:
-                        pairs[tuple(sorted([(s["id"], p["n"]), (nid, nport.strip())]))] = "lldp"
-                        for kk, pp in ((s["id"], p), (nid, np_)):
-                            lldp_ports.add((kk, pp["n"]))
-                            if pp["tr"]:
-                                lldp_ports.add((kk, pp["tr"]))
+                        here, there = (s["id"], p["n"]), (nid, np_["n"])
+                        key = tuple(sorted([here, there]))
+                        pairs[key] = "lldp"
+                        if (there, here) in claims:
+                            confirmed.add(key)
+                            for kk, pp in ((s["id"], p), (nid, np_)):
+                                lldp_ports.add((kk, pp["n"]))
+                                if pp["tr"]:
+                                    lldp_ports.add((kk, pp["tr"]))
                     elif np_:
                         late[tuple(sorted([(s["id"], p["n"]), (nid, nport.strip())]))] = "lldp"
                     elif len(entry) > 2 and entry[2].strip() and port(nid, entry[2].strip()):
@@ -1608,9 +1641,9 @@ def _links(switches: list[dict], all_macs: dict[tuple[int, str], set[str]]) -> l
             continue
         if (a, pa) in lldp_ports or (b, pb) in lldp_ports:
             continue
-        if any({a, b} == {x[0][0], x[1][0]} for x in pairs):
+        if any({a, b} == {x[0][0], x[1][0]} for x in confirmed):
             continue
-        pairs[tuple(sorted([(a, pa), (b, pb)]))] = "mac"
+        pairs.setdefault(tuple(sorted([(a, pa), (b, pb)])), "mac")    # an unconfirmed LLDP pair on the very same ports keeps its label
     for key, src in late.items():
         pairs.setdefault(key, src)
 

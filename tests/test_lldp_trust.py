@@ -5,7 +5,7 @@ unknown devices. Vector B: a forged LLDP frame naming another managed switch mad
 switch confirms. Now main.confirmed_endpoints keeps only what both switches report (LLDP from both sides naming exactly this port pair,
 or base MACs learned mutually); build_map marks every port "uc" and every link "confirmed"; the unknown list skips only trunks and
 confirmed uplinks and flags the rest ("uplink_lldp", "lldp", "many"), unflagged entries first. The uplink protection itself
-(changes.inventory, plan_ports) stays exactly as it was (R40, E21).
+(changes.inventory, plan_ports) stays exactly as it was (R40, E21); Phase 3 Task 9 only widened it (tests/test_uplink_rules.py).
 
 End to end with the real poller (poll_switch) and the real build_map / inventory / unknown_devices against the recorded walks of
 tests/switchfix.py behind a fake snmp.walk; no network. The test network (lldp, fdb, add and the `net` fixture of tests/conftest.py) is
@@ -160,7 +160,8 @@ async def test_a_spoofed_base_mac_does_not_confirm_a_forged_uplink(net):
 
 def test_base_macs_confirm_no_port_whose_switch_lldp_claim_is_one_sided():
     """The rule on plain inputs: A:6 <-> B:6 by LLDP from both sides, base MACs learned mutually (B's on A:6 and, spoofed, on A:3; A's
-    on B:6). A:3 claims B:6, B:6 does not name A:3: A:3 is not confirmed. A:8, with B's base MAC and no LLDP claim, is (rule (b)).
+    on B:6). A:3 claims B:6, B:6 does not name A:3: A:3 is not confirmed. A:8, with B's base MAC and no LLDP claim, is not either:
+    A then learns B's base MAC on three ports, and rule (b) confirms none of them (T6-RR1c, Phase 3 Task 9); the LLDP endpoints stay.
     Switches by id (A = 1, B = 2), MACs and endpoints by (id, port)."""
     def sw(sid, k, base, ports):
         return {"id": sid, "k": k, "sys": k, "baseMac": base, "ports": [{"n": n, "tr": "", "mb": [], "l": entries} for n, entries in ports]}
@@ -168,7 +169,7 @@ def test_base_macs_confirm_no_port_whose_switch_lldp_claim_is_one_sided():
     b = sw(2, "B", "mac-b", [("6", [["A", "6", "6"]])])
     macs = {(1, "3"): {"mac-b"}, (1, "6"): {"mac-b"}, (2, "6"): {"mac-a"}}
     assert main.confirmed_endpoints([a, b], macs) == {(1, "6"), (2, "6")}
-    assert main.confirmed_endpoints([a, b], {**macs, (1, "8"): {"mac-b"}}) == {(1, "6"), (2, "6"), (1, "8")}
+    assert main.confirmed_endpoints([a, b], {**macs, (1, "8"): {"mac-b"}}) == {(1, "6"), (2, "6")}
 
 
 async def test_registered_devices_do_not_push_an_unknown_one_off_the_list(net):
