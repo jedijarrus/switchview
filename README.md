@@ -151,6 +151,10 @@ in the log, without a traceback.
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
+**Content Security Policy.** Every answer carries a strict Content-Security-Policy (only SwitchView itself; with SSO also
+connect-src https://login.microsoftonline.com for the MSAL popup). A reverse proxy should not set its own CSP for SwitchView: both
+would apply.
+
 **SECRET_KEY.** A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different
 characters gets a warning in the log at every start. Changing the key later means entering every stored credential anew.
 

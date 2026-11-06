@@ -85,6 +85,17 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
+SSO_ORIGIN = "https://login.microsoftonline.com"    # the Entra authority host of MSAL's loginPopup (sv-core.js)
+
+
+def content_security_policy(sso: bool) -> str:
+    """The Content-Security-Policy of every answer: nothing but SwitchView itself, with SSO also SSO_ORIGIN for MSAL's fetches."""
+    # style-src-attr 'unsafe-inline': computed style attributes (VLAN colour, widths) run no script; SSO only connect-src: MSAL fetches, its popup navigates
+    return "; ".join(["default-src 'none'", "script-src 'self'", "style-src 'self'", "style-src-attr 'unsafe-inline'", "img-src 'self'",
+                      "font-src 'self'", "connect-src 'self'" + (" " + SSO_ORIGIN if sso else ""), "form-action 'self'",
+                      "frame-ancestors 'none'", "base-uri 'none'", "object-src 'none'"])
+
+
 app = FastAPI(title="SwitchView", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 # Added before the security_headers decorator below, so that one wraps it and the 413 carries the same headers as every answer.
 app.add_middleware(bodylimit.BodyLimit)
@@ -96,6 +107,7 @@ async def security_headers(request: Request, call_next):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "same-origin"
     resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Content-Security-Policy"] = content_security_policy(settings.sso_active)
     return resp
 
 
