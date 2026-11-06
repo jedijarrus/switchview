@@ -136,9 +136,9 @@ say which. A changed address never inherits a stored secret.
 
 **SNMP credentials** never go on a command line, where any local process could read them (`ps`, `/proc/<pid>/cmdline`): for each
 SNMP call SwitchView writes the community or the v3 passphrases into a short-lived `snmp.conf` (mode 0600, in a private directory
-under `/dev/shm`, removed when the call ends) and points net-snmp at it with `SNMPCONFPATH`. An SNMP credential with a line break or
-a NUL character is refused when the switch is saved. A v2c community still travels in clear text on the network; prefer SNMPv3
-with authPriv.
+under `/dev/shm`, or in the temporary directory when `/dev/shm` is not writable, removed when the call ends) and points net-snmp at it
+with `SNMPCONFPATH`. An SNMP credential with a line break or a NUL character is refused when the switch is saved. A v2c community
+still travels in clear text on the network; prefer SNMPv3 with authPriv.
 
 **SSH host keys** are pinned on first use: the first SSH session to a switch (connection test, backup, configuration read or
 change) stores the host key the switch offers, and from then on SwitchView refuses any other key before it logs in, so the password
@@ -146,16 +146,24 @@ never reaches a device that only pretends to be the switch. The switch form show
 compare them once with the switch (`show crypto host-public-key fingerprint`). The pinned key stays when the switch's address
 changes. If a key changes as expected (replacement, new firmware), every SSH access to that switch fails with "passt nicht zum
 gemerkten" until you choose "SSH-Hostschlüssel vergessen" in the switch form; the next SSH session then pins the key it is offered.
+A refused key counts as "SSH not available": on a ProCurve with SNMP writes on, a port change then falls back to SNMP, and its
+preview starts with "SSH nicht verfügbar (… passt nicht zum gemerkten … Möglicher Angriff …)". Do not confirm such a preview before
+you have checked the fingerprint on the switch; a v2c write community would go to whoever answers at that address.
 
 **TLS.** "TLS-Zertifikat prüfen" (PacketFence, OPNsense) is on for a new installation; an existing one keeps its stored setting.
 `http://` addresses stay allowed. The settings warn while a check is off or an address uses `http://`: anyone on the network could
 then read the password or API key. The check uses the certifi bundle; for an own CA, set `SSL_CERT_FILE` to a bundle that holds the
-usual CAs plus your own (the variable also applies to the Microsoft key fetch of the Entra login).
+usual CAs plus your own (the variable also applies to the Microsoft key fetch of the Entra login). The file must be inside the
+container, where only `./data` is mounted (as `/data`): put the bundle at e.g. `./data/ca-bundle.pem`, set
+`SSL_CERT_FILE=/data/ca-bundle.pem` in `.env` and run `docker compose up -d`. A wrong path makes every checked PacketFence/OPNsense
+call and the Entra login fail (the emergency login still works), so afterwards log in once over SSO and press "PacketFence testen"
+and "Namen jetzt aktualisieren" in the settings.
 
 **Masking.** Secrets are masked in stored backups, in the backup and diff views, in CLI previews and in the error, steps and output
-of every change; SwitchView never runs `show radius`, `show tech` or `show tacacs`. Switch output is parsed within fixed limits (SNMP
-output per call, values per walk, port ranges and configuration size), so a hostile switch cannot exhaust the single worker's memory
-with one answer.
+of every change, also of changes stored before the update (masked when they are served; the rows in the database stay as they were),
+and in the log line of a change that ends with an exception; SwitchView never runs `show radius`, `show tech` or `show tacacs`.
+Switch output is parsed within fixed limits (SNMP output per call, values per walk, port ranges and configuration size), so a hostile
+switch cannot exhaust the single worker's memory with one answer.
 
 ## Requirements
 
