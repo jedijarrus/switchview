@@ -15,23 +15,20 @@ ProCurve-only networks keep the links and uplinks of before: the oracle is the c
 _build's attribution), copied verbatim below.
 
 End to end with the real poller (poll_switch, lenient walks), the real build_map / inventory and the real main._make_plan (the strict
-live SNMP read of the Catalyst) against recorded walks of tests/switchfix.py behind a fake snmp.walk; no network.
+live SNMP read of the Catalyst) against recorded walks of tests/switchfix.py behind a fake snmp.walk; no network. The test network
+(lldp, fdb, merge, add and the `net` fixture of tests/conftest.py) is tests/netfix.py, shared with tests/test_lldp_trust.py.
 """
-import asyncio
 import random
 from collections import defaultdict
 
 import pytest
 
 import changes
-import config
-import crypto
 import db
 import main
 import poller
-import snmp
-import sshcli
-from switchfix import CATALYST_VMVLAN, W_CATALYST, W_SAMPLE, WALK_BASES, edit_walks, walk_answer
+from netfix import add, fdb, lldp, merge
+from switchfix import CATALYST_VMVLAN, W_CATALYST, W_SAMPLE, WALK_BASES, edit_walks
 
 OIDS = poller.O
 LOC_ID, LOC_DESC = "1.0.8802.1.1.2.1.3.7.1.3", "1.0.8802.1.1.2.1.3.7.1.4"    # lldpLocPortId / lldpLocPortDesc (LLDP-MIB), .<lldpLocPortNum>
@@ -42,70 +39,9 @@ OFF = main.PortChange(status="off")
 CATALYST = edit_walks({**W_CATALYST, "vmVlan": CATALYST_VMVLAN}, ifAdmin={"10102": "1"})
 
 
-def lldp(local: str, neighbour: str, port_id: str, port_desc: str, rem: int = 1) -> dict:
-    """The lldpRemTable rows of one neighbour by base OID, index <timemark 0>.<lldpRemLocalPortNum>.<lldpRemIndex>."""
-    i = f"0.{local}.{rem}"
-    return {OIDS["lldpSys"]: [(f"{OIDS['lldpSys']}.{i}", neighbour)], OIDS["lldpPortId"]: [(f"{OIDS['lldpPortId']}.{i}", port_id)],
-            OIDS["lldpPortDesc"]: [(f"{OIDS['lldpPortDesc']}.{i}", port_desc)]}
-
-
 def loc_port(num: str, port_id: str, port_desc: str) -> dict:
     """The lldpLocPortTable row of the local port number num: its PortId and PortDesc as the switch sends them."""
     return {LOC_ID: [(f"{LOC_ID}.{num}", port_id)], LOC_DESC: [(f"{LOC_DESC}.{num}", port_desc)]}
-
-
-def fdb(bridge_port: str, mac: str) -> dict:
-    """A base MAC learned on a bridge port in VLAN 1 (dot1qTpFdbPort .<fid>.<mac as 6 decimals>, fid 1 = VLAN 1)."""
-    octets = ".".join(str(int(x, 16)) for x in mac.split(":"))
-    return {OIDS["fdb"]: [(f"{OIDS['fdb']}.1.{octets}", bridge_port)], OIDS["fid"]: [(f"{OIDS['fid']}.0.1", "1")]}
-
-
-def merge(*recordings: dict) -> dict:
-    out: dict = defaultdict(list)
-    for recording in recordings:
-        for oid, rows in recording.items():
-            out[oid] += rows
-    return dict(out)
-
-
-class Network:
-    """The switches behind SNMP, per host their recorded walks by base OID: snmp.walk answers the lenient display poll and the strict
-    live read alike, the free text as hex for a walk with -Ox (switchfix.walk_answer). Records every walked OID per host."""
-
-    def __init__(self):
-        self.rec: dict[str, dict] = {}
-        self.walked: dict[str, list[str]] = defaultdict(list)
-
-    async def walk(self, host, cred, oid, hex_values=False, timeout=60, strict=False):
-        self.walked[host].append(oid)
-        return walk_answer(self.rec[host].get(oid, []), oid, hex_values)
-
-
-@pytest.fixture
-async def net(tmp_path, monkeypatch) -> Network:
-    """A fresh database (the app's own init_db); snmp.walk answered by the Network; fresh poll and change locks."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    await db.init_db()
-    network = Network()
-    monkeypatch.setattr(snmp, "walk", network.walk)
-    monkeypatch.setattr(poller, "_locks", {})
-    monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
-    return network
-
-
-async def add(net: Network, name: str, host: str, driver: str, W: dict, *extra: dict, base_mac: str = "") -> int:
-    """A managed switch (SNMP writing on, with a RW community), its walks (W and the extra rows, sysName = name), polled once."""
-    rec = merge({WALK_BASES[k]: rows for k, rows in W.items()}, {OIDS["sysName"]: [(f"{OIDS['sysName']}.0", name)]}, *extra)
-    if base_mac:
-        rec[OIDS["baseMac"]] = [(f"{OIDS['baseMac']}.0", base_mac.replace(":", " ").upper())]
-    net.rec[host] = rec
-    async with db.db() as conn:
-        cur = await conn.execute("INSERT INTO switches(name, host, driver, snmp_write, snmp_version, snmp_community, snmp_rw_community) "
-                                 "VALUES (?,?,?,1,'2c',?,?)", (name, host, driver, crypto.encrypt("read-s3cret"), crypto.encrypt("rw-s3cret")))
-        await conn.commit()
-        sid = cur.lastrowid
-    assert (await poller.poll_switch(sid))["ok"] is True
-    return sid
 
 
 def link_ports(m: dict) -> list[tuple]:

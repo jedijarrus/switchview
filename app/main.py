@@ -1157,14 +1157,24 @@ async def list_devices(user=Depends(auth.current_user)):
     return devs
 
 
+UNKNOWN_PER_PORT = 12  # unknown devices listed per port: a flood shows its port (flag "many" with its count), not thousands of rows
+
+
 @app.get("/api/devices/unknown")
 async def unknown_devices(user=Depends(auth.current_user)):
     m = await build_map()
-    known = set()
     async with db() as conn:
-        async with conn.execute("SELECT mac FROM devices") as cur:
-            known = {r["mac"] for r in await cur.fetchall()}
+        # Every unregistered device each port has learned, not build_map's display list "d": that one holds twelve devices per port,
+        # registered ones first, so twelve registered devices or a flood ahead of a device in poll order kept it off this list.
+        async with conn.execute("SELECT m.switch_id, m.port, m.mac, m.vlan, n.ip, n.name, n.vendor FROM macs m LEFT JOIN names n "
+                                "ON n.mac = m.mac WHERE m.mac NOT IN (SELECT mac FROM devices) ORDER BY m.rowid") as cur:
+            rows = await cur.fetchall()
     base = {s["baseMac"] for s in m["switches"]}
+    learned: dict[tuple, list] = defaultdict(list)
+    for r in rows:
+        if r["mac"] not in base:
+            learned[(r["switch_id"], r["port"])].append(r)
+    keys = switch_keys(m["switches"])
     out = []
     for s in m["switches"]:
         for p in s["ports"]:
@@ -1172,11 +1182,16 @@ async def unknown_devices(user=Depends(auth.current_user)):
             # devices behind it; such entries are flagged and listed after the unflagged ones, so they push no one past the cap.
             if p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]):
                 continue
-            flags = [f for f, on in (("uplink_lldp", p.get("up")), ("lldp", p["l"]), ("many", p["mc"] > 4)) if on]
-            for d in p["d"]:
-                if d[0] in known or d[0] in base:
-                    continue
-                out.append({"mac": d[0], "vlan": d[1], "ip": d[2], "name": d[3], "vendor": d[4], "sw": s["k"], "port": p["n"], "st": p["st"],
+            # "uplink_lldp" wherever the port table shows "Uplink (unbestätigt)" (app.js): an uplink nobody confirms (up, so not uc
+            # here), or no link while an LLDP neighbour is a managed switch (isPeer; changes.inventory's backstop protects such ports)
+            peer = any(e[0] in keys for e in p["l"])
+            flags = [f for f, on in (("uplink_lldp", p.get("up") or peer), ("lldp", p["l"]), ("many", p["mc"] > 4)) if on]
+            # Of a port's devices, those the router knows (an IP or a name) come first, then poll order: a flood of made-up MACs gets
+            # neither, so it cannot push such a device past the cap.
+            ds = sorted(learned.get((s["id"], p["n"]), []), key=lambda r: not (r["ip"] or r["name"]))
+            for r in ds[:UNKNOWN_PER_PORT]:
+                out.append({"mac": r["mac"], "vlan": r["vlan"], "ip": r["ip"] or "", "name": r["name"] or "",
+                            "vendor": r["vendor"] or names_mod.vendor_of(r["mac"]), "sw": s["k"], "port": p["n"], "st": p["st"],
                             "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"]})
     out.sort(key=lambda e: bool(e["flags"]))  # stable: poll order within each group
     return out[:500]
@@ -1357,8 +1372,9 @@ def confirmed_endpoints(switches: list[dict], all_macs: dict) -> set[tuple[str, 
     """(switch k, port name) of every link endpoint both switches report themselves (F3); inputs as for _links.
     LLDP: port P of A has an entry whose sysName maps (switch_keys) to another switch B and whose element 1 or 2 (stripped) is B's port
     Q, and Q has an entry that maps back to A and P in the same way: P and Q. MAC: B's base MAC is learned on P (all_macs[(A, P)], a
-    trunk under its own name) and A's base MAC on any port of B: P. A claim only one side makes confirms nothing, not even the foreign
-    port an LLDP entry names: otherwise a device on an access port would decide which port of another switch counts as confirmed."""
+    trunk under its own name) and A's base MAC on any port of B: P, unless P carries an LLDP claim like the above that the other switch
+    does not make back. A claim only one side makes confirms nothing, not even the foreign port an LLDP entry names: otherwise a device
+    on an access port would decide which port of another switch counts as confirmed."""
     keys = switch_keys(switches)
     names = {s["k"]: {p["n"] for p in s["ports"]} for s in switches}
     claims = set()  # ((A, P), (B, Q)): an LLDP entry on A's port P names B's port Q
@@ -1369,9 +1385,13 @@ def confirmed_endpoints(switches: list[dict], all_macs: dict) -> set[tuple[str, 
                 if nk and nk != s["k"]:
                     claims |= {((s["k"], p["n"]), (nk, q)) for q in (e.strip() for e in entry[1:3]) if q in names[nk]}
     out = {end for here, there in claims if (there, here) in claims for end in (here, there)}
+    # A device on an access port can send another switch's base MAC as its source in its own VLAN: the FDB is per VLAN, so that is a
+    # second row and the switch's management is untouched. So base MACs confirm no port whose switch-LLDP claim is one-sided.
+    one_sided = {here for here, _ in claims} - out
     base = {s["baseMac"]: s["k"] for s in switches if s["baseMac"]}
     learned = {(k, base[mac]) for (k, _), macs in all_macs.items() for mac in macs if base.get(mac) not in (None, k)}  # (A, B): A learns B's base MAC
-    out |= {(k, pname) for (k, pname), macs in all_macs.items() if any((base.get(mac), k) in learned for mac in macs)}
+    out |= {(k, pname) for (k, pname), macs in all_macs.items()
+            if (k, pname) not in one_sided and any((base.get(mac), k) in learned for mac in macs)}
     return out
 
 

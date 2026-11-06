@@ -116,3 +116,13 @@ def login_api(tmp_path, monkeypatch):
     monkeypatch.setattr(main.scheduler, "start", _never)
     asyncio.run(db.init_db())
     return TestClient(main.app, headers=CSRF)
+
+
+@pytest.fixture
+async def net(tmp_path, monkeypatch):
+    """The test network of tests/netfix.py (tests/test_uplinks.py, tests/test_lldp_trust.py): a fresh database under tmp_path, set up
+    by the app's own init_db; snmp.walk answered by a netfix.Network from recorded walks; fresh poll and change locks. Defined here so
+    that the test files take it without importing it (ruff F401/F811); netfix is imported here, not at the top, like the app modules
+    in login_api."""
+    import netfix
+    return await netfix.fresh_network(tmp_path, monkeypatch)

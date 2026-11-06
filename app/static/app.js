@@ -102,6 +102,13 @@
   const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && isPeer(p)));
   const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="Nur per LLDP gemeldet, die Gegenseite bestätigt es nicht. Ein Gerät am Port kann LLDP fälschen – vor Ort prüfen.">Uplink (unbestätigt)</span>`
     : isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : "";
+  // The ports of a link that build_map does not confirm ("uc": neither LLDP from both sides nor mutual base MACs), as "SW-A 3"; a link
+  // can join a confirmed pair and a one-sided claim, so the tooltip names the ports instead of calling the whole link one-sided.
+  const unconfPorts = l => [...new Set([[l.a, l.A], [l.b, l.B]].flatMap(([k, x]) => {
+    const s = MAP.switches.find(v => v.k === k);
+    return x.ports.filter(n => !(s && s.ports.some(p => p.n === n && p.uc))).map(n => `${k} ${n}`);
+  }))];
+  const unconfTitle = l => l.confirmed ? "" : `Nicht von beiden Switches bestätigt: ${unconfPorts(l).join(", ")}`;
   const linkIssue = l => l.onlyA.length + l.onlyB.length + l.native.length;
   const stDot = s => `<span class="st-dot ${s.ok ? "" : "bad"}" aria-hidden="true"></span>`;
   function zones() { const z = []; MAP.switches.forEach(s => { const k = s.zone || "Ohne Zone"; if (!z.includes(k)) z.push(k); }); return z; }
@@ -173,7 +180,7 @@
       const det = issue ? `<details class="lk"><summary><span class="pill warn">${issue} Abweichung${issue > 1 ? "en" : ""}</span> <span class="linkbtn">Details</span></summary><div style="display:grid;gap:4px;margin-top:6px">
         ${l.onlyA.length ? `<div>nur ${esc(l.a)}: ${chips(l.onlyA)}</div>` : ""}${l.onlyB.length ? `<div>nur ${esc(l.b)}: ${chips(l.onlyB)}</div>` : ""}${l.native.length ? `<div>ungetaggt verschieden: ${chips(l.native)}</div>` : ""}</div></details>` : `<span class="pill ok">gleich</span>`;
       const side = (k, x) => `${esc(k)} <span class="mono muted">${esc(x.trunk || x.ports.join(","))}</span>`;
-      return `<tr><td><b>${esc(focus && l.b === focus ? l.b : l.a)}</b> ⇄ <b>${esc(focus && l.b === focus ? l.a : l.b)}</b></td><td>${side(l.a, l.A)}<br>${side(l.b, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
+      return `<tr><td><b>${esc(focus && l.b === focus ? l.b : l.a)}</b> ⇄ <b>${esc(focus && l.b === focus ? l.a : l.b)}</b></td><td>${side(l.a, l.A)}<br>${side(l.b, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td${l.confirmed ? "" : ` title="${esc(unconfTitle(l))}"`}>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
   }
 
@@ -190,7 +197,7 @@
     let edges = "";
     MAP.links.forEach(l => {
       const a = pos[l.a], b = pos[l.b]; if (!a || !b) return;
-      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""} ${l.confirmed ? "" : "unconf"}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.a)} ⇄ ${esc(l.b)}</title></line>`;
+      edges += `<line class="edge ${l.A.ports.length > 1 ? "thick" : ""} ${linkIssue(l) ? "warn" : ""} ${l.src === "mac" ? "mac" : ""} ${l.confirmed ? "" : "unconf"}" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"><title>${esc(l.a)} ⇄ ${esc(l.b)}${l.confirmed ? "" : ` · ${esc(unconfTitle(l))}`}</title></line>`;
     });
     let nodes = "";
     MAP.switches.forEach(s => {
@@ -198,7 +205,7 @@
       nodes += `<g class="node ${s.ok ? "" : "bad"}" tabindex="0" role="link" data-goto="${esc(s.k)}" aria-label="${esc(s.k)} öffnen"><rect x="${p[0] - NW / 2}" y="${p[1] - NH / 2}" width="${NW}" height="${NH}" rx="7"/>
         <text class="nname" x="${p[0]}" y="${p[1] - 3}" text-anchor="middle">${esc(s.k)}</text><text class="nmeta" x="${p[0]}" y="${p[1] + 13}" text-anchor="middle">${ph.filter(x => x.o).length}/${ph.length} aktiv</text></g>`;
     });
-    t.innerHTML = `<svg viewBox="0 0 ${x0 - 30} ${maxH + 20}" role="img" aria-label="Topologie">${svg}${edges}${nodes}</svg><p class="note">Dicke Linie = Trunk · orange = VLANs unterschiedlich · gestrichelt = ohne LLDP erkannt · gepunktet = unbestätigt (nur eine Seite meldet LLDP)</p>`;
+    t.innerHTML = `<svg viewBox="0 0 ${x0 - 30} ${maxH + 20}" role="img" aria-label="Topologie">${svg}${edges}${nodes}</svg><p class="note">Dicke Linie = Trunk · orange = VLANs unterschiedlich · gestrichelt = ohne LLDP erkannt · gepunktet = unbestätigt (nicht von beiden Switches gemeldet)</p>`;
     const openNode = e => { const g = e.target.closest("[data-goto]"); if (g) go("switches", g.dataset.goto); };
     t.addEventListener("click", openNode);
     t.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openNode(e); } });
