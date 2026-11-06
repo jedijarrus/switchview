@@ -20,7 +20,8 @@ The routing rule (spec §5 / Q5: fixed at plan time, never switched mid-apply):
 
 The app runs in-process (FastAPI TestClient without `with`: no lifespan, no scheduler) against a fresh database per test. No network:
 changes.fresh_cfg (the SSH read), snmpwrite.read_cfg (the SNMP read) and changes.inventory (the poll) are fakes over fixture switches,
-and changes.plan_ports, create_change and run_change are spied on (run_change never runs: nothing is applied in this file).
+and changes.plan_ports, create_change and run_change are spied on (run_change never runs: nothing is applied in this file). Behind the
+fakes, netmiko's ConnectHandler and snmp.get / walk / set_vars are traps, so a fake that stops applying fails at once.
 Expected messages and shown lines are written out by hand.
 """
 import asyncio
@@ -189,6 +190,14 @@ def _never(*args, **kwargs):
     raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
 
 
+def _no_ssh(*args, **kwargs):
+    raise AssertionError("no real SSH in this test")
+
+
+async def _no_snmp(*args, **kwargs):
+    raise AssertionError("no real SNMP in this test")
+
+
 @pytest.fixture
 def fake(monkeypatch) -> FakeSwitch:
     sw = FakeSwitch()
@@ -209,6 +218,11 @@ def fake(monkeypatch) -> FakeSwitch:
             return None
         return nothing()
 
+    # Final review: the reads below are fakes; should a seam regress (a module binding the real fresh_cfg or read_cfg by name), the
+    # real one fails here at once instead of dialling the fixture address (twice in Phase 3 a scratch probe tried 203.0.113.21:22)
+    monkeypatch.setattr(sshcli, "ConnectHandler", _no_ssh)
+    for name in ("get", "walk", "set_vars"):
+        monkeypatch.setattr(snmp, name, _no_snmp)
     monkeypatch.setattr(changes, "fresh_cfg", sw.fresh_cfg)
     monkeypatch.setattr(snmpwrite, "read_cfg", sw.read_cfg)
     monkeypatch.setattr(changes, "inventory", sw.inventory)
