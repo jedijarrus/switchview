@@ -38,8 +38,8 @@
       </nav>
       <div class="search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="q" type="search" autocomplete="off" placeholder="Gerät, IP, MAC, Port …" aria-label="Netz durchsuchen">
-        <div class="results" id="results" hidden></div>
+        <input id="q" type="search" autocomplete="off" placeholder="Gerät, IP, MAC, Port …" aria-label="Netz durchsuchen" role="combobox" aria-expanded="false" aria-controls="results" aria-autocomplete="list">
+        <div class="results" id="results" role="listbox" aria-label="Suchtreffer" hidden></div>
       </div>
       <div class="user"><span id="user-name" class="muted"></span><button type="button" class="btn ghost small" id="btn-logout">Abmelden</button></div>
     </div>

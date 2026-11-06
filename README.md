@@ -134,7 +134,7 @@ e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container of the co
 Docker host usually the gateway of the compose network). Without the variable uvicorn trusts proxy headers only from 127.0.0.1, which
 inside the container is nobody else: SwitchView works the same, but the log shows the proxy's address for every client.
 `docker-compose.yml` publishes port 8080 on every address of the host; if only the proxy should reach SwitchView, bind it to
-`127.0.0.1` or close it in the firewall.
+`127.0.0.1` or close it in the firewall. SwitchView compresses answers of 4 KiB and more with gzip; a proxy passes that on.
 
 **Cookies.** `COOKIE_SECURE` decides when the session and device cookies carry the `Secure` flag. `auto` (the default) sets it when
 the request came over HTTPS, by its own scheme or by `X-Forwarded-Proto: https`; either signal can only add the flag, a forged

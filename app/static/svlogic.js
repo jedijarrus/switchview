@@ -44,5 +44,60 @@ const SVLogic = {
     if (shift && i === 0) return n - 1;
     return null;
   },
+  // The names an LLDP neighbour carries when it is a switch of the list: every non-empty sysName and name (k), as
+  // topology.switch_keys; an empty name is no switch
+  peerKeys(switches) {
+    const keys = new Set();
+    switches.forEach(s => [s.sys, s.k].forEach(v => { if (v) keys.add(v); }));
+    return keys;
+  },
+  // What the global search looks through, built once per netmap: an entry per port description, LLDP neighbour and device, in the
+  // order the search lists them, each with hay (its text in lower case) and what a hit shows (t, x). Trunks themselves (Trk…) are
+  // left out, and devices only of ports with at most 12 devices, no switch as LLDP neighbour (keys: peerKeys) and no trunk; a line
+  // break joins the fields of a device, which a search term (input type=search) never holds.
+  searchIndex(switches, keys) {
+    const idx = [];
+    switches.forEach(s => s.ports.forEach(p => {
+      if (p.n.startsWith("Trk")) return;
+      const at = { sid: s.id, k: s.k, port: p.n };
+      if (p.a) idx.push({ ...at, hay: p.a.toLowerCase(), t: p.a, x: "Port-Beschreibung" });
+      p.l.forEach(x => idx.push({ ...at, hay: (x[0] + " " + x[1]).toLowerCase(), t: x[0] + " Port " + x[1], x: "LLDP-Nachbar" }));
+      if (p.mc <= 12 && !p.l.some(x => keys.has(x[0])) && !p.tr)
+        p.d.forEach(d => idx.push({ ...at, hay: d.map(v => String(v || "").toLowerCase()).join("\n"), t: d[3] || d[4] || d[0],
+          x: d[0] + (d[2] ? " · " + d[2] : "") + " · VLAN " + d[1] }));
+    }));
+    return idx;
+  },
+  // The first max entries of a searchIndex whose text holds term (lower case)
+  searchHits(index, term, max = 30) {
+    const hits = [];
+    for (const e of index) {
+      if (!e.hay.includes(term)) continue;
+      hits.push(e);
+      if (hits.length >= max) break;
+    }
+    return hits;
+  },
+  // The option a key makes active in a list of n options when option cur is (-1: none): the arrows go round, any other key keeps
+  // cur; -1 for an empty list
+  nextIndex(cur, n, key) {
+    if (n === 0) return -1;
+    if (key === "ArrowDown") return (cur + 1) % n;
+    if (key === "ArrowUp") return cur <= 0 ? n - 1 : cur - 1;
+    return cur;
+  },
+  // The VLAN matrix of one switch in one pass: per VLAN id any port names in u or t, the ports that carry it untagged (u) and tagged
+  // (t). Counted are trunks named Trk… and ports without tr (a trunk counts once, not with each member); a LAG of another make (Po1,
+  // ae0: tr is its own name) is not counted, but its VLANs still get their key, as the matrix had it before Phase 5. A port's u and t
+  // name each VLAN once (poller.py builds them from the switch's VLAN table), so an entry is a port.
+  vlanCounts(ports) {
+    const c = Object.create(null);
+    for (const p of ports) {
+      const add = p.n.startsWith("Trk") || !p.tr ? 1 : 0;
+      for (const id of p.u) (c[id] || (c[id] = { u: 0, t: 0 })).u += add;
+      for (const id of p.t) (c[id] || (c[id] = { u: 0, t: 0 })).t += add;
+    }
+    return c;
+  },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;

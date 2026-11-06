@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -97,8 +98,14 @@ def content_security_policy(sso: bool) -> str:
 
 
 app = FastAPI(title="SwitchView", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-# Added before the security_headers decorator below, so that one wraps it and the 413 carries the same headers as every answer.
+# Both added before the security_headers decorator below, so that one wraps them and the 413 and every compressed answer carry the
+# same headers as every answer.
 app.add_middleware(bodylimit.BodyLimit)
+# gzip for answers from 4 KiB (smaller ones do not pay), at level 1 instead of Starlette's default 9: /api/netmap is 10 MB at 300
+# switches (34 MB at 1000) and shrinks to about a ninth in about 50 ms (150 ms); level 9 is a fifth smaller still but holds the single
+# worker 0.4 s (1.3 s) per answer. Inside security_headers, not around it: that one (a BaseHTTPMiddleware) passes every body on as
+# a stream of chunks, and GZipMiddleware compresses a stream whatever its size (minimum_size holds only for a body in one piece).
+app.add_middleware(GZipMiddleware, minimum_size=4096, compresslevel=1)
 
 
 @app.middleware("http")

@@ -212,3 +212,65 @@ ESCAPE = 'document.fire("keydown", {key: "Escape"}); '
 def test_a_preview_closed_while_the_switch_is_read_stays_closed(meanwhile, answer, want):     # T4-c, Review Focus 3
     """Back, Escape or the login close the loading dialog, or another dialog replaces it: the late answer of /plan opens nothing."""
     assert in_dom('(async () => { ' + PENDING_PLAN + meanwhile + answer + '; await p; return ' + SHOWN + '; })()') == want
+
+
+# Phase 5 Task 5: the global search is a combobox (WAI-ARIA 1.2): focus stays in #q with aria-activedescendant, the arrows wrap,
+# Enter opens, Escape closes; one search runs SEARCH_DELAY after the last keystroke
+SEARCH = ('MAP = {switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
+          '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}; '
+          '$("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); ')
+
+
+def test_the_search_is_a_combobox():
+    js = ('(async () => { ' + SEARCH + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), '
+          '($("#results").innerHTML.match(/role="option"/g) || []).length, /id="hit-1"/.test($("#results").innerHTML)]; })()')
+    assert in_dom(js) == [False, "true", 2, True]
+
+
+def test_arrow_keys_move_the_active_option_and_enter_opens_it():
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + 'let opened = null; openPort = (s, n) => { opened = [s.id, n]; }; const q = $("#q"); '
+          'q.fire("keydown", {key: "ArrowDown"}); q.fire("keydown", {key: "ArrowDown"}); '
+          'const a = [q.getAttribute("aria-activedescendant"), $("#hit-1").getAttribute("aria-selected"), $("#hit-0").getAttribute("aria-selected")]; '
+          'q.fire("keydown", {key: "ArrowDown"}); a.push(q.getAttribute("aria-activedescendant")); q.fire("keydown", {key: "Enter"}); '
+          'await new Promise(r => setTimeout(r, 50)); return [...a, opened, current, $("#results").hidden, q.getAttribute("aria-expanded")]; })()')
+    assert in_dom(js) == ["hit-1", "true", "false", "hit-0", [1, "1"], "switches", True, "false"]
+
+
+def test_escape_closes_the_results():
+    js = ('(async () => { ' + SEARCH + '$("#q").fire("keydown", {key: "Escape"}); '
+          'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), $("#q").getAttribute("aria-activedescendant")]; })()')
+    assert in_dom(js) == [True, "false", None]
+
+
+def test_typing_searches_once_after_a_pause():
+    js = ('(async () => { let n = 0; const hits = SVLogic.searchHits; SVLogic.searchHits = (...a) => { n++; return hits(...a); }; ' + SEARCH.replace(
+          '$("#q").value = "drucker"; $("#q").fire("input");', '["dr", "dru", "druc", "drucker"].forEach(v => { $("#q").value = v; $("#q").fire("input"); });')
+          + 'return n; })()')
+    assert in_dom(js) == 1
+
+
+def test_a_term_too_short_leaves_no_hits_for_the_arrows():
+    """Deleting the term below two characters closes the list and forgets its hits: an arrow key does not bring back the hits of a
+    text no longer in the field (Chrome's Escape also empties a search field)."""
+    js = ('(async () => { ' + SEARCH + '$("#q").value = "d"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); '
+          '$("#q").fire("keydown", {key: "ArrowDown"}); return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), searchFound.length]; })()')
+    assert in_dom(js) == [True, "false", 0]
+
+
+def test_a_search_that_waited_for_the_netmap_leaves_the_list_to_the_newer_text():
+    """The first search after a reload waits for /api/netmap (seconds at hundreds of switches); if the field changed meanwhile, the
+    answer does not show the hits of the old text (the search of the new text follows)."""
+    js = ('(async () => { let answer; api = () => new Promise(ok => { answer = ok; }); MAP = null; '
+          '$("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 300)); $("#q").value = "drucker-vk"; '
+          'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); '
+          'await new Promise(r => setTimeout(r, 50)); return [$("#results").hidden, searchFound.length]; })()')
+    assert in_dom(js) == [True, 0]
+
+
+@pytest.mark.parametrize("close", ['document.fire("keydown", {key: "Escape"}); ', "showLogin(); ", "dropLayers(); "])
+def test_every_layer_closer_closes_the_combobox(close):
+    """Escape anywhere (onLayerKey), the login page and Back/Forward (dropLayers) close the list as the combobox's own Escape does:
+    aria-expanded and the active option go with it."""
+    js = ('(async () => { ' + SEARCH + '$("#q").fire("keydown", {key: "ArrowDown"}); ' + close
+          + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), $("#q").getAttribute("aria-activedescendant"), searchActive]; })()')
+    assert in_dom(js) == [True, "false", None, -1]

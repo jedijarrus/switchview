@@ -90,3 +90,18 @@ def test_the_radius_card_says_the_switch_changed_since_the_read_without_naming_a
     stale, fresh = in_page(card)
     assert " · veraltet (Switch seither geändert)</span>" in stale and "SNMP" not in stale
     assert "veraltet" not in fresh and "Stand " in fresh
+
+
+# The names a selector may be concatenated from: ids the code itself writes (sv-admin.js), never a value from the switch or the user
+CODE_IDS = {"noteId", "inputId", "id", "b.dataset.clr", "box", "url"}
+
+
+def test_no_selector_is_built_from_unescaped_text():                                  # Review Focus 5
+    """Every selector written as a template literal escapes each value it takes (CSS.escape); a port name can hold `"` or `\\`. A
+    selector built with + takes only an id of the code (CODE_IDS)."""
+    for n in SCRIPTS[2:]:
+        text = (STATIC / n).read_text(encoding="utf-8")
+        for sel in re.findall(r"(?:querySelector(?:All)?|\$)\((`[^`]*`)", text):
+            assert all(v.startswith("CSS.escape(") for v in re.findall(r"\$\{([^}]*)\}", sel)), (n, sel)
+        for v in re.findall(r"(?:querySelector(?:All)?|\$)\(\s*[\"'][^\"']*[\"']\s*\+\s*([\w.]+)", text):
+            assert v in CODE_IDS, (n, v)

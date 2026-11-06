@@ -5,38 +5,61 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(!MAP); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     const sw = MAP.switches;
-    const cnt = (s, id) => { const ph = physOf(s).filter(p => !p.tr); const tr = s.ports.filter(p => p.n.startsWith("Trk")); const all = [...ph, ...tr]; return { u: all.filter(p => p.u.includes(id)).length, t: all.filter(p => p.t.includes(id)).length }; };
+    // One pass over the ports of each switch (SVLogic.vlanCounts); a VLAN without a key there is on none of its ports
+    const counts = sw.map(s => SVLogic.vlanCounts(s.ports));
     v.innerHTML = `<section class="card"><div class="card-h"><h2>VLANs je Switch</h2><span class="sub">U = Ports ungetaggt, T = getaggt (Trunks zählen einfach). Klick öffnet den Switch mit diesem VLAN.</span></div>
       <div class="tbl-wrap"><table class="matrix"><thead><tr><th>VLAN</th>${sw.map(s => `<th>${esc(s.k)}</th>`).join("")}</tr></thead><tbody>` +
-      Object.keys(MAP.vlans).map(id => `<tr><td>${chip(id, "")}</td>${sw.map(s => { const c = cnt(s, id); const exists = s.ports.some(p => p.u.includes(id) || p.t.includes(id));
-        return `<td>${exists ? `<button type="button" class="mcell" data-sw="${s.id}" data-v="${esc(id)}" title="${esc(s.k)} · VLAN ${esc(id)}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>` : `<span class="muted">–</span>`}</td>`; }).join("")}</tr>`).join("") +
+      Object.keys(MAP.vlans).map(id => `<tr><td>${chip(id, "")}</td>${sw.map((s, i) => { const c = counts[i][id];
+        return `<td>${c ? `<button type="button" class="mcell" data-sw="${s.id}" data-v="${esc(id)}" title="${esc(s.k)} · VLAN ${esc(id)}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>` : `<span class="muted">–</span>`}</td>`; }).join("")}</tr>`).join("") +
       `</tbody></table></div></section>`;
     v.querySelector("table").addEventListener("click", e => { const b = e.target.closest(".mcell"); if (!b) return; swVlan = b.dataset.v; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); });
   }
 
-  /* ── Globale Suche ── */
+  /* ── Globale Suche: a combobox (WAI-ARIA 1.2) over the listbox #results. The focus stays in #q, whose aria-activedescendant names
+     the active hit; the arrows go round, Enter opens the active hit, Escape closes the list (Home/End stay with the field's cursor).
+     A search runs SEARCH_DELAY ms after the last keystroke, over an index built once per netmap. ── */
   const q = $("#q"), res = $("#results");
-  q.addEventListener("input", async () => {
+  const SEARCH_DELAY = 150;
+  // searchFound: the hits shown (SVLogic.searchIndex entries), searchActive: the index of the active one, -1 for none
+  let searchFound = [], searchActive = -1, searchTimer = null;
+  // The search index of each MAP (MAP is only ever replaced: an old MAP's index goes with it)
+  const searchIdxs = new WeakMap();
+  function searchIdx() { let idx = searchIdxs.get(MAP); if (!idx) searchIdxs.set(MAP, idx = SVLogic.searchIndex(MAP.switches, peerSet())); return idx; }
+  function showResults(on) { res.hidden = !on; q.setAttribute("aria-expanded", String(on)); if (!on) setActive(-1); }
+  function setActive(i) {
+    if (searchActive >= 0) { const old = document.getElementById("hit-" + searchActive); if (old) old.setAttribute("aria-selected", "false"); }
+    searchActive = i;
+    const b = i >= 0 ? document.getElementById("hit-" + i) : null;
+    if (!b) { q.removeAttribute("aria-activedescendant"); return; }
+    b.setAttribute("aria-selected", "true"); q.setAttribute("aria-activedescendant", "hit-" + i); b.scrollIntoView({ block: "nearest" });
+  }
+  async function runSearch() {
     const term = q.value.trim().toLowerCase().replace(/-/g, ":");
-    if (term.length < 2) { res.hidden = true; return; }
+    if (term.length < 2) { searchFound = []; showResults(false); return; }
     try { await loadMap(false); } catch (e) { return; }
-    const hits = [];
-    MAP.switches.forEach(s => s.ports.forEach(p => {
-      if (p.n.startsWith("Trk")) return;
-      if ((p.a || "").toLowerCase().includes(term)) hits.push({ s, p, t: p.a, x: "Port-Beschreibung" });
-      p.l.forEach(x => { if ((x[0] + " " + x[1]).toLowerCase().includes(term)) hits.push({ s, p, t: x[0] + " Port " + x[1], x: "LLDP-Nachbar" }); });
-      if (p.mc <= 12 && !isPeer(p) && !p.tr) p.d.forEach(d => { if (d.some(val => String(val || "").toLowerCase().includes(term))) hits.push({ s, p, t: d[3] || d[4] || d[0], x: d[0] + (d[2] ? " · " + d[2] : "") + " · VLAN " + d[1] }); });
-    }));
-    res.innerHTML = hits.length ? hits.slice(0, 30).map(h => `<button type="button" data-sw="${h.s.id}" data-p="${esc(h.p.n)}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.s.k)} · Port ${esc(h.p.n)}</span><span class="r2">${esc(h.x)}</span></button>`).join("") : `<div class="none">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
-    res.hidden = false;
-  });
-  res.addEventListener("click", async e => {
-    const b = e.target.closest("[data-sw]"); if (!b) return; res.hidden = true;
-    swVlan = null; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw);
+    // A search that waited for the netmap while the field changed leaves the list to the search of the new text
+    if (q.value.trim().toLowerCase().replace(/-/g, ":") !== term) return;
+    searchFound = SVLogic.searchHits(searchIdx(), term, 30);
+    searchActive = -1; q.removeAttribute("aria-activedescendant");
+    res.innerHTML = searchFound.length ? searchFound.map((h, i) => `<button type="button" role="option" id="hit-${i}" aria-selected="false" tabindex="-1" data-i="${i}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.k)} · Port ${esc(h.port)}</span><span class="r2">${esc(h.x)}</span></button>`).join("")
+      : `<div class="none" role="option" aria-disabled="true">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
+    showResults(true);
+  }
+  async function openHit(h) {
+    showResults(false);
+    swVlan = null; swPortFilter = "all"; swText = ""; go("switches", h.sid);
     for (let i = 0; i < 20 && !$("#plate"); i++) await new Promise(r => setTimeout(r, 100));
-    const s = swById(+b.dataset.sw); if (s) openPort(s, b.dataset.p, q);
+    const s = swById(h.sid); if (s) openPort(s, h.port, q);
+  }
+  q.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, SEARCH_DELAY); });
+  q.addEventListener("keydown", e => {
+    if (e.key === "Escape") showResults(false);
+    else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && searchFound.length) {
+      e.preventDefault(); showResults(true); setActive(SVLogic.nextIndex(searchActive, searchFound.length, e.key));
+    } else if (e.key === "Enter" && searchActive >= 0) { e.preventDefault(); openHit(searchFound[searchActive]); }
   });
-  document.addEventListener("click", e => { if (!e.target.closest(".search")) res.hidden = true; });
+  res.addEventListener("click", e => { const b = e.target.closest("[data-i]"); if (b) openHit(searchFound[+b.dataset.i]); });
+  document.addEventListener("click", e => { if (!e.target.closest(".search")) showResults(false); });
 
   /* ── Switch anlegen / bearbeiten ── */
   let DRIVERS = null; // GET /api/drivers: [{name, caps, notes}]

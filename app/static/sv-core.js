@@ -62,10 +62,10 @@
     $("#app").inert = m || d; $("#drawer").inert = m;
   }
   // Every layer closed without moving the focus (the login page, Back and Forward): there is no opener to go back to
-  function dropLayers() { $("#modal").hidden = true; closeDrawer(true); $("#results").hidden = true; syncLayers(); }
+  function dropLayers() { $("#modal").hidden = true; closeDrawer(true); showResults(false); syncLayers(); }
   function onLayerKey(e) {
     const m = !$("#modal").hidden, d = $("#drawer").classList.contains("open");
-    if (e.key === "Escape") { if (m) closeModal(); else if (d) closeDrawer(); $("#results").hidden = true; }
+    if (e.key === "Escape") { if (m) closeModal(); else if (d) closeDrawer(); showResults(false); }
     else if (e.key === "Tab") { if (m) trapTab(e, $(".modal")); else if (d) trapTab(e, $("#drawer")); }
   }
   document.addEventListener("keydown", onLayerKey);
@@ -126,7 +126,12 @@
   // A trunk / LAG itself (TrkN, or a port whose trunk is itself: Po1, ae0, ...); its members carry the trunk's name in tr
   const isTrunkPort = p => p.n.startsWith("Trk") || (!!p.tr && p.tr === p.n);
   const isMember = p => !!p && !!p.tr && p.tr !== p.n;
-  const isPeer = p => p.l.some(x => MAP.switches.some(s => s.sys === x[0] || s.k === x[0]));
+  // The names of the switches (SVLogic.peerKeys), built once per MAP: MAP is only ever replaced, never changed in place, and an old
+  // MAP's set goes with it
+  const peerSets = new WeakMap();
+  const peerSet = () => { let keys = peerSets.get(MAP); if (!keys) peerSets.set(MAP, keys = SVLogic.peerKeys(MAP.switches)); return keys; };
+  // An LLDP neighbour of the port is one of the switches; a neighbour without a name is none (as topology.switch_keys)
+  const isPeer = p => p.l.some(x => peerSet().has(x[0]));
   const isUplink = p => isPeer(p) || !!p.tr || !!p.up || !!p.bm;
   const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && (isPeer(p) || p.bm)));
   const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="Nur per LLDP gemeldet, die Gegenseite bestätigt es nicht. Ein Gerät am Port kann LLDP fälschen – vor Ort prüfen.">Uplink (unbestätigt)</span>`

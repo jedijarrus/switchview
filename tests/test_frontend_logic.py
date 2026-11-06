@@ -95,3 +95,54 @@ def test_index_loads_svlogic_before_the_app_scripts():
     """Holds unchanged after Task 12 (app.js split into several scripts)."""
     scripts = re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX)
     assert scripts.index("svlogic.js") < min(i for i, s in enumerate(scripts) if s not in ("msal-browser.min.js", "svlogic.js"))
+
+
+# Phase 5 Task 5: the global search runs over an index built once per netmap (SVLogic.searchIndex) instead of comparing every LLDP
+# neighbour with every switch and lower-casing every device field on each keystroke; the VLAN matrix counts in one pass per switch.
+SW = [{"id": 1, "k": "A", "sys": "a-sys", "ports": [
+         {"n": "1", "a": "Drucker-EK", "l": [], "d": [["aa:bb:cc:00:00:01", "20", "10.0.0.5", "drucker1", "HP", 2]], "mc": 1, "tr": ""},
+         {"n": "2", "a": "", "l": [["B", "6"]], "d": [["aa:bb:cc:00:00:02", "20", "", "", "Cisco", 0]], "mc": 1, "tr": ""},
+         {"n": "3", "a": "", "l": [["SEP00AB", "Port 1"]], "d": [["aa:bb:cc:00:00:03", "30", "", "phone", "Cisco", 0]], "mc": 1, "tr": ""},
+         {"n": "4", "a": "", "l": [], "d": [["aa:bb:cc:00:00:04", "20", "", "x", "", 0]], "mc": 13, "tr": ""},
+         {"n": "5", "a": "member", "l": [], "d": [["aa:bb:cc:00:00:05", "20", "", "y", "", 0]], "mc": 1, "tr": "Trk1"},
+         {"n": "Trk1", "a": "uplink-trunk", "l": [], "d": [], "mc": 0, "tr": "Trk1"}]},
+      {"id": 2, "k": "B", "sys": "", "ports": []}]
+# the search of before Phase 5 (sv-admin.js, the input handler of #q), as [sid, port, t, x] per hit
+OLD = """(sw, term) => { const isPeer = p => p.l.some(x => sw.some(s => s.sys === x[0] || s.k === x[0])); const hits = [];
+  sw.forEach(s => s.ports.forEach(p => { if (p.n.startsWith("Trk")) return;
+    if ((p.a || "").toLowerCase().includes(term)) hits.push([s.id, p.n, p.a, "Port-Beschreibung"]);
+    p.l.forEach(x => { if ((x[0] + " " + x[1]).toLowerCase().includes(term)) hits.push([s.id, p.n, x[0] + " Port " + x[1], "LLDP-Nachbar"]); });
+    if (p.mc <= 12 && !isPeer(p) && !p.tr) p.d.forEach(d => { if (d.some(v => String(v || "").toLowerCase().includes(term)))
+      hits.push([s.id, p.n, d[3] || d[4] || d[0], d[0] + (d[2] ? " · " + d[2] : "") + " · VLAN " + d[1]]); }); }));
+  return hits; }"""
+
+
+@pytest.mark.parametrize("term", ["aa:bb", "drucker", "cisco", "port 1", "sep00", "member", "uplink", "10.0.0", "20", "zz"])
+def test_search_index_finds_what_the_old_search_found(term):                          # Review Focus 4
+    sw = json.dumps(SW)
+    new = run(f"L.searchHits(L.searchIndex({sw}, L.peerKeys({sw})), {json.dumps(term)}, 999).map(h => [h.sid, h.port, h.t, h.x])")
+    assert new == run(f"({OLD})({sw}, {json.dumps(term)})")
+
+
+def test_search_hits_stop_at_max():
+    assert run(f"L.searchHits(L.searchIndex({json.dumps(SW)}, new Set()), 'aa:bb', 2).length") == 2
+
+
+def test_peer_keys_skip_empty_names():
+    assert run("[...L.peerKeys([{sys: '', k: 'A'}, {sys: 'core', k: ''}, {sys: 'core', k: 'B'}])].sort()") == ["A", "B", "core"]
+
+
+@pytest.mark.parametrize("cur, n, key, want", [(-1, 3, "ArrowDown", 0), (2, 3, "ArrowDown", 0), (0, 3, "ArrowUp", 2), (-1, 3, "ArrowUp", 2),
+                                               (1, 3, "Home", 1), (1, 3, "x", 1), (-1, 0, "ArrowDown", -1)])
+def test_next_index(cur, n, key, want):
+    assert run(f"L.nextIndex({cur}, {n}, {json.dumps(key)})") == want
+
+
+PORTS = [{"n": "1", "u": ["20"], "t": ["30"], "tr": ""}, {"n": "2", "u": ["20"], "t": [], "tr": "Trk1"},
+         {"n": "Trk1", "u": ["1"], "t": ["20", "30"], "tr": "Trk1"},
+         {"n": "Po1", "u": ["40"], "t": [], "tr": "Po1"}, {"n": "3", "u": [], "t": ["99"], "tr": ""}]
+
+
+def test_vlan_counts_are_the_matrix_of_before():
+    assert run(f"L.vlanCounts({json.dumps(PORTS)})") == {"20": {"u": 1, "t": 1}, "30": {"u": 0, "t": 2}, "1": {"u": 1, "t": 0},
+                                                          "40": {"u": 0, "t": 0}, "99": {"u": 0, "t": 1}}
