@@ -132,6 +132,10 @@
     const bad = MAP.switches.filter(s => !s.ok);
     if (bad.length) g.push({ sev: "crit", t: "Abfrage fehlgeschlagen", sum: bad.map(s => s.k).join(", "), open: true,
       items: bad.map(s => ({ t: s.k, d: s.error || "keine Antwort", go: () => go("switches", s.id) })) });
+    // A poll that went through with gaps (poller.partial_note: failed walks, kept MACs / LLDP, skipped VLAN rows) keeps its note in error
+    const partial = MAP.switches.filter(s => s.ok && s.error);
+    if (partial.length) g.push({ sev: "warn", t: "Abfrage unvollständig", sum: partial.map(s => s.k).join(", "),
+      items: partial.map(s => ({ t: s.k, d: s.error, go: () => go("switches", s.id) })) });
     const lk = MAP.links.filter(linkIssue);
     if (lk.length) g.push({ sev: "warn", t: "VLANs auf Verbindungen unterschiedlich", sum: `${lk.length} von ${MAP.links.length} Verbindungen`,
       items: lk.map(l => {
@@ -260,6 +264,7 @@
       <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
         <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${edit}</div></div>
       ${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
+      ${s.ok && s.error ? `<div class="banner warn">Abfrage unvollständig: ${esc(s.error)}</div>` : ""}
       ${warnList(s.credWarnings)}
       ${banner}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>

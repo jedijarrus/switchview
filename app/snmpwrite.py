@@ -47,23 +47,19 @@ WALKS = ("ifName", "ifAlias", "ifAdmin", "bp2if", "vlanName", "vlanEgress", "vla
 # Freitext, den read_cfg als Hex walkt (R18). Ohne MIBs gibt net-snmp einen OCTET STRING mit einem Byte, das es nicht fuer druckbar
 # haelt (etwa jedes Byte eines Umlauts in UTF-8), als nacktes Hex aus, alle 16 Bytes umbrochen; ein strikter Text-Walk lehnt das ab
 # (snmp._parse), und ein einziger Portname mit Umlaut sperrte den ganzen Switch. Mit -Ox ist jeder Wert Hex (strikt nach den Hex-Regeln),
-# build_cfg(text_hex=True) macht wieder Text daraus. Der Anzeige-Poller liest beide weiter als Text.
-TEXT_AS_HEX = ("ifAlias", "vlanName")
+# build_cfg(text_hex=True) macht wieder Text daraus. Since Phase 3 the display poller walks the same two with -Ox (one tuple for both).
+TEXT_AS_HEX = poller.TEXT_AS_HEX
 # ifTypes, die poller.select_ports zum Port machen kann (physisch, LAG, und 53 / 54 mit LAG-Namen)
 _PORT_IFTYPES = poller.PHYS_IFTYPES | {poller.LAG_IFTYPE} | poller.NAMED_LAG_IFTYPES
 
 
 def _hex_text(column: str, index: str, value: str) -> str:
-    """Ein Freitext-Wert aus einem Hex-Walk ("42 C3 BC 72 6F", auch ueber Zeilen; "" ist leer) als Text: UTF-8, sonst latin-1 (jedes
-    Byte ein Zeichen, das scheitert nie). ValueError, wenn der Wert nicht aus ganzen Hex-Bytes besteht."""
+    """Ein Freitext-Wert aus einem Hex-Walk ("42 C3 BC 72 6F", auch ueber Zeilen; "" ist leer) als Text (snmp.octets_text: UTF-8, sonst
+    latin-1). ValueError, wenn der Wert nicht aus ganzen Hex-Bytes besteht, mit Spalte und Index."""
     try:
-        data = bytes.fromhex(value)
+        return snmp.octets_text(value)
     except ValueError as e:
         raise ValueError(f"{column}.{index} ist kein Hex-Text: {value[:40]!r}") from e
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("latin-1")
 
 
 def _vids(vids) -> str:
@@ -118,9 +114,12 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
       - die PoE-Tabelle da ist, aber nicht sicher lesbar (poller.poe_ports mit strict: Admin- und Status-Spalte mit verschiedenen
         Eintraegen, ein Index, der nicht <Gruppe>.<Port> ist, ein Wert, der keiner ist, bei cisco_entity dasselbe fuer die Tabellen der
         Zuordnung). Gar keine PoE-Zeile ist kein Fehler: dann hat kein Port PoE,
-      - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0" oder mit text_hex ein Freitext, der kein Hex ist; hier
-        wird jeder ValueError zu SnmpError. Ein KeyError bleibt einer: jeder Zugriff auf Switch-Daten ist abgesichert, er kann nur ein
-        Fehler im Code sein).
+      - more than poller.MAX_PORTS ports are reported (as in the display),
+      - ein Index oder Wert sonst nicht lesbar ist (z. B. ein Bridge-Port "3.0", ein VLAN-Index, der keine Zahl ist, oder mit text_hex
+        ein Freitext, der kein Hex ist; hier wird jeder ValueError zu SnmpError. Ein KeyError bleibt einer: jeder Zugriff auf
+        Switch-Daten ist abgesichert, er kann nur ein Fehler im Code sein).
+    A VLAN row (name, egress, untagged) whose index is a number but no VLAN ID 1..4094 as a walk prints it (0, 5000, 020) is no VLAN
+    the write path could address: it is skipped, as in the display (poller.is_vlan_index), before any of the checks above.
     """
     rows = {k: W[k] for k in ((*WALKS, "ifType") if poller.by_iftype(driver_name) else WALKS)}
     if "vmVlan" in W and not vmvlan_base:
@@ -142,6 +141,11 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     (leer ohne vmVlan-Walk), text_hex wie bei build_cfg, driver der Treiber von build_cfg, poe_tables seine PoE-Tabellen
     (_tbl-Tabellen der Walks aus poller.poe_walks)."""
     tbl = {k: poller._tbl(v, poller.O[k]) for k, v in rows.items()}
+    for k in ("vlanName", "vlanEgress", "vlanUntagged"):
+        for vid in tbl[k]:
+            if not (vid.isascii() and vid.isdigit()):
+                raise ValueError(f"{k}: Index {vid!r} ist keine VLAN-ID")
+        tbl[k] = {vid: v for vid, v in tbl[k].items() if poller.is_vlan_index(vid)}
     if text_hex:
         for k in TEXT_AS_HEX:
             tbl[k] = {i: _hex_text(k, i, v) for i, v in tbl[k].items()}
@@ -170,6 +174,8 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
     egress = {k: snmp.portlist_bytes(v) for k, v in eg_hex.items()}
     untag = {k: snmp.portlist_bytes(v) for k, v in un_hex.items()}
     port_ifis, member_of, members = poller.select_ports(ifname, tbl.get("ifType", {}), tbl["ifStack"], driver_name)
+    if len(port_ifis) > poller.MAX_PORTS:
+        raise snmp.SnmpError(f"Mehr als {poller.MAX_PORTS} Ports gemeldet, Abfrage abgebrochen")
     poe, unmapped = poller.poe_ports(driver, poe_tables, ifname, port_ifis, members, strict=True)
 
     raw: dict = {"egress": egress, "untagged": untag,
@@ -250,7 +256,8 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
     Ohne with_poe hat jeder Port poe None und raw["poe"] ist leer; beide Reads einer Aenderung (vorher, Zuruecklesen) brauchen
     denselben Wert. Den Freitext (TEXT_AS_HEX: ifAlias, vlanName) walkt read_cfg als Hex, damit Umlaute lesbar sind; build_cfg bekommt
     driver.name, driver selbst und text_hex=True. Schreibt nicht in die DB und nimmt keinen Lock, weder den Poll-Lock noch den
-    Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant).
+    Change-Lock: den haelt der Aufrufer (asyncio.Lock ist nicht reentrant). All its walks share one byte budget of snmp.MAX_POLL_BYTES
+    (snmp.byte_budget), like a poll's.
 
     Faellt geschlossen aus, strenger als der Poller (der einen fehlgeschlagenen Walk ueberspringt): scheitert auch nur ein Walk, kommt
     genau dessen Exception heraus (meist snmp.SnmpError), nie ein cfg aus Teildaten. Ausgewertet wird erst, wenn alle Walks fertig sind,
@@ -265,8 +272,9 @@ async def read_cfg(row, driver, *, with_poe: bool = False) -> tuple[dict, dict]:
         walks["vmVlan"] = (vm_base, False)
     if with_poe:
         walks |= {k: (base, False) for k, base in poller.poe_walks(driver).items()}
-    results = await asyncio.gather(*(snmp.walk(host, cred, oid, hex_values=hx, strict=True) for oid, hx in walks.values()),
-                                   return_exceptions=True)
+    with snmp.byte_budget(snmp.MAX_POLL_BYTES):    # one budget for all the walks of this read, as for a poll
+        results = await asyncio.gather(*(snmp.walk(host, cred, oid, hex_values=hx, strict=True) for oid, hx in walks.values()),
+                                       return_exceptions=True)
     for r in results:
         if isinstance(r, BaseException):
             raise r
@@ -291,7 +299,6 @@ _CAP_LABEL = {"snmp_vlan": "VLANs", "snmp_admin": "An/Aus", "snmp_name": "Portna
 POE_DELIVERING = 3    # pethPsePortDetectionStatus deliveringPower(3): der Port versorgt gerade ein Geraet (changes.plan_ports warnt)
 ALIAS_MAX = 64  # ifAlias ist DisplayString SIZE (0..64): hoechstens 64 Bytes, geschrieben werden die UTF-8-Bytes des Namens
 _RUNS = re.compile(r"[0-9]+|[^0-9]+")
-_VLAN_ID = re.compile(r"[1-9][0-9]{0,3}")  # eine VLAN-ID, wie ein Walk sie zeigt: Dezimal ohne fuehrende Null (1..4094 prueft int)
 
 
 def port_order(name: str) -> tuple:
@@ -331,8 +338,9 @@ def _onoff(en: bool) -> str:
 
 def is_vlan_id(value) -> bool:
     """Ist value eine VLAN-ID 1..4094 als Text, wie ein Walk sie zeigt (Dezimal ohne fuehrende Null, nur ASCII-Ziffern)? So muss eine
-    ausdrueckliche pvid aussehen (R21); changes.plan_ports nimmt eine PVID aus raw auch nur so in before auf."""
-    return isinstance(value, str) and bool(_VLAN_ID.fullmatch(value)) and int(value) <= 4094
+    ausdrueckliche pvid aussehen (R21); changes.plan_ports nimmt eine PVID aus raw auch nur so in before auf. Die Regel ist die der
+    VLAN-Zeilen des Lesens (poller.is_vlan_index)."""
+    return isinstance(value, str) and poller.is_vlan_index(value)
 
 
 def _touched(st: dict, u: str | None, t: list[str]) -> set[str]:

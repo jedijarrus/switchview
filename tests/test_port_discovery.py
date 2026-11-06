@@ -615,11 +615,11 @@ LLDP_LOC_PORT_ID, LLDP_LOC_PORT_DESC = "1.0.8802.1.1.2.1.3.7.1.3", "1.0.8802.1.1
 @pytest.mark.parametrize("stored, used", [("cisco", "cisco"), ("juniper", "juniper"), ("no-such-driver", "no-such-driver"),
                                           ("procurve", "procurve"), ("", "procurve")])
 async def test_poll_switch_hands_the_rows_driver_to_build(app_db, monkeypatch, stored, used):
-    """The display poll of the Catalyst: every walk of poller.O (ifType included) leniently as always, plus the PoE walks of the
-    row's driver (Task 12, only procurve and cisco have any, R35; this Catalyst has no PoE) and, for a driver that selects its ports by
-    ifType, LLDP-MIB's lldpLocPortTable (R40), and _build gets the driver of the switches row, an empty one meaning procurve. With a
-    non-ProCurve driver its ports land in the ports table; read as procurve, the very same answers give only the two SVIs, as before
-    this change."""
+    """The display poll of the Catalyst: every walk of poller.O (ifType included) leniently as always (the free text, TEXT_AS_HEX, as
+    hex since Phase 3), plus the PoE walks of the row's driver (Task 12, only procurve and cisco have any, R35; this Catalyst has no
+    PoE) and, for a driver that selects its ports by ifType, LLDP-MIB's lldpLocPortTable (R40), and _build gets the driver of the
+    switches row, an empty one meaning procurve. With a non-ProCurve driver its ports land in the ports table; read as procurve, the
+    very same answers give only the two SVIs, as before this change."""
     sid = await _add_switch(app_db, stored)
     calls = _agent(monkeypatch, CATALYST_RECORDING)
     seen, build = [], poller._build
@@ -637,9 +637,9 @@ async def test_poll_switch_hands_the_rows_driver_to_build(app_db, monkeypatch, s
     assert IF_TYPE in {c["oid"] for c in calls}
     assert sorted(c["oid"] for c in calls) == sorted([*poller.O.values(), *poe.values(), *loc])
     assert not any(c["strict"] for c in calls)
-    assert {c["oid"]: c["hex"] for c in calls} == ({poller.O[k]: k in poller.HEX for k in poller.O} | dict.fromkeys(poe.values(), False)
-                                                    | dict.fromkeys(loc, False))
-    assert {c["oid"]: c["hex"] for c in calls}[IF_TYPE] is False and {c["oid"]: c["hex"] for c in calls}[IF_ALIAS] is False
+    assert {c["oid"]: c["hex"] for c in calls} == ({poller.O[k]: k in poller.HEX or k in poller.TEXT_AS_HEX for k in poller.O}
+                                                    | dict.fromkeys(poe.values(), False) | dict.fromkeys(loc, False))
+    assert {c["oid"]: c["hex"] for c in calls}[IF_TYPE] is False and {c["oid"]: c["hex"] for c in calls}[IF_ALIAS] is True
     want = [("Vl1", "", []), ("Vl10", "", [])] if used == "procurve" else CATALYST_STORED
     assert await _stored_ports(app_db, sid) == want
 

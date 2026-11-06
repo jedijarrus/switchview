@@ -1,12 +1,17 @@
 """SNMP-Zugriff ueber net-snmp: Lesen mit snmpbulkwalk/snmpget (walk, get), Schreiben mit snmpset (set_vars).
 
 Lesen: Ausgabe immer numerisch (-On), ohne Typ (-Oq), Enums als Zahl (-Oe),
-Timeticks als Zahl (-Ot). Bitmaps (VLAN-Portlisten, MACs) mit -Ox als Hex.
+Timeticks als Zahl (-Ot). Bitmaps (VLAN-Portlisten, MACs) mit -Ox als Hex, ebenso der Freitext ifAlias / vlanName (octets_text).
+
+A walk or get parses its output in a worker thread, off the event loop (_parse). A cancelled call kills its net-snmp process (_exec).
+One query (a display poll, the live read of a change) shares one byte budget over all of its walks (byte_budget, _collect).
 
 Credentials never go into the argv, which every process list shows (R45): the community and the v3 passphrases reach net-snmp through
 a snmp.conf of the call's own (see _run).
 """
 import asyncio
+import contextlib
+import contextvars
 import logging
 import os
 import re
@@ -22,6 +27,7 @@ SET_TIMING = ("-t", "5", "-r", "1")
 # What one SNMP call may hand to the app, whatever the agent sends (a hostile or broken one must not fill the memory):
 MAX_STDOUT = 8 * 1024 * 1024    # bytes of stdout per call; 64 000 MACs are about 4 MB (see _exec)
 MAX_STDERR = 64 * 1024          # bytes of stderr kept per call; the rest is read and dropped (see _exec)
+MAX_POLL_BYTES = 32 * 1024 * 1024    # bytes of stdout of all the walks of one query together (byte_budget; poller, snmpwrite.read_cfg)
 MAX_ROWS = 100_000              # values per walk, rows with an OID (see _parse)
 MAX_PORTLIST_BYTES = 8192       # a PortList over bridge ports 1..65535 (dot1dBasePort) needs no more (see portlist_bytes)
 MAX_BRIDGE_PORT = 65535         # the last dot1dBasePort (BRIDGE-MIB); set / clear refuse a higher one (see portlist_set_bit)
@@ -32,6 +38,36 @@ CONF_FORBIDDEN = "\x00\r\n"     # characters that end a snmp.conf line: a secret
 
 class SnmpError(Exception):
     pass
+
+
+class ByteBudget:
+    """The stdout bytes one query may still read, over all of its walks (see byte_budget)."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.used = 0
+
+    def take(self, n: int) -> bool:
+        """Count n more bytes; False once the budget is exceeded, and from then on for good."""
+        self.used += n
+        return self.used <= self.limit
+
+
+# The budget of the query this call belongs to, None outside one. A ContextVar, not a parameter of walk: the walks of a query run in one
+# asyncio.gather, and each of its tasks starts with a copy of the context of the caller, so all of them share the one ByteBudget object.
+_BUDGET: contextvars.ContextVar[ByteBudget | None] = contextvars.ContextVar("snmp_byte_budget", default=None)
+
+
+@contextlib.contextmanager
+def byte_budget(limit: int):
+    """For the duration of the with block, every SNMP call started in it (and in the tasks it starts) takes its stdout from one
+    ByteBudget of limit bytes; over it, _collect cuts the call off like one over MAX_STDOUT. Yields the budget."""
+    budget = ByteBudget(limit)
+    token = _BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _BUDGET.reset(token)
 
 
 def _level(cred: dict) -> str:
@@ -157,9 +193,10 @@ async def _run(cmd: list[str], timeout: float, strict: bool = False, *, cred: di
 async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -> str:
     """Start cmd without a shell, with os.environ plus MIBS="" plus extra_env, and return its stdout. stdout and stderr are read together,
     READ_CHUNK bytes at a time, up to EOF, then the exit is awaited, all under the one timeout. SnmpError on a timeout; when stdout
-    grows beyond MAX_STDOUT (the process is killed, see _collect); and on an exit code != 0 without output, with strict on EVERY exit
-    code != 0, even when stdout has rows already (see walk). The message of a failed call is the last line of stderr, of which only
-    the first MAX_STDERR bytes are kept."""
+    grows beyond MAX_STDOUT or the query's byte budget (the process is killed, see _collect); and on an exit code != 0 without output,
+    with strict on EVERY exit code != 0, even when stdout has rows already (see walk). The message of a failed call is the last line
+    of stderr, of which only the first MAX_STDERR bytes are kept. Every other exception while it waits, a cancel above all (a request
+    that went away, SwitchView stopping), kills the process as well and is raised on: no walk outlives its call."""
     env = dict(os.environ, MIBS="", **extra_env)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
@@ -169,6 +206,9 @@ async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -
     except asyncio.TimeoutError:
         _kill(proc)
         raise SnmpError("Zeitüberschreitung bei der SNMP-Abfrage")
+    except BaseException:
+        _kill(proc)
+        raise
     text = out.decode("utf-8", "replace")
     if returncode != 0 and (strict or not text.strip()):
         msg = err.decode("utf-8", "replace").strip().splitlines()
@@ -178,17 +218,24 @@ async def _exec(cmd: list[str], timeout: float, strict: bool, extra_env: dict) -
 
 
 async def _collect(proc) -> tuple[bytearray, bytes, int]:
-    """(stdout, the first MAX_STDERR bytes of stderr, exit code) of proc, read the way _exec says. Once stdout grows beyond MAX_STDOUT,
-    proc is killed and, after its exit, SnmpError raised. Both pipes are read to EOF in every case, stderr alongside stdout: a process
+    """(stdout, the first MAX_STDERR bytes of stderr, exit code) of proc, read the way _exec says. Every stdout chunk is taken from the
+    byte budget of the query, if one is set (byte_budget). Once stdout grows beyond MAX_STDOUT, or the budget is exceeded, proc is
+    killed and, after its exit, SnmpError raised. Both pipes are read to EOF in every case, stderr alongside stdout: a process
     blocked on a full stderr pipe would never finish its stdout, and asyncio closes the process transport only once both pipes have
     closed. A pipe whose reader has paused because nobody reads it any more never does, not even after the kill: its transport would
     leak, and a wait() that came before the exit was noticed would hang."""
+    budget = _BUDGET.get()
     stderr = asyncio.create_task(_drain(proc.stderr, MAX_STDERR))
     try:
-        out = bytearray()
+        out, too_big = bytearray(), None
         while chunk := await proc.stdout.read(READ_CHUNK):
             out += chunk
+            spent = budget is not None and not budget.take(len(chunk))
             if len(out) > MAX_STDOUT:
+                too_big = f"SNMP-Antwort zu groß (über {MAX_STDOUT // (1024 * 1024)} MiB), Abfrage abgebrochen"
+            elif spent:
+                too_big = f"SNMP-Abfrage zu groß (über {MAX_POLL_BYTES // (1024 * 1024)} MiB zusammen), abgebrochen"
+            if too_big:
                 _kill(proc)
                 await _drain(proc.stdout, 0)    # what the killed process left in the pipe, dropped
                 break
@@ -196,8 +243,8 @@ async def _collect(proc) -> tuple[bytearray, bytes, int]:
         returncode = await proc.wait()
     finally:
         stderr.cancel()    # still running only when the timeout cancels the call: the reader must not outlive it
-    if len(out) > MAX_STDOUT:
-        raise SnmpError(f"SNMP-Antwort zu groß (über {MAX_STDOUT // (1024 * 1024)} MiB), Abfrage abgebrochen")
+    if too_big:
+        raise SnmpError(too_big)
     return out, err, returncode
 
 
@@ -324,17 +371,22 @@ async def walk(host: str, cred: dict, oid: str, hex_values: bool = False, timeou
     Ergebnis, die Anzeige nimmt, was kam. strict=True (der Schreibweg): jeder Exit-Code != 0 ist ein SnmpError, nie eine halbe Tabelle;
     dazu muss jede Zeile zu einem Wert gehoeren: mit hex_values ist jeder Wert reines Hex, ohne kann nur ein String umbrechen (siehe
     _parse). Ein host mit "-" vorne: SnmpError, ohne Aufruf (_host).
+    The output is parsed in a worker thread: up to MAX_STDOUT of crafted continuation lines cost seconds of CPU, which must not hold up
+    the event loop, the UI and the other polls.
     """
     cmd = ["snmpbulkwalk", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", "-Cr25"]
     if hex_values:
         cmd.append("-Ox")
     cmd += [_host(host), oid]
-    return _parse(await _run(cmd, timeout, strict=strict, cred=cred), hex_strict=strict and hex_values, text_strict=strict and not hex_values)
+    text = await _run(cmd, timeout, strict=strict, cred=cred)
+    return await asyncio.to_thread(_parse, text, hex_strict=strict and hex_values, text_strict=strict and not hex_values)
 
 
 async def get(host: str, cred: dict, oids: list[str], timeout: float = 15) -> dict[str, str]:
+    """snmpget of oids -> {oid: value}, parsed in a worker thread like walk."""
     cmd = ["snmpget", *_auth_args(cred), "-On", "-Oq", "-Oe", "-Ot", "-t", "3", "-r", "1", _host(host), *oids]
-    return dict(_parse(await _run(cmd, timeout, cred=cred)))
+    text = await _run(cmd, timeout, cred=cred)
+    return dict(await asyncio.to_thread(_parse, text))
 
 
 async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], timeout: float = 20) -> str:
@@ -354,6 +406,16 @@ async def set_vars(host: str, cred: dict, varbinds: list[tuple[str, str, str]], 
     for oid, typ, val in varbinds:
         cmd += [oid, typ, val]
     return await _run(cmd, timeout, cred=cred)
+
+
+def octets_text(value: str) -> str:
+    """An OCTET STRING as a walk with -Ox gives it ("42 C3 BC 72 6F", also over several lines; "" is empty) as text: UTF-8, and where
+    that fails latin-1 (one character per byte, which never fails). ValueError when value is not whole bytes of hex."""
+    data = bytes.fromhex(value)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
 
 
 def hex_to_bytes(val: str) -> bytes:
