@@ -1,5 +1,7 @@
 .env
 data/
+# data/ is the app's data directory (docker-compose ./data:/data); the test data next to the tests is tracked
+!tests/data/
 __pycache__/
 *.pyc
 .venv/

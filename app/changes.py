@@ -11,7 +11,6 @@ Per SNMP (changes.mechanism "snmp", Spec §6) derselbe Ablauf: live lesen (snmpw
 """
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import re
@@ -27,8 +26,14 @@ import poller
 import snmp
 import snmpwrite
 import sshcli
-from crypto import decrypt, unreadable
-from db import audit, db, load_settings
+from changeverify import _poe_entry_moved, verify_ports, verify_snmp
+from db import audit, db
+from radiusprep import PARK_VLAN, RADIUS_KEY_RE, _SWITCH_SECRETS, _secrets_of, plan_prepare, radius_settings, readiness, readiness_missing
+
+# The names that moved out of changes into radiusprep and changeverify (Phase 3, Task 11): changes re-exports them, so every changes.X
+# stays valid, and calls them by these names (ruff takes a name listed here as used, F401)
+__all__ = ["PARK_VLAN", "RADIUS_KEY_RE", "_SWITCH_SECRETS", "_secrets_of", "plan_prepare", "radius_settings", "readiness",
+           "readiness_missing", "_poe_entry_moved", "verify_ports", "verify_snmp"]
 
 log = logging.getLogger("switchview.changes")
 
@@ -41,8 +46,6 @@ STATUS = {
 }
 STATUS_ON = "on"
 PORTNAME_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")
-# Druckbares ASCII ohne Leerzeichen. Ausgeschlossen: ? (startet die CLI-Hilfe), ~ (J.15 kennt es nicht), Quotes, Backslash
-RADIUS_KEY_RE = re.compile(r"""^(?!.*[?~"'\\])[!-~]{8,64}$""")
 ERROR_PATTERN = r"(Invalid input|Incomplete input|Ambiguous input|Module not present|invalid port|cannot|Error|Unable|denied)"
 # no_vlan_untagged (u -> None, a revert) after every tagged line: the port must stay in some VLAN (docs/procurve-cli-referenz.md 3.3)
 ORDER = ["dot1x_off", "mac_off", "vlan_untagged", "vlan_tagged", "no_vlan_tagged", "no_vlan_untagged", "name", "no_name", "enable",
@@ -95,7 +98,7 @@ async def inventory(sid: int) -> dict:
     device sending that base MAC on an access port could move the link off the real uplink), each with its trunk. Then the members of
     every uplink trunk. Rather too many uplinks than one too few. All by the switch's id (a name is not unique): its links carry it in
     "a" / "b", and an LLDP name it shares with another switch names that one too."""
-    from main import build_map, switch_keys  # spaete Bindung, vermeidet Zyklus
+    from topology import build_map, switch_keys  # spaete Bindung, vermeidet Zyklus
     m = await build_map()
     sw = next((s for s in m["switches"] if s["id"] == sid), None)
     if not sw:
@@ -418,188 +421,6 @@ def _commands(cfg: dict, desired: dict) -> list[str]:
         if chunk:
             out.append(render(atom, cfgparse.compress_ports(chunk)))
     return out
-
-
-def verify_ports(cfg_after: dict, desired: dict) -> list[str]:
-    bad = []
-    for p, d in desired.items():
-        st = cfgparse.port_state(cfg_after, p)
-        for k, v in d.items():
-            # Limits/Gast-VLAN bleiben nach 'no aaa port-access ...' in der Konfiguration stehen, wirken dann aber nicht
-            if (k in ("cl", "xuv") and not st["x"]) or (k in ("al", "muv") and not st["m"]):
-                continue
-            have = sorted(st[k], key=int) if k == "t" else st.get(k)    # ohne PoE-Zustand (poe fehlt / None) passt kein PoE-Ziel
-            want = sorted(v, key=int) if k == "t" else v
-            if have != want:
-                bad.append(f"Port {p}: {k} ist {have!r}, erwartet {want!r}")
-    return bad
-
-
-def verify_snmp(driver, cfg: dict, cfg_after: dict, raw_after: dict, desired: dict, *, raw: dict) -> list[str]:
-    """Das Pruefen nach einem SNMP-SET, das Gegenstueck zu verify_ports: was im Read-back (cfg_after, raw_after aus snmpwrite.read_cfg)
-    nicht so ist, wie die Aenderung desired es aus cfg / raw (dem Read, gegen den sie geplant und gerendert ist) machen will, je eine
-    Zeile, Ports in natuerlicher Reihenfolge; leer heisst ok.
-      - Ein geschriebener Port, den der Read-back nicht mehr kennt (fehlt in raw_after["ifindex"]), weicht ab: cfg haelt fuer ihn nur
-        Platzhalter (port_state fuellte Vorgaben ein), an denen ein Ziel wie "Name leer" sonst unbemerkt vorbeikaeme. Ebenso einer, den
-        er als nicht verwaltbar fuehrt (raw_after["unmanaged"]), wenn sich ein VLAN-Feld aendert (R41): sein u ist nur ein Platzhalter
-        (None), an dem "kein ungetaggtes VLAN" vorbeikaeme. en, name und poe lesen u nie, sie werden einzeln geprueft wie unten.
-      - Ebenso einer, der im Read-back ein anderes Interface ist als in raw (M4): ein anderer ifIndex, oder bei Q-BRIDGE fuer eine
-        VLAN-Aenderung (die ueber den Bridge-Port geht, PortList-Bits und dot1qPvid) ein anderer Bridge-Port. Dann wurden Interfaces
-        zwischen Lesen und Zuruecklesen umnummeriert, das SET kann ein anderes Interface getroffen haben, und was der Read-back unter
-        dem Namen zeigt, sagt nichts darueber. Den Bridge-Port eines Ports, dessen SET ihn nicht nutzt (vmVlan, An/Aus, Name, PoE),
-        prueft es nicht: ein Cisco-Access-Port ist im Default-Kontext oft gar keiner (R45).
-      - Aendert sich u oder t, zaehlt die GANZE VLAN-Zugehoerigkeit (R32): u und t, wie cfg sie zeigt, mit desired darueber. Ein
-        VLAN-Wechsel sind mehrere Varbinds (Egress und Untagged des alten und des neuen VLANs, die PVID); kaeme einer nicht an, stuende
-        der Port sonst etwa noch getaggt im alten VLAN. Wechselt u zu einem VLAN und zeigt der Read-back es (sonst meldet verify_ports
-        schon u), muss bei Q-BRIDGE dazu dessen Egress-Bit gesetzt sein: ungetaggt ohne Egress zeigt cfg nicht (u kommt aus der
-        Untagged-Liste), der Port gaebe das VLAN aber nicht aus.
-      - en, name und poe wie verify_ports, wenn desired sie hat. poe ist das pethPsePortAdminEnable des Eintrags, den der Read-back dem
-        Port zuordnet (poller.poe_ports); ordnet er keinen mehr zu (poe None), weicht das ab. Und es muss DER Eintrag sein, auf den das
-        SET ging (raw["poe"], Gruppe und Port): ordnet der Read-back dem Port einen anderen zu, etwa weil sich PoE-Hardware zwischen Read
-        und SET geaendert hat, sagt dessen Zustand nichts ueber das SET, und ein anderes Geraet koennte geschaltet sein.
-      - Die PVID (R21) bei Q-BRIDGE (vlan_strategy "qbridge") fuer einen Port ohne vmVlan-Zeile, gelesen aus raw_after["pvid"]:
-        erwartet ist eine ausdrueckliche pvid aus desired, sonst das neue ungetaggte VLAN, wenn u zu einem VLAN wechselt (genau das
-        schreibt render_ops). Sonst (u -> None, nur t / en / name) schreibt render_ops keine PVID, und keine wird erwartet. Bei
-        cisco_vmps nie: vmVlan ist dort das VLAN des Access-Ports (u); Egress-Bits und dot1qPvid schreibt dieser Weg nicht."""
-    bad = []
-    for p in sorted(desired, key=snmpwrite.port_order):
-        d = desired[p]
-        if p not in raw_after["ifindex"]:
-            bad.append(f"Port {p}: beim Zurücklesen nicht gefunden")
-            continue
-        via_bp = driver.vlan_strategy == "qbridge" and bool(snmpwrite.VLAN_FIELDS & set(d))    # ging das SET ueber den Bridge-Port?
-        if raw_after["ifindex"][p] != raw["ifindex"].get(p) or (via_bp and raw_after["port2bp"].get(p) != raw["port2bp"].get(p)):
-            bad.append(f"Port {p}: Interface-Nummer hat sich geändert")
-            continue
-        if p in raw_after["unmanaged"] and snmpwrite.VLAN_FIELDS & set(d):    # R41: nur die VLAN-Felder lesen den Platzhalter u
-            bad.append(f"Port {p}: nach der Änderung {raw_after['unmanaged'][p]}")
-            continue
-        want = {k: v for k, v in d.items() if k != "pvid"}
-        if {"u", "t"} & set(d):
-            st = cfgparse.port_state(cfg, p)
-            want = {"u": st["u"], "t": st["t"]} | want
-        bad += verify_ports(cfg_after, {p: want})
-        if "poe" in d:
-            bad += _poe_entry_moved(p, raw, raw_after)
-        if driver.vlan_strategy != "qbridge" or p in raw_after["vmvlan"]:
-            continue
-        u = d.get("u")
-        if u is not None and cfgparse.port_state(cfg_after, p)["u"] == u:  # ungetaggt im neuen VLAN, wie gewollt: auch mit Egress-Bit?
-            bp, egress = raw_after["port2bp"].get(p), raw_after["egress"].get(u)
-            if bp and egress is not None and not snmp.portlist_has_bit(egress, bp):
-                bad.append(f"Port {p}: VLAN {u} ungetaggt, aber ohne Egress-Bit")
-        pvid = d["pvid"] if "pvid" in d else d.get("u")
-        if pvid is not None and raw_after["pvid"].get(p) != pvid:
-            bad.append(f"Port {p}: pvid ist {raw_after['pvid'].get(p)!r}, erwartet {pvid!r}")
-    return bad
-
-
-def _poe_entry_moved(p: str, raw: dict, raw_after: dict) -> list[str]:
-    """verify_snmp: zeigt der Read-back Port p einem anderen PoE-Eintrag zugeordnet als dem, auf den das SET ging (raw["poe"][p])?
-    Ohne Eintrag im Read-back meldet verify_ports schon poe None."""
-    planned, now = raw["poe"].get(p), raw_after["poe"].get(p)
-    if planned is None:  # render_ops lehnt PoE ohne Eintrag ab: kann nicht vorkommen, zaehlt aber nie als ok
-        return [f"Port {p}: PoE ohne geplanten Eintrag"]
-    if now is not None and (now["group"], now["index"]) != (planned["group"], planned["index"]):
-        return [f"Port {p}: PoE-Eintrag ist jetzt {now['group']}.{now['index']}, geschrieben wurde {planned['group']}.{planned['index']}"]
-    return []
-
-
-# ── RADIUS-Grundeinrichtung des Switches ──────────────────────────────────────
-PARK_VLAN = "3999"  # Park-VLAN: ohne IP, ohne Routing, auf keinem Uplink
-
-
-async def radius_settings() -> dict:
-    """The RADIUS server and shared secret of the settings: server and key ("" when not set or not decryptable), and key_unreadable
-    when a stored key does not decrypt (plan_prepare names it instead of "fehlt")."""
-    # target and secret in one SELECT (db.load_settings): a concurrent settings PUT never pairs one with the other's old value (F2)
-    s = await load_settings(["radius_server", "radius_key"])
-    return {"server": s["radius_server"] or "", "key": decrypt(s["radius_key"]) or "", "key_unreadable": unreadable(s["radius_key"])}
-
-
-# Every secret column of a switches row (main.SECRET_FIELDS), in the order _secrets_of lists them
-_SWITCH_SECRETS = ("ssh_pass", "snmp_community", "snmp_rw_community", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_auth_pass",
-                   "snmp_rw_priv_pass")
-
-
-def _secrets_of(row, rs: dict) -> list[str]:
-    """What no text of a change may show (cfgparse.mask_secrets(text, _secrets_of(...))): the RADIUS key of rs (radius_settings) and,
-    decrypted, every secret of the switch row (None: no switch), its SSH password, its communities and its SNMPv3 passphrases, read and
-    write. Only the non-empty ones, and no community "public" (any case, outer whitespace ignored, like snmp._secrets): it is no secret,
-    and masking it would garble messages that name it."""
-    out = [rs.get("key") or ""]
-    for col in _SWITCH_SECRETS if row is not None else ():
-        value = decrypt(row[col]) or ""
-        if col.endswith("community") and value.strip().lower() == "public":
-            continue
-        out.append(value)
-    return [s for s in out if s]
-
-
-def readiness(cfg: dict, server: str | None) -> dict:
-    hosts = cfg.get("radius") or {}
-    h = hosts.get(server) if server else next(iter(hosts.values()), None)
-    return {"host": bool(h), "coa": bool(h and h.get("dyn")), "eap": bool(cfg.get("eap_radius")),
-            "active": bool(cfg.get("auth_active")), "park": PARK_VLAN in (cfg.get("vlans") or {}),
-            # CoA ohne Event-Timestamp (PacketFence schickt keins) nimmt der Switch nur mit time-window 0 an
-            "tw": bool(h and h.get("time_window") == 0),
-            "login_radius": bool(cfg.get("login_radius")), "others": [ip for ip in hosts if server and ip != server]}
-
-
-def readiness_missing(cfg: dict, server: str | None) -> list[str]:
-    """What a NAC change needs on the switch and cfg does not show: the RADIUS server (exactly `server` when given, any host line
-    without), eap-radius and 802.1X globally on."""
-    r = readiness(cfg, server)
-    names = {"host": f"RADIUS-Server {server}" if server else "RADIUS-Server", "eap": "802.1X-Methode eap-radius",
-             "active": "802.1X global aktiv"}
-    return [names[k] for k in names if not r[k]]
-
-
-def plan_prepare(cfg: dict, rs: dict) -> dict:
-    server, key = rs["server"], rs["key"]
-    blocked, warnings, cmds, shown = [], [], [], []
-    try:
-        ip = ipaddress.ip_address(server)
-    except ValueError:
-        ip = None
-    # A zone id ("fe80::1%eth0") is refused like a missing server: it lands in a CLI line, and ipaddress takes any text after the "%",
-    # a line break included (§6 (a)). main.put_settings refuses it on saving; this covers a value stored before that.
-    if ip is None or getattr(ip, "scope_id", None) is not None:
-        blocked.append({"port": "*", "reason": "RADIUS-Server (PacketFence-IP) fehlt in den Einstellungen"})
-        return {"commands": [], "shown": [], "blocked": blocked, "warnings": [], "expected": {}}
-    r = readiness(cfg, server)
-    if not r["host"]:    # only here the key is needed: a switch with the host line already is prepared without it
-        if rs.get("key_unreadable"):
-            blocked.append({"port": "*", "reason": "Shared Secret lässt sich nicht entschlüsseln (SECRET_KEY geändert?) – in den Einstellungen "
-                                                   "neu eingeben"})
-        elif not key or not RADIUS_KEY_RE.fullmatch(key):
-            blocked.append({"port": "*", "reason": "Shared Secret fehlt oder enthält unzulässige Zeichen (8–64 Zeichen, ohne Leerzeichen, "
-                                                   "Anführungszeichen, Backslash, ? und ~)"})
-        else:
-            cmds.append(f"radius-server host {server} key {key}")
-            shown.append(f"radius-server host {server} key ***")
-    if not r["coa"]:
-        cmds.append(f"radius-server host {server} dyn-authorization")
-        shown.append(cmds[-1])
-    if not r["tw"]:
-        cmds.append(f"radius-server host {server} time-window 0")
-        shown.append(cmds[-1])
-    if not r["eap"]:
-        cmds.append("aaa authentication port-access eap-radius")
-        shown.append(cmds[-1])
-    if not r["active"]:
-        cmds.append("aaa port-access authenticator active")
-        shown.append(cmds[-1])
-    if not r["park"]:
-        cmds.append(f'vlan {PARK_VLAN} name "Park"')
-        shown.append(cmds[-1])
-    if r["login_radius"]:
-        warnings.append("Die Anmeldung am Switch selbst nutzt RADIUS. Ein weiterer Server kann sich darauf auswirken.")
-    if r["others"]:
-        warnings.append("Weitere RADIUS-Server sind eingetragen: " + ", ".join(r["others"]))
-    warnings.append("Wirkt switchweit, ändert aber noch keinen Port. Ports bleiben „Protected“, bis du sie umstellst.")
-    return {"commands": cmds, "shown": shown, "blocked": blocked, "warnings": warnings,
-            "expected": {"host": True, "coa": True, "tw": True, "eap": True, "active": True, "park": True}}
 
 
 # ── Konfiguration lesen (Cache) ───────────────────────────────────────────────
