@@ -69,6 +69,28 @@ def test_trap_step(n, i, shift, want):
     assert run(f"L.trapStep({n}, {i}, {json.dumps(shift)})") == want
 
 
+@pytest.mark.parametrize("view, sel, want", [("overview", None, "#overview"), ("vlans", 3, "#vlans"), ("switches", 3, "#sw=3"),
+                                             ("switches", "SW A", "#switch=SW%20A"), ("switches", None, "#switches")])
+def test_hash_for(view, sel, want):
+    """Phase 5 Task 4: the hash of a view (the rule syncHash had inline): a switch by id, a name not resolved yet by name."""
+    assert run(f"L.hashFor({json.dumps(view)}, {json.dumps(sel)})") == want
+
+
+@pytest.mark.parametrize("view, sel, want", [("switches", 12, {"view": "switches", "sw": 12, "swName": None}),
+                                             ("switches", "50% & ü", {"view": "switches", "sw": None, "swName": "50% & ü"}),
+                                             ("vlans", None, {"view": "vlans", "sw": None, "swName": None})])
+def test_hash_for_round_trips_through_parse_hash(view, sel, want):
+    assert run(f"L.parseHash(L.hashFor({json.dumps(view)}, {json.dumps(sel)}))") == want
+
+
+@pytest.mark.parametrize("how, frm, to, want", [("push", "#vlans", "#sw=1", "push"), ("push", "#vlans", "#vlans", "replace"),
+                                                ("replace", "#a", "#b", "replace"), ("none", "#a", "#b", None)])
+def test_history_op(how, frm, to, want):
+    """Phase 5 Task 4: a navigation to the hash already shown replaces its entry instead of adding a second one; "none" (Back,
+    Forward, a typed hash) adds nothing."""
+    assert run(f"L.historyOp({json.dumps(how)}, {json.dumps(frm)}, {json.dumps(to)})") == want
+
+
 def test_index_loads_svlogic_before_the_app_scripts():
     """Holds unchanged after Task 12 (app.js split into several scripts)."""
     scripts = re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX)

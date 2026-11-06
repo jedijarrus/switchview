@@ -133,3 +133,48 @@ def test_the_login_closes_open_layers():
 
 def test_toasts_stack_up_to_three_and_a_repeat_counts_once():
     assert in_dom('["a", "b", "c", "d", "d"].forEach(m => toast(m)); $("#toasts").children.map(t => t.textContent)') == ["b", "c", "d"]
+
+
+# Phase 5 Task 4: Back and Forward walk the views (History API). Every view renders to nothing, so a test sees only the router.
+NO_VIEWS = "Object.keys(VIEWS).forEach(k => VIEWS[k] = () => {}); "
+
+
+def test_each_navigation_adds_a_history_entry_once():
+    assert in_dom(NO_VIEWS + 'go("vlans"); go("vlans"); go("switches", 3); go("audit"); history.calls') == [
+        ["push", "#vlans"], ["replace", "#vlans"], ["push", "#sw=3"], ["push", "#audit"]]
+
+
+def test_back_and_forward_render_the_view_of_the_hash():
+    js = (NO_VIEWS + '$("#app").hidden = false; location.hash = "#sw=3"; window.fire("popstate"); const a = [current, selSwitch]; '
+          'location.hash = "#devices"; window.fire("popstate"); [...a, current, history.calls]')
+    assert in_dom(js) == ["switches", 3, "devices", []]
+
+
+def test_a_hash_typed_in_the_address_bar_renders_once():
+    assert in_dom('let n = 0; Object.keys(VIEWS).forEach(k => VIEWS[k] = () => { n++; }); $("#app").hidden = false; '
+                  'location.hash = "#vlans"; window.fire("popstate"); window.fire("hashchange"); n') == 1
+
+
+def test_back_closes_an_open_dialog_and_changes_the_view():                           # Review Focus 3
+    assert in_dom(NO_VIEWS + '$("#app").hidden = false; modal("Änderung #4", "", []); location.hash = "#vlans"; window.fire("popstate"); '
+                  '[$("#modal").hidden, current]') == [True, "vlans"]
+
+
+def test_back_on_the_login_page_does_nothing():
+    assert in_dom(NO_VIEWS + 'location.hash = "#vlans"; window.fire("popstate"); [current, history.calls]') == ["overview", []]
+
+
+def test_an_old_bookmark_resolves_without_an_extra_history_entry():                   # Review Focus 1
+    js = ('(async () => { MAP = {switches: [{id: 7, k: "SW A"}], links: [], vlans: {}}; api = async () => ({name: "x"}); '
+          'VIEWS.switches = () => { selSwitch = SVLogic.switchIdOf(MAP.switches, selSwitch); syncHash(); }; await start(); '
+          'return [history.calls, location.hash]; })()')
+    assert in_dom(js, hash="#switch=SW%20A") == [[["replace", "#switch=SW%20A"], ["replace", "#sw=7"]], "#sw=7"]
+
+
+def test_start_never_pushes():
+    assert in_dom('(async () => { api = async () => ({name: "x"}); ' + NO_VIEWS + 'await start(); return history.calls; })()',
+                  hash="#vlans") == [["replace", "#vlans"]]
+
+
+def test_the_browser_does_not_restore_the_scroll_position():                           # T4-d
+    assert in_dom("history.scrollRestoration") == "manual"

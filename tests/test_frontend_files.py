@@ -52,7 +52,7 @@ const vm = require("vm"), fs = require("fs");
 const el = new Proxy(function () {}, { get: (t, k) => k === Symbol.toPrimitive ? () => "" : el, apply: () => el });
 const fetched = [];
 const fetch = url => { fetched.push(url); return new Promise(() => {}); };
-const ctx = vm.createContext({ document: el, history: el, location: { hash: "", origin: "" }, fetch });
+const ctx = vm.createContext({ document: el, window: el, history: el, location: { hash: "", origin: "" }, fetch });
 for (const f of process.argv.slice(1)) vm.runInContext(fs.readFileSync(f, "utf8"), ctx, { filename: f });
 const missing = vm.runInContext("Object.keys(VIEWS).filter(k => typeof VIEWS[k] !== 'function')", ctx);
 process.stdout.write(JSON.stringify({ missing: [...missing], fetched }));

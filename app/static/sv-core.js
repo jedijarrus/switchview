@@ -61,7 +61,7 @@
     const m = !$("#modal").hidden, d = $("#drawer").classList.contains("open");
     $("#app").inert = m || d; $("#drawer").inert = m;
   }
-  // Every layer closed without moving the focus (the login page): there is no opener to go back to
+  // Every layer closed without moving the focus (the login page, Back and Forward): there is no opener to go back to
   function dropLayers() { $("#modal").hidden = true; closeDrawer(true); $("#results").hidden = true; syncLayers(); }
   function onLayerKey(e) {
     const m = !$("#modal").hidden, d = $("#drawer").classList.contains("open");
