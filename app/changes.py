@@ -170,14 +170,14 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
     Gesperrt wird auf beiden Wegen gleich (Uplink / Trunk nur im Expertenmodus, kein NAC auf Uplinks und Trunks, ein Trunk-Mitglied nur
     ueber seinen Trunk, VLANs muss es geben, ...). Trunk ist TrkN oder jeder Trunk / LAG in cfg["trunks"] (Po1, ae0, ...); Mitglied ist
     ein Port laut Inventar (Poll) oder laut cfg["trunks"], dem frischen Read. A member takes MEMBER_FIELDS (name, on / off) on its own,
-    under the uplink / expert rule of every port (inventory counts the members of an uplink trunk as uplinks); with any other field it
-    is blocked ("gehört zu <trunk>"). Its VLANs are the trunk's, so "Port wäre in keinem VLAN mehr" is not checked for it (over SSH
-    port_state shows a member in no VLAN line at all). Per SSH dazu jeder Port mit PoE (R30: PoE nur per SNMP;
-    _commands kennt das Feld nicht und liesse es still weg). Over SSH also a port whose name in desired (a revert) does not fit
-    PORTNAME_RE: it would land in a CLI line (E28). Per SNMP kommt fuer jeden Port, der diese Regeln besteht,
-    snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...). Ein gesperrter
-    Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter geplant;
-    ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
+    under the uplink / expert rule of every port (a member of an uplink trunk is an uplink, whether the poll or the fresh read puts it
+    there; inventory lists only the poll's); with any other field it is blocked ("gehört zu <trunk>"). Its VLANs are the trunk's, so
+    "Port wäre in keinem VLAN mehr" is not checked for it (over SSH port_state shows a member in no VLAN line at all). Per SSH dazu
+    jeder Port mit PoE (R30: PoE nur per SNMP; _commands kennt das Feld nicht und liesse es still weg). Over SSH also a port whose name
+    in desired (a revert) does not fit PORTNAME_RE: it would land in a CLI line (E28). Per SNMP kommt fuer jeden Port, der diese Regeln
+    besteht, snmpwrite.snmp_block_reason dazu (nicht verwaltbar, ohne Bridge-Port, ein Feld, das SNMP nicht schreiben kann, ...).
+    Ein gesperrter Port steht mit Grund in blocked und faellt aus desired / before / commands / ops heraus, die anderen werden weiter
+    geplant; ausgefuehrt wird nichts, solange blocked nicht leer ist (main.apply_change, run_change).
 
     before haelt die Werte der geplanten Felder vor der Aenderung (die Quelle eines Reverts: plan_ports mit desired = before), per SNMP
     dazu die PVID (R21, siehe _snmp_before). Ergebnis: commands, shown, desired, before, blocked, warnings, expert, mechanism; per SNMP
@@ -244,10 +244,13 @@ def plan_ports(fw: str, inv: dict, cfg: dict, req: dict, *, mechanism: str = "ss
                                                  "(erlaubt: Buchstaben, Ziffern und . _ : @ -)"})
             continue
         x_new, m_new = d.get("x", cur["x"]), d.get("m", cur["m"])
-        if (d.get("x") or d.get("m")) and (is_trk or p in inv["uplinks"]):
+        # A member of an uplink trunk is an uplink, by the poll's trunk or the fresh read's (R40): inventory lists it only when the poll
+        # knows it as a member of that trunk
+        uplink = p in inv["uplinks"] or (member and bool({ip["tr"], member_of.get(p)} & inv["uplinks"]))
+        if (d.get("x") or d.get("m")) and (is_trk or uplink):
             blocked.append({"port": p, "reason": "RADIUS/bekannte Geräte gehen nicht auf Uplinks und Trunks"})
             continue
-        if (p in inv["uplinks"] or is_trk) and not expert:
+        if (uplink or is_trk) and not expert:
             blocked.append({"port": p, "reason": "Uplink/Trunk: nur im Expertenmodus"})
             continue
         if is_trk and ("name" in d or "en" in d):
@@ -349,15 +352,18 @@ def _commands(cfg: dict, desired: dict) -> list[str]:
             atoms[("dot1x_off",)].append(p)
         if d.get("m") is False:
             atoms[("mac_off",)].append(p)
+        # One VID switching between untagged and tagged takes one line: 'vlan <v> untagged|tagged <p>' changes the membership type, the
+        # no-form after it would set the port to "No" in that VLAN (docs/procurve-cli-referenz.md 3.4)
         if "u" in d and d["u"] is not None:
             atoms[("vlan_untagged", d["u"])].append(p)
-        elif "u" in d and cur["u"] is not None:    # u -> None (a revert): leave the old untagged VLAN, after the tagged lines (ORDER)
-            atoms[("no_vlan_untagged", cur["u"])].append(p)
+        elif "u" in d and cur["u"] is not None and cur["u"] not in d.get("t", ()):
+            atoms[("no_vlan_untagged", cur["u"])].append(p)    # u -> None (a revert): leave the old untagged VLAN, after the tagged lines
         if "t" in d:
             for v in set(d["t"]) - set(cur["t"]):
                 atoms[("vlan_tagged", v)].append(p)
             for v in set(cur["t"]) - set(d["t"]):
-                atoms[("no_vlan_tagged", v)].append(p)
+                if v != d.get("u"):
+                    atoms[("no_vlan_tagged", v)].append(p)
         if "name" in d:
             atoms[("name", d["name"]) if d["name"] else ("no_name",)].append(p)
         if "en" in d:

@@ -99,6 +99,7 @@
   const physOf = s => s.ports.filter(p => !p.n.startsWith("Trk"));
   // A trunk / LAG itself (TrkN, or a port whose trunk is itself: Po1, ae0, ...); its members carry the trunk's name in tr
   const isTrunkPort = p => p.n.startsWith("Trk") || (!!p.tr && p.tr === p.n);
+  const isMember = p => !!p && !!p.tr && p.tr !== p.n;
   const isPeer = p => p.l.some(x => MAP.switches.some(s => s.sys === x[0] || s.k === x[0]));
   const isUplink = p => isPeer(p) || !!p.tr || !!p.up;
   const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && isPeer(p)));
@@ -275,7 +276,9 @@
     $("#pf").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (!b) return; swPortFilter = b.dataset.f; document.querySelectorAll("#pf [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.f === swPortFilter))); renderPortRows(s); });
     $("#pt").addEventListener("input", e => { swText = e.target.value.trim().toLowerCase(); renderPortRows(s); });
     $("#ptbody").addEventListener("change", e => { const c = e.target.closest("input[data-pick]"); if (!c) return; c.checked ? picked.add(c.dataset.pick) : picked.delete(c.dataset.pick); syncPicked(); });
-    $("#pick-all") && $("#pick-all").addEventListener("change", e => { document.querySelectorAll("#ptbody input[data-pick]").forEach(c => { c.checked = e.target.checked; e.target.checked ? picked.add(c.dataset.pick) : picked.delete(c.dataset.pick); }); syncPicked(); });
+    // Pick-all leaves trunk members out (they take only name and on / off, editPorts would lock the rest for the whole selection);
+    // unticking it clears every shown port, members picked one by one included
+    $("#pick-all") && $("#pick-all").addEventListener("change", e => { document.querySelectorAll("#ptbody input[data-pick]").forEach(c => { if (e.target.checked && isMember(portIdx[c.dataset.pick])) return; c.checked = e.target.checked; e.target.checked ? picked.add(c.dataset.pick) : picked.delete(c.dataset.pick); }); syncPicked(); });
     $("#sel-edit").addEventListener("click", () => editPorts(s, [...picked]));
     $("#sel-clear").addEventListener("click", () => { picked.clear(); document.querySelectorAll("#ptbody input[data-pick]").forEach(c => c.checked = false); syncPicked(); });
     v.onclick = e => {
@@ -383,7 +386,7 @@
       ? "Ohne SSH-Zugang gehen RADIUS, Bekannte Geräte und Protected, Geräte pro Port und Gast-VLAN nicht: per SNMP gibt es keine 802.1X-/MAC-Anmeldung. Einschalten geht mit „An“."
       : `Treiber ${s.driver} schreibt per SNMP: RADIUS, Bekannte Geräte, Geräte pro Port und Gast-VLAN gehen nur über die SSH-CLI (ProCurve).`;
     // Trunk members (tr = their trunk) take only name and on / off (changes.MEMBER_FIELDS); VLANs, NAC and PoE go through the trunk
-    const memPs = ps.filter(p => p.tr && p.tr !== p.n), mem = memPs.length > 0;
+    const memPs = ps.filter(isMember), mem = memPs.length > 0;
     const memWhy = mem ? `Trunk-Mitglied (${memPs.map(p => p.n).join(", ")}): VLANs, Anmeldung und PoE nur über den Trunk – hier gehen Name und An/Aus.` : "";
     const memGate = mem ? ' disabled aria-describedby="f-gate-mem"' : "";
     const nacOff = { radius: !nac, known: !nac, protected: !protOk };

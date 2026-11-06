@@ -1,9 +1,11 @@
 """Phase 3 Task 4: planning fixes in changes.plan_ports and snmpwrite.snmp_block_reason.
 
   * An SSH revert to "no untagged VLAN" (u -> None) is sent as `no vlan <old> untagged <port>`, after every tagged line; before the fix
-    it was the invalid `vlan None untagged <port>`.
-  * A trunk member takes a name and on / off (changes.MEMBER_FIELDS) over SSH and SNMP, under the uplink / expert rule of every port;
-    any other field (VLANs, NAC, PoE) is still refused with "gehört zu <trunk>, bitte <trunk> wählen".
+    it was the invalid `vlan None untagged <port>`. A VID that switches between untagged and tagged on one port takes only its
+    positive line (review round 1).
+  * A trunk member takes a name and on / off (changes.MEMBER_FIELDS) over SSH and SNMP, under the uplink / expert rule of every port
+    (a member of an uplink trunk is an uplink, also when only the fresh read knows it as a member: review round 1); any other field
+    (VLANs, NAC, PoE) is still refused with "gehört zu <trunk>, bitte <trunk> wählen".
   * The unauth VLAN of a port with 802.1X and MAC auth is taken off 802.1X only by a request that touches NAC (a NAC status, a limit,
     a guest VLAN); "on", a VLAN or a name change keep it.
   * With a RADIUS server in the settings (radius_server), a NAC change needs exactly that server on the switch; run_change re-plans with
@@ -49,6 +51,28 @@ def test_an_ssh_revert_round_trip_verifies():                                   
     assert changes.verify_ports(after, changes.plan_ports(FW, inv, cfg, {"desired": {"A1": {"u": None}}})["desired"]) == []
 
 
+# SAMPLE_RUNNING_CONFIG with A1 tagged in 20 and 30 and no untagged VLAN
+TAGGED_ONLY = cfgparse.parse_config(SAMPLE_RUNNING_CONFIG.replace("   untagged A1\n   tagged Trk1\n", "   tagged A1,Trk1\n"))
+
+
+def test_a_revert_that_makes_the_untagged_vlan_tagged_sends_only_the_tagged_line():
+    """Review round 1: undoing "untagged 20 + tagged_remove 20" on a tagged-only port. `vlan 20 tagged A1` already turns A1's untagged
+    membership in VLAN 20 into a tagged one; a `no vlan 20 untagged A1` after it would fail or set A1 to "No" in VLAN 20
+    (docs/procurve-cli-referenz.md 3.4), the opposite of the revert."""
+    plan = changes.plan_ports(FW, inv, cfg, {"desired": {"A1": {"u": None, "t": ["20", "30"]}}})
+    assert (plan["commands"], plan["blocked"]) == (["vlan 20 tagged A1"], [])
+    assert changes.verify_ports(TAGGED_ONLY, plan["desired"]) == []
+
+
+def test_making_a_tagged_vlan_the_untagged_one_sends_only_the_untagged_line():
+    """The forward change of the test above: `vlan 20 untagged A1` turns A1's tagged membership in VLAN 20 into the untagged one; a
+    `no vlan 20 tagged A1` after it would take A1 out of VLAN 20 again. Its revert (desired = before) is the tagged line alone."""
+    plan = changes.plan_ports(FW, inv, TAGGED_ONLY, {"ports": ["A1"], "set": {"untagged": "20", "tagged_remove": ["20"]}})
+    assert (plan["commands"], plan["blocked"]) == (["vlan 20 untagged A1"], [])
+    assert changes.verify_ports(cfg, plan["desired"]) == []
+    assert changes.plan_ports(FW, inv, cfg, {"desired": plan["before"]})["commands"] == ["vlan 20 tagged A1"]
+
+
 def test_no_untagged_line_for_a_port_without_an_untagged_vlan():
     """_commands on its own: u None on a port that has no untagged VLAN renders nothing (plan_ports drops such a field before)."""
     assert changes._commands(cfg, {"A5": {"u": None}}) == []
@@ -75,6 +99,30 @@ def test_a_trunk_member_without_fields_is_not_blocked():
 def test_a_member_of_an_uplink_trunk_needs_expert_mode():                        # Review Focus 4
     assert changes.plan_ports(FW, make_inv(uplinks={"Trk1", "A5", "A6"}), cfg, {"ports": ["A5"], "set": {"status": "off"}})["blocked"] == [
         {"port": "A5", "reason": "Uplink/Trunk: nur im Expertenmodus"}]
+
+
+def _poll_says_trk2(inv: dict) -> dict:
+    inv["ports"]["A5"]["tr"] = "Trk2"
+    return inv
+
+
+@pytest.mark.parametrize("port_inv", [
+    pytest.param(make_inv(uplinks={"Trk1"}, stale={"A5"}), id="the-poll-does-not-know-the-member"),
+    pytest.param(_poll_says_trk2(make_inv(uplinks={"Trk1"})), id="the-poll-knows-it-in-another-trunk"),
+])
+def test_a_member_of_an_uplink_trunk_only_the_fresh_read_knows_needs_expert_mode(port_inv):
+    """Review round 1: the running-config puts A5 in Trk1, an uplink, while the poll does not (stale or still in another trunk), so
+    changes.inventory does not list A5 as an uplink. Its name / on-off still needs expert mode, as an uplink port would (R40: the uplink
+    and trunk protection never gets weaker; before Task 4 such a member was refused outright)."""
+    req = {"ports": ["A5"], "set": {"status": "off"}}
+    plan = changes.plan_ports(FW, port_inv, cfg, req)
+    assert (plan["blocked"], plan["commands"]) == ([{"port": "A5", "reason": "Uplink/Trunk: nur im Expertenmodus"}], [])
+    assert changes.plan_ports(FW, port_inv, cfg, {**req, "expert": True})["commands"] == ["interface A5 disable"]
+
+
+def test_a_member_of_an_uplink_trunk_the_poll_does_not_know_needs_expert_mode_over_snmp():
+    plan = plan_snmp(SAMPLE, PROCURVE, {"ports": ["4"], "set": {"status": "off"}}, uplinks={"Trk1"}, stale={"4"})
+    assert (plan["blocked"], plan["ops"]) == ([{"port": "4", "reason": "Uplink/Trunk: nur im Expertenmodus"}], [])
 
 
 def test_a_trunk_member_takes_name_and_on_off_over_snmp():                      # W_SAMPLE: 4 + 5 in Trk1, without a bridge port of their own
