@@ -391,6 +391,10 @@ def _public(row) -> dict:
     for k in SECRET_FIELDS:
         d[k + "_set"] = bool(row[k])
     d.update(_write_info(row))
+    # The pinned SSH host key by its fingerprints only (compared with the switch's own display), each None without a key
+    fp = sshcli.fingerprints(row["ssh_host_key"])
+    d["ssh_host_key_fp"], d["ssh_host_key_md5"] = (fp["sha256"], fp["md5"]) if fp else (None, None)
+    d["ssh_host_key_at"] = row["ssh_host_key_at"] if fp else None
     return d
 
 
@@ -474,6 +478,23 @@ async def delete_switch(sid: int, user=Depends(auth.current_user)):
     if cur.rowcount == 0:
         raise HTTPException(404, "Switch nicht gefunden")
     await audit(user["username"], "switch_delete", str(sid))
+    return {"ok": True}
+
+
+@app.delete("/api/switches/{sid}/ssh-host-key")
+async def forget_ssh_host_key(sid: int, user=Depends(auth.current_user)):
+    """Forgets the pinned SSH host key of the switch: its next SSH contact pins the key it is then offered (E30). Only for a key that
+    changed as expected (replacement, new firmware); the audit keeps the old SHA256."""
+    async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT host, ssh_host_key FROM switches WHERE id = ?", (sid,)) as cur:
+            old = await cur.fetchone()
+        if not old:
+            raise HTTPException(404, "Switch nicht gefunden")    # closing the connection rolls the transaction back
+        await conn.execute("UPDATE switches SET ssh_host_key = NULL, ssh_host_key_at = NULL WHERE id = ?", (sid,))
+        await conn.commit()
+    fp = sshcli.fingerprints(old["ssh_host_key"])
+    await audit(user["username"], "switch_hostkey_reset", old["host"], fp["sha256"] if fp else "–")
     return {"ok": True}
 
 
@@ -569,13 +590,13 @@ class SettingsIn(BaseModel):
     opnsense_url: str = Field(default="", max_length=200)
     opnsense_key: str | None = Field(default=None, max_length=200)
     opnsense_secret: str | None = Field(default=None, max_length=200)
-    opnsense_verify_tls: bool = False
+    opnsense_verify_tls: bool = True    # E32: on for a new installation; a stored value stays what it is
     radius_server: str = Field(default="", max_length=45)
     radius_key: str | None = Field(default=None, max_length=64)
     pf_url: str = Field(default="", max_length=200)
     pf_user: str = Field(default="", max_length=100)
     pf_pass: str | None = Field(default=None, max_length=200)
-    pf_verify_tls: bool = False
+    pf_verify_tls: bool = True
 
 
 # The secrets of the settings by the destination each one is sent to (F2): a PUT that changes a destination deletes each of its stored
@@ -590,13 +611,13 @@ async def get_settings(user=Depends(auth.current_user)):
             "opnsense_url": await get_setting("opnsense_url", "") or "",
             "opnsense_key_set": bool(await get_setting("opnsense_key")),
             "opnsense_secret_set": bool(await get_setting("opnsense_secret")),
-            "opnsense_verify_tls": (await get_setting("opnsense_verify_tls", "0")) == "1",
+            "opnsense_verify_tls": (await get_setting("opnsense_verify_tls", "1")) == "1",
             "radius_server": await get_setting("radius_server", "") or "",
             "radius_key_set": bool(await get_setting("radius_key")),
             "pf_url": await get_setting("pf_url", "") or "",
             "pf_user": await get_setting("pf_user", "") or "",
             "pf_pass_set": bool(await get_setting("pf_pass")),
-            "pf_verify_tls": (await get_setting("pf_verify_tls", "0")) == "1"}
+            "pf_verify_tls": (await get_setting("pf_verify_tls", "1")) == "1"}
 
 
 @app.put("/api/settings")

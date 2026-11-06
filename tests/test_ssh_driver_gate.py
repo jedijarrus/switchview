@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import types
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -42,8 +43,24 @@ PC_HOST, CISCO_HOST = "203.0.113.21", "203.0.113.31"
 RUNNING_CONFIG = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n   exit\ninterface 3\n   disable\n   exit\n'
 
 
+# The SSH host key every switch of these tests offers, as an OpenSSH line; the first session pins it (sshcli._open)
+HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINnHpT9l6rpHqB25Ts4S4dT4wkOfhzh0ZbNcJVpVdfiZ"
+
+
+class ServerKey:
+    """The key paramiko's transport reports (Transport.get_remote_server_key), as far as sshcli.host_key_of reads it."""
+
+    def get_name(self):
+        return HOST_KEY.split()[0]
+
+    def get_base64(self):
+        return HOST_KEY.split()[1]
+
+
 class Session:
-    """A netmiko connection to a ProCurve: every show command answers with RUNNING_CONFIG."""
+    """A netmiko connection to a ProCurve: every show command answers with RUNNING_CONFIG; its switch offers HOST_KEY."""
+
+    remote_conn_pre = types.SimpleNamespace(get_transport=lambda: types.SimpleNamespace(get_remote_server_key=ServerKey))
 
     def __enter__(self):
         return self

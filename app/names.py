@@ -36,7 +36,7 @@ async def opnsense_arp() -> list[dict]:
     secret = decrypt(await get_setting("opnsense_secret"))
     if not (url and key and secret):
         return []
-    verify = (await get_setting("opnsense_verify_tls", "0")) == "1"
+    verify = (await get_setting("opnsense_verify_tls", "1")) == "1"    # on without a stored value (E32), a stored one stays
     async with httpx.AsyncClient(verify=verify, timeout=20) as c:
         r = await c.get(f"{url}/api/diagnostics/interface/getArp", auth=(key, secret))
         r.raise_for_status()

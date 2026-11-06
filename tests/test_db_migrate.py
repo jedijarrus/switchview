@@ -34,6 +34,8 @@ NEW_COLUMNS = {
         "snmp_rw_auth_pass": ("TEXT", 0, None),
         "snmp_rw_priv_proto": ("TEXT", 0, None),
         "snmp_rw_priv_pass": ("TEXT", 0, None),
+        "ssh_host_key": ("TEXT", 0, None),
+        "ssh_host_key_at": ("TEXT", 0, None),
     },
     "ports": {
         "poe_admin": ("INTEGER", 0, None),

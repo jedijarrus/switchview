@@ -659,9 +659,18 @@
     // RW-Protokolle: zu einem gespeicherten RW-Benutzer genau wie gespeichert (auch keins), sonst die Empfehlung authPriv (SHA, AES)
     const rwAp = s.snmp_rw_user ? s.snmp_rw_auth_proto || "" : s.snmp_rw_auth_proto || "SHA", rwPp = s.snmp_rw_user ? s.snmp_rw_priv_proto || "" : s.snmp_rw_priv_proto || "AES";
     const rwStored = !!(s.snmp_rw_user || s.snmp_rw_community_set || s.snmp_rw_auth_pass_set || s.snmp_rw_priv_pass_set);
+    // A new address deletes every stored secret not entered anew (F2), and keeps the pinned SSH host key (E30): the note says what applies
+    const anySecret = Object.keys(s).some(k => k.endsWith("_set") && s[k]);
+    const hostNote = ["Neue Adresse:", anySecret ? "Gespeicherte Kennwörter und Communities gelten nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern." : "",
+      s.ssh_host_key_fp ? "Der gemerkte SSH-Hostschlüssel bleibt; ist es ein anderes Gerät, danach „SSH-Hostschlüssel vergessen“." : ""].filter(Boolean).join(" ");
+    // The pinned SSH host key by its fingerprints (compare once with "show crypto host-public-key fingerprint" on the switch)
+    const hostKey = s.ssh_host_key_fp
+      ? `<p class="note" id="f-hostkey" style="margin:0">SSH-Hostschlüssel: <span class="mono">${esc(s.ssh_host_key_fp)}</span> (MD5 <span class="mono">${esc(s.ssh_host_key_md5)}</span>) · gemerkt am ${esc(fmtTime(s.ssh_host_key_at))}</p>
+        <div><button class="btn small" type="button" id="f-hostkey-forget">SSH-Hostschlüssel vergessen</button></div>`
+      : `<p class="note" id="f-hostkey" style="margin:0">SSH-Hostschlüssel: Noch keiner gemerkt – der erste SSH-Zugriff merkt ihn sich.</p>`;
     const body = `<div class="grid2"><label class="field"><span>Name</span><input id="f-name" value="${esc(s.name || "")}" required maxlength="64"></label>
       <label class="field"><span>Adresse (IP oder Hostname)</span><input id="f-host" value="${esc(s.host || "")}" required maxlength="64"></label>
-      <p class="note warn" id="f-host-note" style="margin:0;grid-column:1/-1" hidden>Neue Adresse: Gespeicherte Kennwörter und Communities gelten nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>
+      <p class="note warn" id="f-host-note" style="margin:0;grid-column:1/-1" hidden>${esc(hostNote)}</p>
       <label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>
       <label class="field"><span>Reihenfolge</span><input id="f-sort" type="number" value="${esc(s.sort || 0)}"></label></div>
       <div class="field"><label for="f-driver">Treiber</label><select id="f-driver" aria-describedby="f-drv-notes f-drv-caps" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
@@ -689,7 +698,8 @@
           <p class="note" style="margin:0">Es schreibt der v3-Benutzer, ohne ihn die v2c-Community, ohne beide der Lese-Zugang oben (er braucht dann am Switch Schreibrechte). Die Community „public“ schreibt nie.</p>
         </div></fieldset>
       <fieldset class="fs" id="f-ssh"><legend>SSH (Sicherung und Änderungen)</legend><p class="note" id="f-ssh-hint" style="margin:0" hidden></p>
-        <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set, "SSH-Kennwort")}</div></fieldset>`;
+        <div class="grid2"><label class="field"><span>Benutzer</span><input id="f-ssh-user" value="${esc(s.ssh_user || "")}" autocomplete="off"></label>${secret("f-ssh-pass", "Kennwort", s.ssh_pass_set, "SSH-Kennwort")}</div>
+        ${hostKey}</fieldset>`;
     const buttons = [];
     if (!isNew) buttons.push({ label: "Switch löschen", cls: "danger", onClick: async () => {
       closeModal();
@@ -732,10 +742,18 @@
       } catch (e) { toast(e.message); btn.disabled = false; }
     } });
     modal(isNew ? "Switch hinzufügen" : `Zugang bearbeiten: ${s.name}`, body, buttons);
-    // A new address deletes every stored secret not entered anew (F2): say so while the address differs from the stored one
-    const anySecret = Object.keys(s).some(k => k.endsWith("_set") && s[k]);
-    const syncHost = () => syncNote("f-host", "f-host-note", !isNew && anySecret && destTxt($("#f-host").value) !== destTxt(s.host));
+    // The note on a new address (hostNote): shown while the address differs from the stored one and something stored depends on it
+    const syncHost = () => syncNote("f-host", "f-host-note", !isNew && (anySecret || !!s.ssh_host_key_fp) && destTxt($("#f-host").value) !== destTxt(s.host));
     $("#f-host").addEventListener("input", syncHost); syncHost();
+    // Forgetting the pinned host key: only for an expected change; the next SSH contact pins the key it is then offered
+    const forget = $("#f-hostkey-forget");
+    if (forget) forget.addEventListener("click", async () => {
+      closeModal();
+      if (!(await confirmModal("SSH-Hostschlüssel vergessen", "Nur, wenn sich der Schlüssel erwartet geändert hat (Tausch, neue Firmware). Der nächste SSH-Zugriff merkt sich den dann gemeldeten Schlüssel.", "Vergessen", true))) return editSwitch(s);
+      try { await api("DELETE", `/api/switches/${s.id}/ssh-host-key`); toast("SSH-Hostschlüssel vergessen"); } catch (e) { toast(e.message); }
+      const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === s.id), () => null);
+      editSwitch(row || s);
+    });
     const sync = () => { const v3 = $("#f-snmpv").value === "3"; $("#snmp2").hidden = v3; $("#snmp3").hidden = !v3; };
     $("#f-snmpv").addEventListener("change", sync); sync();
     const syncDrv = () => {
@@ -885,7 +903,7 @@
   /* ── Protokoll ── */
   async function renderAudit() {
     const v = $("#view"); const rows = await api("GET", "/api/audit").catch(() => []);
-    const lbl = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", backup: "Sicherung", settings_update: "Einstellungen geändert",
+    const lbl = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", switch_hostkey_reset: "SSH-Hostschlüssel vergessen", backup: "Sicherung", settings_update: "Einstellungen geändert",
       change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
       device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">letzte 100</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge</span></div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody>` +
@@ -899,6 +917,7 @@
     const s = await api("GET", "/api/settings").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!s) return;
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
+    const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
@@ -907,6 +926,7 @@
         <div class="grid2"><label class="field"><span>API-Key</span><input id="s-key" type="password" autocomplete="new-password" placeholder="${s.opnsense_key_set ? "gesetzt – leer lassen = unverändert" : ""}"></label>
         <label class="field"><span>API-Secret</span><input id="s-secret" type="password" autocomplete="new-password" placeholder="${s.opnsense_secret_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
         <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
+        ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
         <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten" eines Switches eingetragen</span></label>
@@ -917,6 +937,7 @@
         <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"></label>
         <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}"></label></div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
+        ${tlsNote("s-pftls")}
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
       <div><button class="btn primary" type="button" id="s-save">Speichern</button></div></div></section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
@@ -926,6 +947,11 @@
     [["s-url", s.opnsense_url, s.opnsense_key_set || s.opnsense_secret_set], ["s-rs", s.radius_server, s.radius_key_set], ["s-pfu", s.pf_url, s.pf_pass_set]].forEach(([id, was, set]) => {
       const sync = () => syncNote(id, id + "-note", !!set && destTxt($("#" + id).value) !== destTxt(was));
       $("#" + id).addEventListener("input", sync); sync();
+    });
+    // Credentials readable on the wire (E32): warn while a check box is off or its address uses http:// (both stay allowed)
+    [["s-tls", "s-url"], ["s-pftls", "s-pfu"]].forEach(([box, url]) => {
+      const sync = () => syncNote(box, box + "-note", !$("#" + box).checked || /^http:\/\//i.test($("#" + url).value.trim()));
+      $("#" + box).addEventListener("change", sync); $("#" + url).addEventListener("input", sync); sync();
     });
     $("#s-save").addEventListener("click", async e => {
       e.target.disabled = true; const pw = id => { const x = $("#" + id).value; return x === "" ? null : x; };

@@ -5,20 +5,26 @@ Pro Switch laeuft immer nur eine SSH-Aktion (lock), der Switch erlaubt max. 5 Se
 Nur fuer einen Treiber mit SSH-CLI (drivers, Faehigkeit cli): netmiko spricht den Switch als hp_procurve mit ProCurve-Befehlen an, und
 die Antwort verstehen nur der ProCurve-Parser und das Maskieren in cfgparse. Fuer jeden anderen Treiber geht keine Sitzung auf (R39),
 auch mit gespeichertem SSH-Zugang (er bleibt gespeichert, wird aber nie benutzt): _device ist die eine Stelle davor.
+Every session goes through _open, which pins the switch's SSH host key at the first contact and refuses any other key afterwards,
+before the login (trust on first use, E30).
 """
 import asyncio
+import base64
+import binascii
 import hashlib
 import logging
+import os
 import re
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from netmiko import ConnectHandler
+from netmiko import ConnectHandler, NetmikoTimeoutException
 
 import cfgparse
 import drivers
 from crypto import decrypt
-from db import db
+from db import db, execute_sync, query_sync
 
 log = logging.getLogger("switchview.ssh")
 
@@ -54,12 +60,57 @@ def cli_refusal(row) -> str | None:
     return None if drivers.can(driver, "cli") else f"Treiber {driver.name} hat keine SSH-CLI"
 
 
-def _device(row) -> dict:
+def fingerprints(key: str | None) -> dict | None:
+    """The fingerprints of the SSH public key line key ("<type> <base64>", as host_key_of writes it) the way OpenSSH writes them, both
+    over the key bytes: "SHA256:" plus base64 without "=" padding, and MD5 as colon-separated hex pairs (what older ProCurve firmware
+    shows). None without a key or for one whose base64 does not decode."""
+    parts = (key or "").split()
+    if len(parts) < 2:
+        return None
+    try:
+        blob = base64.b64decode(parts[1], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    md5 = hashlib.md5(blob, usedforsecurity=False).hexdigest()
+    return {"sha256": "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("="),
+            "md5": ":".join(md5[i:i + 2] for i in range(0, len(md5), 2))}
+
+
+class HostKeyMismatch(RuntimeError):
+    """The switch offered another SSH host key than the pinned one (pinned: the key line stored for it), so no session: paramiko
+    compares the key after the key exchange and before the login, nothing is sent, not even the password. Without pinned (None) the
+    key of a first contact could not be pinned, because the switch entry changed during the login (another address, or deleted)."""
+
+    def __init__(self, host: str, pinned: str | None):
+        if pinned:
+            fp = fingerprints(pinned)
+            sha = fp["sha256"] if fp else "unlesbar"
+            text = (f"SSH-Hostschlüssel von {host} passt nicht zum gemerkten ({sha}). Möglicher Angriff oder neuer Schlüssel am "
+                    "Switch – nichts gesendet. Ist der neue Schlüssel erwartet (Tausch, Firmware): Switch → Zugang bearbeiten → "
+                    "„SSH-Hostschlüssel vergessen“.")
+        else:
+            text = (f"SSH-Hostschlüssel von {host} ließ sich nicht merken: der Switch-Eintrag hat sich inzwischen geändert (Adresse oder "
+                    "gelöscht) – Sitzung beendet, kein Befehl gesendet. Bitte erneut versuchen.")
+        super().__init__(text)
+
+
+def host_key_of(conn) -> str:
+    """The SSH host key the switch offered in the open netmiko session conn, as "<type> <base64>" (a known_hosts line without the
+    host)."""
+    k = conn.remote_conn_pre.get_transport().get_remote_server_key()
+    return f"{k.get_name()} {k.get_base64()}"
+
+
+def _device(row, known_hosts: str | None = None) -> dict:
     """Die netmiko-Parameter fuer den Switch row. Alles, was ConnectHandler erreicht (connect, _run_show), geht hier durch: ohne CLI im
-    Treiber NoCliError statt einer Sitzung."""
+    Treiber NoCliError statt einer Sitzung. With known_hosts (a file holding the pinned key, _open) paramiko accepts that key only
+    (RejectPolicy, ssh_strict); without it a first contact takes the key it is offered (AutoAddPolicy), and _open pins it. The
+    system's known_hosts is never read: only the key SwitchView pinned counts."""
     reason = cli_refusal(row)
     if reason:
         raise NoCliError(reason)
+    keys = ({"ssh_strict": True, "system_host_keys": False, "alt_host_keys": True, "alt_key_file": known_hosts} if known_hosts
+            else {"ssh_strict": False, "system_host_keys": False, "alt_host_keys": False})
     return {
         "device_type": "hp_procurve",
         "host": row["host"],
@@ -70,11 +121,60 @@ def _device(row) -> dict:
         "banner_timeout": 20,
         "timeout": 60,
         "fast_cli": False,
+        **keys,
     }
 
 
+# How paramiko's refusals of a host key reach SwitchView, inside netmiko's NetmikoTimeoutException: BadHostKeyException ("Host key
+# for server '…' does not match: …") and RejectPolicy ("Server '…' not found in known_hosts"). Only the message tells them from a
+# timeout; should that text ever change, the session is refused all the same, with netmiko's English message (E31).
+_KEY_REFUSALS = ("does not match", "not found in known_hosts")
+
+
+def _open(row):
+    """The netmiko session to the switch row, its SSH host key pinned (trust on first use, E30). Synchronous: it runs in a worker
+    thread, under the switch's lock (connect in run_change, _run_show). Whether a key is pinned decides the database now, never row:
+    a caller may have read row before the lock, before another contact pinned the key. With a pinned key paramiko gets it as the
+    only known host key and refuses any other before the login (HostKeyMismatch). Without one the first contact takes the key it is
+    offered and pins it, but only while the entry still has row's host and no key; is a different key stored afterwards, or none
+    (the entry changed meanwhile), the session is closed and refused. A driver without CLI fails first (NoCliError), before anything
+    else; a switch that is gone gets no session."""
+    reason = cli_refusal(row)
+    if reason:
+        raise NoCliError(reason)
+    found = query_sync("SELECT ssh_host_key FROM switches WHERE id = ?", (row["id"],))
+    if not found:
+        raise RuntimeError("Switch nicht gefunden")
+    pinned = found[0][0]
+    if pinned:
+        with tempfile.TemporaryDirectory(prefix="switchview-ssh-") as tmp:
+            known_hosts = os.path.join(tmp, "known_hosts")
+            with open(known_hosts, "w", encoding="utf-8") as f:
+                f.write(f"{row['host']} {pinned}\n")
+            try:
+                return ConnectHandler(**_device(row, known_hosts))
+            except NetmikoTimeoutException as e:
+                if any(t in str(e) for t in _KEY_REFUSALS):
+                    raise HostKeyMismatch(row["host"], pinned) from e
+                raise
+    conn = ConnectHandler(**_device(row))
+    try:
+        key = host_key_of(conn)
+        execute_sync("UPDATE switches SET ssh_host_key = ?, ssh_host_key_at = ? WHERE id = ? AND host = ? AND ssh_host_key IS NULL",
+                     (key, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), row["id"], row["host"]))
+        found = query_sync("SELECT ssh_host_key FROM switches WHERE id = ? AND host = ?", (row["id"], row["host"]))
+    except BaseException:
+        disconnect(conn)
+        raise
+    stored = found[0][0] if found else None
+    if stored != key:
+        disconnect(conn)
+        raise HostKeyMismatch(row["host"], stored)
+    return conn
+
+
 def connect(row):
-    return ConnectHandler(**_device(row))
+    return _open(row)
 
 
 def disconnect(conn):
@@ -90,10 +190,16 @@ def _run_show(row, commands: list[str]) -> dict[str, str]:
         if SECRET_SHOWS.match(cmd):
             raise ValueError(f"„{cmd}“ gibt Geheimnisse im Klartext aus und wird nie ausgeführt")
     out = {}
-    with ConnectHandler(**_device(row)) as conn:
+    with _open(row) as conn:
         for cmd in commands:
             out[cmd] = clean(conn.send_command(cmd, read_timeout=90))
     return out
+
+
+def _error(e: Exception) -> str:
+    """An error as the connection test and the backup report it: its type and text, the text cut to 200 characters, except for a
+    HostKeyMismatch (SwitchView's own text, bounded by the 64-character host), whose end says what to do."""
+    return f"{type(e).__name__}: {e if isinstance(e, HostKeyMismatch) else str(e)[:200]}"
 
 
 async def test_ssh(row) -> dict:
@@ -106,7 +212,7 @@ async def test_ssh(row) -> dict:
         first = next((l for l in res["show version"].splitlines() if l.strip()), "")
         return {"ok": True, "detail": first[:120]}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        return {"ok": False, "error": _error(e)}
 
 
 async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
@@ -144,7 +250,7 @@ async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:
             res = await asyncio.to_thread(_run_show, row, ["show running-config"])
     except Exception as e:  # noqa: BLE001
         log.warning("Sicherung %s fehlgeschlagen: %s", row["host"], e)
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        return {"ok": False, "error": _error(e)}
     content = res["show running-config"]
     if "hostname" not in content and "vlan" not in content:
         return {"ok": False, "error": "Antwort sieht nicht nach einer Konfiguration aus"}

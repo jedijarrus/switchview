@@ -20,8 +20,9 @@ OWNER = "switchview"
 
 
 async def config() -> dict:
+    """The stored PacketFence access. TLS verification without a stored value is on (E32: a new installation), a stored one stays."""
     return {"url": (await get_setting("pf_url", "") or "").rstrip("/"), "user": await get_setting("pf_user", "") or "",
-            "password": decrypt(await get_setting("pf_pass")) or "", "verify": (await get_setting("pf_verify_tls", "0")) == "1"}
+            "password": decrypt(await get_setting("pf_pass")) or "", "verify": (await get_setting("pf_verify_tls", "1")) == "1"}
 
 
 async def configured() -> bool:

@@ -2,8 +2,9 @@
 import hashlib
 import os
 import re
+import sqlite3
 from collections.abc import Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 
 import aiosqlite
 
@@ -177,6 +178,11 @@ ADDED_COLUMNS = (
     ("ports", "poe_power", "INTEGER"),
     # Audit-Spur: ssh | snmp. Bestandszeilen haben NULL.
     ("changes", "mechanism", "TEXT"),
+    # The switch's SSH host key, pinned at the first successful SSH contact ("<type> <base64>", sshcli.host_key_of), and when (UTC).
+    # Existing rows have NULL: their next SSH contact pins the key (trust on first use, E30). No secret, but never served as is: GET
+    # /api/switches serves its fingerprints only.
+    ("switches", "ssh_host_key", "TEXT"),
+    ("switches", "ssh_host_key_at", "TEXT"),
 )
 
 
@@ -191,6 +197,23 @@ async def db():
         yield conn
     finally:
         await conn.close()
+
+
+def execute_sync(sql: str, args: tuple = ()) -> int:
+    """sql with args on a connection of its own (the stdlib sqlite3, for code in a worker thread, where db() cannot run), committed;
+    the number of rows it changed."""
+    with closing(sqlite3.connect(settings.db_path, timeout=5)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        cur = conn.execute(sql, args)
+        conn.commit()
+        return cur.rowcount
+
+
+def query_sync(sql: str, args: tuple = ()) -> list[tuple]:
+    """The rows of sql with args, read like execute_sync writes (a connection of its own, for a worker thread), as tuples."""
+    with closing(sqlite3.connect(settings.db_path, timeout=5)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn.execute(sql, args).fetchall()
 
 
 async def migrate(conn) -> None:

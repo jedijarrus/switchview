@@ -111,6 +111,17 @@ call SwitchView writes the community or the v3 passphrases into a short-lived `s
 `/dev/shm`, removed when the call ends) and points net-snmp at it with `SNMPCONFPATH`. An SNMP credential with a line break or a NUL
 character is refused when the switch is saved.
 
+SSH host keys are pinned on first use: the first SSH session to a switch (connection test, backup, configuration read or change)
+stores the host key the switch offers, and from then on SwitchView refuses any other key before it logs in, so the password never
+reaches a device that only pretends to be the switch. The switch form shows the pinned key's fingerprints (SHA256 and MD5); compare
+them once with the switch (`show crypto host-public-key fingerprint`). The pinned key stays when the switch's address changes. If
+a key changes as expected (replacement, new firmware), every SSH access to that switch fails with "passt nicht zum gemerkten" until
+you choose "SSH-Hostschlüssel vergessen" in the switch form; the next SSH session then pins the key it is offered.
+
+"TLS-Zertifikat prüfen" (PacketFence, OPNsense) is on for a new installation; an existing one keeps its stored setting. `http://`
+addresses stay allowed. The settings warn while a check is off or an address uses `http://`: anyone on the network could then read
+the password or API key.
+
 ## Requirements
 
 - Network access from SwitchView to the switches: UDP 161 (SNMP), TCP 22 (SSH, ProCurve)
