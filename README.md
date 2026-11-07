@@ -109,13 +109,17 @@ limits, checks before production use, what to do on an update, what comes later,
   withdrawn in Entra when the session ends. With the mapping off (the default) every SSO user is Admin, as before, and the start
   logs a warning; the emergency login is Admin always
 - Idle logout: a session without a request for `IDLE_MINUTES` minutes (default 120, `0` = never) ends; every signed-in request
-  counts as activity; the page asks nothing on a timer, except for the progress of a running change
+  counts as activity; the page asks nothing on a timer, except for the progress of a running change. It is the one change an
+  update to Phase 4a brings without being switched on (an existing `.env` has no `IDLE_MINUTES` and gets 120): set
+  `IDLE_MINUTES=0` before starting the new image to keep logging out only after `SESSION_HOURS`
 - Every route has a minimum role, checked by the server on every request; the UI shows the user's name and role, hides or locks
   what the role does not allow and says why. An Admin can limit Ändern and Freigeben to the switches of some zones by Entra app
   role (Settings → "Zonen")
 - Optional four-eyes principle for expert-mode changes (uplinks, trunks), off by default: the preview requests an approval, a
   second person with Freigeben or Admin reviews a freshly planned preview under "Freigaben" and approves it, which runs the change
-  through the same guided loop; nobody approves their own request, the emergency login approves nothing
+  through the same guided loop; nobody approves their own request, the emergency login approves nothing. An Admin switches it on
+  under Settings → "Vier-Augen-Prinzip" (or `PUT /api/settings/approvals` with `{"four_eyes": true, "hours": 24}`); open requests
+  expire after 24 hours (1–168, for new requests), and switching it off leaves open requests to be approved, rejected or withdrawn
 - The Entra login binds the ID token to its login attempt (a single-use nonce, bound to a cookie of the browser)
 
 ## Quick start
@@ -149,10 +153,12 @@ The settings that matter, in `.env` unless noted:
 | `SESSION_HOURS` | `12` | lifetime of a session |
 | `ENTRA_ROLE_MAPPING` | `off` | `on`: the role of an SSO user comes from the Entra app roles; `off`: every SSO user is Admin; any other value stops the start |
 | `ENTRA_ROLE_LESEN`, `ENTRA_ROLE_AENDERN`, `ENTRA_ROLE_FREIGEBEN`, `ENTRA_ROLE_ADMIN` | `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben`, `SwitchView.Admin` | the app role values of each role, comma-separated |
-| `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off; a negative value stops the start |
+| `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off (the behaviour before Phase 4a); a negative value stops the start |
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |
+| "Vier-Augen-Prinzip" (Settings, Admin) | off, requests expire after `24` hours | on: an expert-mode change is requested, and a second person with Freigeben or Admin approves it; hours 1–168 |
+| "Zonen" (Settings, Admin) | empty: nobody is limited | one line per Entra app role (`SwitchView.Zone.EK = EK`): Ändern and Freigeben with that role change only switches of those zones; needs `ENTRA_ROLE_MAPPING=on` |
 
 **Reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address as the container sees it (comma-separated addresses or networks,
 e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container of the compose network): only that sender may set
@@ -187,7 +193,14 @@ it on, an expert-mode change is requested instead of run (so Ändern may request
 with Freigeben or Admin approves exactly the preview the requester saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
 cannot run until it is switched off again. The Entra login carries a single-use nonce bound to a cookie of the browser (a captured
 ID token cannot be replayed from another browser), and a session without a request for `IDLE_MINUTES` minutes ends. The audit
-log records the role of every entry.
+log records the role of every entry. To switch the roles on, create four app roles with the values `SwitchView.Lesen`,
+`SwitchView.Aendern`, `SwitchView.Freigeben` and `SwitchView.Admin` in the app registration, assign them to users or groups (at
+least one person Admin), add them to `ENTRA_ALLOWED_ROLES` if the login gate checks app roles, set `ENTRA_ROLE_MAPPING=on` and
+restart; whoever was signed in before the update signs in once more. On an update nothing about the rights changes until then,
+four eyes and zones stay off until an Admin switches them on, and the idle logout is the one change that comes on its own (set
+`IDLE_MINUTES=0` to keep the old behaviour); a reverse proxy must pass the new `sv_login` cookie like `sv_session`, and a page
+opened before the update is reloaded once. The upgrade steps in full are under "Was beim Update zu tun ist" in
+[docs/rollen-phase4a.md](docs/rollen-phase4a.md).
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
