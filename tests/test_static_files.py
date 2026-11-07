@@ -77,3 +77,11 @@ def test_a_gzipped_answer_keeps_the_security_headers(login_api):
     r = login_api.get("/static/msal-browser.min.js", headers={"Accept-Encoding": "gzip"})
     assert r.headers["content-encoding"] == "gzip" and r.content == (STATIC / "msal-browser.min.js").read_bytes()
     assert r.headers["content-security-policy"].startswith("default-src 'none'") and r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_the_active_search_hit_is_marked_beyond_its_background():
+    """Hover and the keyboard's active hit share a background; the active one also has an accent bar, and under forced colours
+    (Windows high contrast drops backgrounds) an outline."""
+    sel = r'\.results \[role="option"\]\[aria-selected="true"\]'
+    assert "box-shadow: inset 2px 0 0 var(--accent)" in re.search(sel + r" \{([^}]*)\}", CSS).group(1)
+    assert re.search(r"@media \(forced-colors: active\) \{\s*" + sel + r" \{[^}]*outline: 2px solid Highlight", CSS)

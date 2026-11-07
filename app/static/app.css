@@ -86,7 +86,8 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .results { position: absolute; left: 0; right: 0; top: calc(100% + 4px); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: 0 12px 32px rgba(0,0,0,.14); max-height: 380px; overflow-y: auto; z-index: 25; }
 .results button { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 10px; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); padding: 8px 12px; cursor: pointer; }
 .results button:hover, .results button:focus-visible { background: var(--surface-2); }
-.results [role="option"][aria-selected="true"] { background: var(--surface-2); }
+.results [role="option"][aria-selected="true"] { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+@media (forced-colors: active) { .results [role="option"][aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; } }
 .results .r1 { font-weight: 500; font-size: 13px; }
 .results .r2 { color: var(--muted); font-size: 12px; grid-column: 1 / -1; }
 .results .r3 { color: var(--muted); font-size: 12px; }

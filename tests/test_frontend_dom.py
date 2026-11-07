@@ -218,7 +218,7 @@ def test_a_preview_closed_while_the_switch_is_read_stays_closed(meanwhile, answe
 # Enter opens, Escape closes; one search runs SEARCH_DELAY after the last keystroke
 SEARCH = ('MAP = {switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
           '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}; '
-          '$("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); ')
+          '$("#q").focus(); $("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); ')
 
 
 def test_the_search_is_a_combobox():
@@ -251,26 +251,148 @@ def test_typing_searches_once_after_a_pause():
 
 def test_a_term_too_short_leaves_no_hits_for_the_arrows():
     """Deleting the term below two characters closes the list and forgets its hits: an arrow key does not bring back the hits of a
-    text no longer in the field (Chrome's Escape also empties a search field)."""
+    text no longer in the field (Chrome's Escape also empties a search field), and moves the field's cursor as without a list."""
     js = ('(async () => { ' + SEARCH + '$("#q").value = "d"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); '
-          '$("#q").fire("keydown", {key: "ArrowDown"}); return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), searchFound.length]; })()')
-    assert in_dom(js) == [True, "false", 0]
+          'const e = $("#q").fire("keydown", {key: "ArrowDown"}); '
+          'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), searchFound.length, e.defaultPrevented]; })()')
+    assert in_dom(js) == [True, "false", 0, False]
 
 
 def test_a_search_that_waited_for_the_netmap_leaves_the_list_to_the_newer_text():
     """The first search after a reload waits for /api/netmap (seconds at hundreds of switches); if the field changed meanwhile, the
     answer does not show the hits of the old text (the search of the new text follows)."""
     js = ('(async () => { let answer; api = () => new Promise(ok => { answer = ok; }); MAP = null; '
-          '$("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 300)); $("#q").value = "drucker-vk"; '
+          '$("#q").focus(); $("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 300)); $("#q").value = "drucker-vk"; '
           'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); '
           'await new Promise(r => setTimeout(r, 50)); return [$("#results").hidden, searchFound.length]; })()')
     assert in_dom(js) == [True, 0]
 
 
-@pytest.mark.parametrize("close", ['document.fire("keydown", {key: "Escape"}); ', "showLogin(); ", "dropLayers(); "])
+@pytest.mark.parametrize("close", ['document.fire("keydown", {key: "Escape"}); ', "showLogin(); ", "dropLayers(); ",
+                                   'document.fire("click", {target: {closest: () => null}}); '])
 def test_every_layer_closer_closes_the_combobox(close):
-    """Escape anywhere (onLayerKey), the login page and Back/Forward (dropLayers) close the list as the combobox's own Escape does:
-    aria-expanded and the active option go with it."""
+    """Escape anywhere (onLayerKey), the login page, Back/Forward (dropLayers) and a click outside the search close the list as the
+    combobox's own Escape does: aria-expanded and the active option go with it."""
     js = ('(async () => { ' + SEARCH + '$("#q").fire("keydown", {key: "ArrowDown"}); ' + close
           + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), $("#q").getAttribute("aria-activedescendant"), searchActive]; })()')
     assert in_dom(js) == [True, "false", None, -1]
+
+
+# Task 5 review round 1: the peer test and the search ask the set of switch names (peerSet), and the combobox paths each have a test
+def test_only_a_switch_name_makes_an_lldp_neighbour_a_peer():                           # T5-b
+    """A nameless LLDP neighbour is no switch, even next to a switch without sysName; k and sys of a switch both count."""
+    js = ('MAP = {switches: [{id: 1, k: "A", sys: "", ports: []}, {id: 2, k: "B", sys: "core", ports: []}], links: [], vlans: {}}; '
+          '[[["", "1"]], [["A", "1"]], [["core", "1"]], [["x", "1"]]].map(l => isPeer({l}))')
+    assert in_dom(js) == [False, True, True, False]
+
+
+def test_the_search_skips_the_devices_behind_a_switch():                                # T5-b, Review Focus 4
+    js = ('(async () => { MAP = {switches: [{id: 1, k: "A", sys: "", ports: ['
+          '{n: "1", a: "", l: [["B", "5"]], d: [["aa:bb:cc:00:00:01", "20", "", "hinter-b", "", 0]], mc: 1, tr: ""}, '
+          '{n: "2", a: "", l: [], d: [["aa:bb:cc:00:00:02", "20", "", "hinter-b2", "", 0]], mc: 1, tr: ""}]}, '
+          '{id: 2, k: "B", sys: "", ports: []}], links: [], vlans: {}}; '
+          '$("#q").focus(); $("#q").value = "hinter"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); '
+          'return searchFound.map(h => h.port); })()')
+    assert in_dom(js) == ["2"]
+
+
+def test_the_search_field_and_its_list_carry_the_combobox_roles():
+    q, res = re.search(r'<input id="q"[^>]*>', INDEX).group(0), re.search(r'<div[^>]*\bid="results"[^>]*>', INDEX).group(0)
+    assert all(a in q for a in ('role="combobox"', 'aria-expanded="false"', 'aria-controls="results"', 'aria-autocomplete="list"')), q
+    assert all(a in res for a in ('role="listbox"', 'aria-label="Suchtreffer"')), res
+
+
+OPENED = 'let opened = null; openPort = (s, n) => { opened = [s.id, n]; }; '
+
+
+def test_a_click_on_a_hit_opens_its_port():
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED
+          + '$("#results").fire("click", {target: {closest: s => s === "[data-i]" ? {dataset: {i: "1"}} : null}}); '
+          'await new Promise(r => setTimeout(r, 50)); return [opened, current, $("#results").hidden]; })()')
+    assert in_dom(js) == [[1, "2"], "switches", True]
+
+
+def test_a_new_list_has_no_active_hit():
+    """An arrow made a hit of the old list active; the list of a new text starts without one, Enter opens nothing."""
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED + 'const q = $("#q"); q.fire("keydown", {key: "ArrowDown"}); '
+          'q.fire("keydown", {key: "ArrowDown"}); q.value = "ucker"; q.fire("input"); await new Promise(r => setTimeout(r, 400)); '
+          'const a = [q.getAttribute("aria-activedescendant"), searchActive, searchFound.length]; q.fire("keydown", {key: "Enter"}); '
+          'await new Promise(r => setTimeout(r, 50)); return [...a, opened]; })()')
+    assert in_dom(js) == [None, -1, 2, None]
+
+
+def test_the_arrows_keep_the_cursor_of_the_field():
+    js = ('(async () => { ' + SEARCH + 'const q = $("#q"); return [q.fire("keydown", {key: "ArrowDown"}).defaultPrevented, '
+          'q.fire("keydown", {key: "ArrowUp"}).defaultPrevented, q.fire("keydown", {key: "Home"}).defaultPrevented]; })()')
+    assert in_dom(js) == [True, True, False]
+
+
+def test_enter_without_an_active_hit_opens_nothing():
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED + 'const e = $("#q").fire("keydown", {key: "Enter"}); '
+          'await new Promise(r => setTimeout(r, 50)); return [opened, e.defaultPrevented, $("#results").hidden]; })()')
+    assert in_dom(js) == [None, False, False]
+
+
+@pytest.mark.parametrize("before, key, then, want", [("", "ArrowDown", "Enter", [[1, "2"], "hit-0"]), ("ArrowDown", "Enter", "", [None, None])],
+                         ids=["down-then-enter", "enter-after-a-hit-of-the-old-list"])
+def test_a_key_right_after_typing_acts_on_the_list_of_the_new_text(before, key, then, want):
+    """The list of "drucker" is shown, "vk" is typed and a key follows before the pause is over: the search of "vk" runs at once.
+    Down makes its first hit active (Enter then opens it); Enter opens nothing, not the hit made active in the old list."""
+    fire = 'q.fire("keydown", {key: "%s"}); '
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED + 'const q = $("#q"); ' + (fire % before if before else "") + 'q.value = "vk"; '
+          'q.fire("input"); ' + fire % key + 'await new Promise(r => setTimeout(r, 0)); const a = q.getAttribute("aria-activedescendant"); '
+          + (fire % then if then else "") + 'await new Promise(r => setTimeout(r, 50)); return [opened, a]; })()')
+    assert in_dom(js) == want
+
+
+def test_keys_while_the_search_waits_for_the_netmap_wait_with_it():
+    """The search of the field's text waits for /api/netmap (the list shown is of an older text): Down and Enter neither open a hit
+    of that list nor fetch the netmap a second time; once the answer is drawn they act on the new list in their order."""
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED + 'let answer, n = 0; api = () => { n++; return new Promise(ok => { answer = ok; }); }; '
+          'MAP = null; const q = $("#q"); q.value = "vk"; q.fire("input"); await new Promise(r => setTimeout(r, 300)); '
+          'q.fire("keydown", {key: "ArrowDown"}); q.fire("keydown", {key: "Enter"}); await new Promise(r => setTimeout(r, 0)); const a = [opened, n]; '
+          'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
+          '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); await new Promise(r => setTimeout(r, 50)); '
+          'return [...a, opened, searchFound.map(h => h.port)]; })()')
+    assert in_dom(js) == [None, 1, [1, "2"], ["2"]]
+
+
+def test_keys_that_waited_for_an_outrun_search_open_nothing():
+    """Down and Enter wait for the search of "vk", which waits for the netmap; "vkx" is typed meanwhile, so that search draws
+    nothing: the keys act on no list, not on the one still shown and not on the next one."""
+    js = ('(async () => { ' + SEARCH + NO_VIEWS + OPENED + 'let answer; api = () => new Promise(ok => { answer = ok; }); MAP = null; '
+          'const q = $("#q"); q.value = "vk"; q.fire("input"); await new Promise(r => setTimeout(r, 300)); '
+          'q.fire("keydown", {key: "ArrowDown"}); q.fire("keydown", {key: "Enter"}); q.value = "vkx"; q.fire("input"); '
+          'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
+          '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); await new Promise(r => setTimeout(r, 400)); '
+          'return [opened, q.getAttribute("aria-activedescendant"), searchFound.length, $("#results").hidden]; })()')
+    assert in_dom(js) == [None, None, 0, False]
+
+
+@pytest.mark.parametrize("to, want", [('$("#btn-logout")', [True, "false"]), ("null", [True, "false"]), ('$("#hit-1")', [False, "true"])],
+                         ids=["tab-out", "nowhere", "into-the-list"])
+def test_focus_leaving_the_search_closes_the_list(to, want):
+    """Tab goes from #q to the next control (the hits take no Tab stop): the list closes with it, as when focus goes nowhere."""
+    js = ('(async () => { ' + SEARCH + '$("#results").contains = n => n === $("#hit-0") || n === $("#hit-1"); '
+          f'$("#q").fire("focusout", {{relatedTarget: {to}}}); return [$("#results").hidden, $("#q").getAttribute("aria-expanded")]; }})()')
+    assert in_dom(js) == want
+
+
+def test_a_press_on_the_list_keeps_the_focus_in_the_field():
+    """A click on a hit does not move the focus out of #q first (which would close the list before the click)."""
+    assert in_dom('(async () => { ' + SEARCH + 'return $("#results").fire("mousedown").defaultPrevented; })()') is True
+
+
+def test_a_search_that_ends_after_the_focus_left_keeps_the_list_closed():
+    wait = 'await new Promise(r => setTimeout(r, 400)); '
+    js = ('(async () => { ' + SEARCH.replace(wait, '$("#btn-logout").focus(); ' + wait)
+          + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), searchFound.length]; })()')
+    assert in_dom(js) == [True, "false", 2]
+
+
+def test_escape_closes_the_list_before_the_field_loses_its_text():
+    """The first Escape only closes the list (default prevented: Chrome and Edge empty a type=search field on Escape); with the list
+    closed Escape is the browser's again."""
+    js = ('(async () => { ' + SEARCH + 'const q = $("#q"), a = q.fire("keydown", {key: "Escape"}), b = q.fire("keydown", {key: "Escape"}); '
+          'return [a.defaultPrevented, b.defaultPrevented, $("#results").hidden]; })()')
+    assert in_dom(js) == [True, False, True]

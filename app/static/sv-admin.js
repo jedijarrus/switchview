@@ -20,8 +20,10 @@
      A search runs SEARCH_DELAY ms after the last keystroke, over an index built once per netmap. ── */
   const q = $("#q"), res = $("#results");
   const SEARCH_DELAY = 150;
-  // searchFound: the hits shown (SVLogic.searchIndex entries), searchActive: the index of the active one, -1 for none
-  let searchFound = [], searchActive = -1, searchTimer = null;
+  // searchFound: the hits shown (SVLogic.searchIndex entries), searchActive: the index of the active one, -1 for none; searchTerm: the
+  // term searchFound belongs to; searchRun: the promise of the last search started
+  let searchFound = [], searchActive = -1, searchTimer = null, searchTerm = "", searchRun = null;
+  const termOf = () => q.value.trim().toLowerCase().replace(/-/g, ":");
   // The search index of each MAP (MAP is only ever replaced: an old MAP's index goes with it)
   const searchIdxs = new WeakMap();
   function searchIdx() { let idx = searchIdxs.get(MAP); if (!idx) searchIdxs.set(MAP, idx = SVLogic.searchIndex(MAP.switches, peerSet())); return idx; }
@@ -34,30 +36,46 @@
     b.setAttribute("aria-selected", "true"); q.setAttribute("aria-activedescendant", "hit-" + i); b.scrollIntoView({ block: "nearest" });
   }
   async function runSearch() {
-    const term = q.value.trim().toLowerCase().replace(/-/g, ":");
-    if (term.length < 2) { searchFound = []; showResults(false); return; }
+    const term = termOf();
+    if (term.length < 2) { searchFound = []; searchTerm = term; showResults(false); return; }
     try { await loadMap(false); } catch (e) { return; }
     // A search that waited for the netmap while the field changed leaves the list to the search of the new text
-    if (q.value.trim().toLowerCase().replace(/-/g, ":") !== term) return;
-    searchFound = SVLogic.searchHits(searchIdx(), term, 30);
+    if (termOf() !== term) return;
+    searchFound = SVLogic.searchHits(searchIdx(), term, 30); searchTerm = term;
     searchActive = -1; q.removeAttribute("aria-activedescendant");
     res.innerHTML = searchFound.length ? searchFound.map((h, i) => `<button type="button" role="option" id="hit-${i}" aria-selected="false" tabindex="-1" data-i="${i}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.k)} · Port ${esc(h.port)}</span><span class="r2">${esc(h.x)}</span></button>`).join("")
       : `<div class="none" role="option" aria-disabled="true">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
-    showResults(true);
+    // A search that ends after the focus left the field (the pause, a slow netmap) does not open the list over the page
+    showResults(document.activeElement === q);
   }
+  function startSearch() { clearTimeout(searchTimer); searchTimer = null; return (searchRun = runSearch()); }
   async function openHit(h) {
     showResults(false);
     swVlan = null; swPortFilter = "all"; swText = ""; go("switches", h.sid);
     for (let i = 0; i < 20 && !$("#plate"); i++) await new Promise(r => setTimeout(r, 100));
     const s = swById(h.sid); if (s) openPort(s, h.port, q);
   }
-  q.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, SEARCH_DELAY); });
-  q.addEventListener("keydown", e => {
-    if (e.key === "Escape") showResults(false);
-    else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && searchFound.length) {
+  q.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(startSearch, SEARCH_DELAY); });
+  q.addEventListener("keydown", async e => {
+    // The first Escape only closes the list: Chrome and Edge empty a type=search field on Escape, that stays the second one's
+    if (e.key === "Escape") { if (!res.hidden) e.preventDefault(); showResults(false); return; }
+    const arrow = e.key === "ArrowDown" || e.key === "ArrowUp";
+    if (!arrow && e.key !== "Enter") return;
+    if (termOf() !== searchTerm) {
+      // The list shown is of an older text, the search of the field's text still waits (for the pause: it runs now; for the netmap:
+      // the key waits with it). The key then acts on the new list, where no hit is active yet (Enter opens nothing)
+      if (arrow) e.preventDefault();
+      await (searchTimer ? startSearch() : searchRun);
+      if (termOf() !== searchTerm) return;
+    }
+    if (arrow && searchFound.length) {
       e.preventDefault(); showResults(true); setActive(SVLogic.nextIndex(searchActive, searchFound.length, e.key));
     } else if (e.key === "Enter" && searchActive >= 0) { e.preventDefault(); openHit(searchFound[searchActive]); }
   });
+  // Focus leaving the field closes the list (Tab goes on to the next control, the hits take no Tab stop); a press on the list keeps
+  // the focus in #q, so the click on a hit still finds the list open
+  q.addEventListener("focusout", e => { if (!res.contains(e.relatedTarget)) showResults(false); });
+  res.addEventListener("mousedown", e => e.preventDefault());
   res.addEventListener("click", e => { const b = e.target.closest("[data-i]"); if (b) openHit(searchFound[+b.dataset.i]); });
   document.addEventListener("click", e => { if (!e.target.closest(".search")) showResults(false); });
 
