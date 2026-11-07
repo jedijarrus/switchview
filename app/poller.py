@@ -517,8 +517,9 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
     """Polls the switch and stores what it read; the result is {"ok": True, "ports": n, "macs": n} or {"ok": False, "error": text}.
     Each poll keeps its switch's poll state (poll_failures, down_since, last_ok_at, unread_fields) and then tells its events
     (monitor.poll_succeeded with the ports it replaced, or monitor.poll_failed), wrapped: a failure is logged ("Ereignisse <host>")
-    and changes nothing of the result. With record (a single poll: "Jetzt abfragen", the poll after a change) a good poll records
-    its sightings right away (history.record), wrapped as well. poll_all records once for its whole round."""
+    and changes nothing of the result; a good poll then checks the SNMP access against the security rules (compliance.evaluate_snmp,
+    wrapped the same way, "Sicherheitsregeln <host>"). With record (a single poll: "Jetzt abfragen", the poll after a change) a good
+    poll records its sightings right away (history.record), wrapped as well. poll_all records once for its whole round."""
     import monitor  # late: monitor → poller
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
@@ -666,6 +667,11 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
             await monitor.poll_succeeded(row, old, data, incomplete, now)
         except Exception:  # noqa: BLE001
             log.exception("Ereignisse %s", host)
+        import compliance  # late: compliance → api_switches → poller (at call time)
+        try:
+            await compliance.evaluate_snmp(row)
+        except Exception:  # noqa: BLE001
+            log.exception("Sicherheitsregeln %s", host)
         if record:
             import history  # late: history → topology → changes → poller
             try:

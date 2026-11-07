@@ -92,6 +92,10 @@ MATRIX_4B: dict = {
     ("GET", "/api/history"): "lesen",
     ("GET", "/api/history.csv"): "lesen",
     ("GET", "/api/events"): "lesen",
+    ("GET", "/api/switches/{sid}/findings"): "lesen",
+    ("GET", "/api/compliance"): "lesen",
+    ("GET", "/api/compliance/rules"): "lesen",
+    ("PUT", "/api/compliance/rules"): "admin",
 }
 MATRIX = MATRIX_4A | MATRIX_4B
 

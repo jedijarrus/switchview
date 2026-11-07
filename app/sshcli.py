@@ -254,35 +254,44 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
     secrets anew on every read would otherwise store a backup per preview. A last row from before raw_mac (NULL) with the same sha
     gets this mark filled in, without a new row: the first backup after the update adds none.
     A new row is compared with the one before it (monitor.backup_outside, Phase 4b): on this connection, before the commit, wrapped
-    in a savepoint - a failure there is logged and leaves outside NULL, the backup stays."""
+    in a savepoint - a failure there is logged and leaves outside NULL, the backup stays.
+    Then, new row or not and after this connection is closed, the security rules check the unmasked content
+    (compliance.evaluate_config, Phase 4b; it writes on a connection of its own, which would wait out this one's write transaction),
+    wrapped: a failure there is logged and changes nothing of the answer."""
     sha, mark = backup_sha(content), keyed_digest("backup", content)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     async with db() as conn:
         async with conn.execute("SELECT id, sha, raw_mac FROM config_backups WHERE switch_id = ? ORDER BY id DESC LIMIT 1",
                                 (switch_id,)) as cur:
             last = await cur.fetchone()
-        if last and last["sha"] == sha:
-            if last["raw_mac"] is None:
-                await conn.execute("UPDATE config_backups SET raw_mac = ? WHERE id = ?", (mark, last["id"]))
-                await conn.commit()
-                return False
-            if last["raw_mac"] == mark or trigger == "lesen":
-                return False
-        cur = await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger, raw_mac) VALUES (?,?,?,?,?,?)",
-                                 (switch_id, now, sha, cfgparse.mask_secrets(content), trigger, mark))
-        try:
-            await conn.execute("SAVEPOINT backup_outside")
+        if last and last["sha"] == sha and last["raw_mac"] is None:
+            await conn.execute("UPDATE config_backups SET raw_mac = ? WHERE id = ?", (mark, last["id"]))
+            await conn.commit()
+            made = False
+        elif last and last["sha"] == sha and (last["raw_mac"] == mark or trigger == "lesen"):
+            made = False
+        else:
+            cur = await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger, raw_mac) VALUES (?,?,?,?,?,?)",
+                                     (switch_id, now, sha, cfgparse.mask_secrets(content), trigger, mark))
             try:
-                await monitor.backup_outside(conn, switch_id, cur.lastrowid, trigger, now)
-            except Exception:
-                await conn.execute("ROLLBACK TO backup_outside")
-                raise
-            finally:
-                await conn.execute("RELEASE backup_outside")
-        except Exception:  # noqa: BLE001
-            log.exception("Ereignisse der Sicherung von Switch %s", switch_id)
-        await conn.commit()
-    return True
+                await conn.execute("SAVEPOINT backup_outside")
+                try:
+                    await monitor.backup_outside(conn, switch_id, cur.lastrowid, trigger, now)
+                except Exception:
+                    await conn.execute("ROLLBACK TO backup_outside")
+                    raise
+                finally:
+                    await conn.execute("RELEASE backup_outside")
+            except Exception:  # noqa: BLE001
+                log.exception("Ereignisse der Sicherung von Switch %s", switch_id)
+            await conn.commit()
+            made = True
+    import compliance  # late, like changes below: compliance reaches back to api_switches → sshcli when it checks SNMP
+    try:
+        await compliance.evaluate_config(switch_id, content)
+    except Exception:  # noqa: BLE001
+        log.exception("Sicherheitsregeln %s", switch_id)
+    return made
 
 
 async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:

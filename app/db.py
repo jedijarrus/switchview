@@ -196,6 +196,18 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL, port TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS idx_events_sw ON events(switch_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+-- Phase 4b, Task 5: the findings of the security rules (app/compliance.py), one row per switch, rule and line: rule an id of
+-- compliance.RULES or of a custom rule, source config | custom | snmp (where it was checked), line_no 1-based (NULL for a finding
+-- without a line), line the masked line ('' without one), detail the German detail (never a secret value), first_seen and last_seen
+-- the first and the last check that found it, resolved_at the check that no longer did (NULL: open). Written by
+-- compliance.evaluate_config (sshcli.store_backup), evaluate_snmp (poller.poll_switch) and reevaluate_custom (PUT
+-- /api/compliance/rules); read by GET /api/switches/{sid}/findings and GET /api/compliance. Deleting the switch deletes its findings;
+-- resolved ones are purged after HISTORY_DAYS by resolved_at.
+CREATE TABLE IF NOT EXISTS findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, switch_id INTEGER NOT NULL REFERENCES switches(id) ON DELETE CASCADE, rule TEXT NOT NULL,
+    source TEXT NOT NULL, line_no INTEGER, line TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL, resolved_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_findings_sw ON findings(switch_id, resolved_at);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,
@@ -266,6 +278,11 @@ ADDED_COLUMNS = (
     # no SwitchView change that may have sent something ran between the two, 0 when one did. NULL: not compared - the first backup
     # of a switch, a backup from before the update, or one whose check failed.
     ("config_backups", "outside", "INTEGER"),
+    # Phase 4b, Task 5, written by compliance (evaluate_config, evaluate_snmp): the time of the last check of the security rules per
+    # source, the running-config and the SNMP access. NULL: never checked, so the next check is the baseline and tells nothing.
+    # Existing rows have NULL.
+    ("switches", "compliance_cfg_at", "TEXT"),
+    ("switches", "compliance_snmp_at", "TEXT"),
 )
 
 

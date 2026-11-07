@@ -1,18 +1,27 @@
 """The history routes (Phase 4b): where a device was seen (Task 3: GET /api/history, the search; GET /api/history.csv, the same search
-as a CSV download) and the events (Task 4: GET /api/events). The search itself is app/history.py, the CSV app/csvout.py, the events
-app/monitor.py.
+as a CSV download), the events (Task 4: GET /api/events) and the security rules (Task 5: GET /api/switches/{sid}/findings, GET
+/api/compliance, GET and PUT /api/compliance/rules). The search itself is app/history.py, the CSV app/csvout.py, the events
+app/monitor.py, the rules and their findings app/compliance.py.
 
-All need Lesen and are not limited by zone, like every read route of Phase 4a: zones limit changes only (roles.SCOPED), and a place
-of a device belongs to no single switch.
+Every read needs Lesen and is not limited by zone, like every read route of Phase 4a: zones limit changes only (roles.SCOPED), and a
+place of a device belongs to no single switch. Changing the rules is Admin.
 """
+import json
+import logging
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 import auth
+import compliance
 import csvout
 import history
 import monitor
 import roles
+from db import audit, db, set_setting
 
+log = logging.getLogger("switchview.history")
 router = APIRouter()
 
 CSV_HEADER = ["MAC", "Hersteller", "IP", "Name", "Switch", "Port", "VLAN", "Zuerst gesehen (UTC)", "Zuletzt gesehen (UTC)", "Möglicher Uplink"]
@@ -59,3 +68,79 @@ async def list_events(switch_id: int | None = Query(default=None, ge=1, le=ROW_I
                                          cursor=cursor, limit=limit)
     except ValueError as e:
         raise HTTPException(422, str(e)) from None
+
+
+@router.get("/api/switches/{sid}/findings")
+async def list_findings(sid: int, user=Depends(auth.require(roles.LESEN))):
+    """The open findings of the switch's rules in force (compliance.open_findings), critical first; 404 for a switch that is not there."""
+    async with db() as conn:
+        async with conn.execute("SELECT 1 FROM switches WHERE id = ?", (sid,)) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(404, "Switch nicht gefunden")
+    return {"findings": await compliance.open_findings(sid)}
+
+
+@router.get("/api/compliance")
+async def compliance_summary(user=Depends(auth.require(roles.LESEN))):
+    """The open findings over all switches for the overview (compliance.summary): {"total", "crit", "switches"}."""
+    return await compliance.summary()
+
+
+@router.get("/api/compliance/rules")
+async def get_compliance_rules(user=Depends(auth.require(roles.LESEN))):
+    """Every rule with its state (compliance.rules_view): the built-in ones, then the custom ones."""
+    return await compliance.rules_view()
+
+
+class CustomRuleIn(BaseModel):
+    """One custom rule of PUT /api/compliance/rules: its id as GET serves it (c<n>; none for a new one), a name, the mode ("must": a
+    line has to contain the text, "must_not": none may) and the text (A1: plain text, no pattern)."""
+    id: str | None = Field(default=None, pattern=r"^c[0-9]{1,9}$")
+    name: str = Field(min_length=1, max_length=80)
+    mode: str = Field(pattern=r"^(must|must_not)$")
+    text: str = Field(min_length=1, max_length=200)
+
+
+class RulesIn(BaseModel):
+    off: list[Annotated[str, Field(max_length=40)]] = Field(max_length=20)
+    custom: list[CustomRuleIn] = Field(max_length=50)
+
+
+UNKNOWN_RULE = "Unbekannte Regel: {}"
+NO_TEXT = "Eigene Regel ohne Text"
+NO_NAME = "Eigene Regel ohne Namen"
+
+
+@router.put("/api/compliance/rules")
+async def put_compliance_rules(body: RulesIn, user=Depends(auth.require(roles.ADMIN))):
+    """Replaces the built-in rules switched off and the custom rules, then checks the custom ones on the latest backup of every switch
+    (compliance.reevaluate_custom). off takes only ids of compliance.RULES: a custom rule is removed, not switched off (422
+    „Unbekannte Regel: <id>“); a name or text blank once trimmed is a 422 too, nothing stored. Names and texts are stored trimmed; a
+    custom rule without an id, or with one an earlier rule of the same PUT has, gets c<n>, n one more than the largest number stored
+    or sent. The audit names the rules switched off and the number of custom ones, never a name or a text; the answer is GET's."""
+    for rid in body.off:
+        if rid not in compliance.RULES:
+            raise HTTPException(422, UNKNOWN_RULE.format(rid))
+    for c in body.custom:
+        if not c.text.strip():
+            raise HTTPException(422, NO_TEXT)
+        if not c.name.strip():
+            raise HTTPException(422, NO_NAME)
+    stored = (await compliance.load_rules())["custom"]
+    n = max((int(rid[1:]) for rid in [c["id"] for c in stored] + [c.id for c in body.custom if c.id]), default=0)
+    custom, used = [], set()
+    for c in body.custom:
+        rid = c.id
+        if rid is None or rid in used:
+            n += 1
+            rid = f"c{n}"
+        used.add(rid)
+        custom.append({"id": rid, "name": c.name.strip(), "mode": c.mode, "text": c.text.strip()})
+    off = [rid for rid in compliance.RULES if rid in body.off]
+    await set_setting(compliance.SETTINGS_KEY, json.dumps({"off": off, "custom": custom}))
+    try:
+        await compliance.reevaluate_custom()
+    except Exception:  # noqa: BLE001 - the rules are stored; their audit must not be lost to a failing check
+        log.exception("Eigene Sicherheitsregeln an den Sicherungen")
+    await audit(user["username"], "compliance_rules", "", f"aus: {', '.join(off) or '–'} · eigene: {len(custom)}", role=user["role"])
+    return await compliance.rules_view()

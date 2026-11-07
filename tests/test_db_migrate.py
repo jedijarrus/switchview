@@ -40,6 +40,8 @@ NEW_COLUMNS = {
         "down_since": ("TEXT", 0, None),
         "last_ok_at": ("TEXT", 0, None),
         "unread_fields": ("TEXT", 0, None),
+        "compliance_cfg_at": ("TEXT", 0, None),    # and the last check of the security rules per source (Task 5)
+        "compliance_snmp_at": ("TEXT", 0, None),
     },
     "ports": {
         "poe_admin": ("INTEGER", 0, None),
@@ -364,11 +366,13 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
 
 # The tables and the columns Phase 4b adds (Tasks 2-8 extend both): Task 2 the sightings, Task 4 the events and the switches' poll
 # state (failures in a row, unreachable since, last good poll, the fields it could not read) and whether a backup differs from the
-# one before without a SwitchView change. A database as Phase 4a left it has none of them; init_db creates each table empty, with
-# the indexes db.SCHEMA gives it, and adds each column, which a row of before reads as the column's default.
-PHASE4B_TABLES = {"sightings", "events"}
+# one before without a SwitchView change, Task 5 the findings of the security rules and their last check per source. A database as
+# Phase 4a left it has none of them; init_db creates each table empty, with the indexes db.SCHEMA gives it, and adds each column,
+# which a row of before reads as the column's default.
+PHASE4B_TABLES = {"sightings", "events", "findings"}
 PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
-                                         ("switches", "unread_fields"), ("config_backups", "outside")}
+                                         ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
+                                         ("switches", "compliance_snmp_at")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:
