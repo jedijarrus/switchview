@@ -49,7 +49,9 @@ def test_the_emergency_login_works_under_the_policy(login_api):
 
 
 def test_the_entra_login_works_under_the_policy(login_api, monkeypatch):
-    monkeypatch.setattr(auth, "verify_id_token", lambda token: {"sub": "s1", "preferred_username": "anna@example.org", "name": "Anna"})
+    nonce = login_api.post("/api/auth/nonce").json()["nonce"]      # Phase 4a: the token carries the nonce of its login attempt
+    monkeypatch.setattr(auth, "verify_id_token", lambda token: {"sub": "s1", "preferred_username": "anna@example.org", "name": "Anna",
+                                                                 "nonce": nonce})
     r = login_api.post("/api/auth/azure", json={"id_token": "x.y.z"})
     assert r.status_code == 200 and r.headers["Content-Security-Policy"] == WITH_SSO
     assert login_api.get("/api/auth/me").json()["username"] == "anna@example.org"

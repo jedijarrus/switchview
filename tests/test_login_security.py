@@ -6,10 +6,11 @@ timeout, a failed one blocks further fetches of that tenant for 30 s, and expect
 
 The app runs in-process through FastAPI's TestClient (the login_api fixture in conftest.py: a fresh database under tmp_path, the
 emergency account and SSO switched on, no dependency_overrides, the scheduler booby-trapped). Nothing reaches Microsoft: the JWKS
-client and the token check are faked where a test needs them.
+client and the token check are faked where a test needs them (the entra fixture of conftest.py signs real id_tokens with a key of
+its own). Phase 4a: a successful SSO login needs the nonce of its login attempt (tests/test_nonce.py), so the tests that sign in
+through a replaced token check first ask for one and put it into the claims.
 """
 import asyncio
-import json
 import logging
 import pathlib
 import time
@@ -17,7 +18,6 @@ import types
 
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
@@ -49,19 +49,6 @@ class FakeJwks:
         return []
 
     match_kid = staticmethod(lambda keys, kid: None)
-
-
-@pytest.fixture
-def entra(monkeypatch):
-    """The tenant "t" of login_api with one RS256 signing key, kid "k1", served by a JWKS client that never leaves the process.
-    Returns sign(**claims): an id_token for client "c", signed with that key, with the given claims added or replaced."""
-    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    jwk = jwt.PyJWK({**json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key())), "kid": "k1", "use": "sig"})
-    client = types.SimpleNamespace(get_signing_keys=lambda refresh=False: [jwk], match_kid=jwt.PyJWKClient.match_kid)
-    monkeypatch.setattr(auth, "_jwks_client", lambda tenant: client)
-    now = int(time.time())
-    base = {"iss": "https://login.microsoftonline.com/t/v2.0", "tid": "t", "aud": "c", "sub": "s", "iat": now, "exp": now + 600}
-    return lambda **claims: jwt.encode({**base, **claims}, private, algorithm="RS256", headers={"kid": "k1"})
 
 
 def test_spoofed_forwarded_for_never_opens_a_new_bucket(login_api):           # F1, the audit's input
@@ -149,7 +136,8 @@ def test_check_local_always_compares_both_fields(login_api, monkeypatch):    # Â
 def test_sso_is_never_throttled(login_api, monkeypatch):
     monkeypatch.setattr(auth, "verify_id_token", raising(ValueError("kaputt")))
     assert {login_api.post("/api/auth/azure", json={"id_token": "x"}).status_code for _ in range(30)} == {401}
-    monkeypatch.setattr(auth, "verify_id_token", lambda t: {"sub": "s", "preferred_username": "u@example.org"})
+    nonce = login_api.post("/api/auth/nonce").json()["nonce"]
+    monkeypatch.setattr(auth, "verify_id_token", lambda t: {"sub": "s", "preferred_username": "u@example.org", "nonce": nonce})
     assert login_api.post("/api/auth/azure", json={"id_token": "x"}).status_code == 200
 
 
@@ -209,11 +197,13 @@ def test_an_app_only_token_is_not_an_id_token(login_api, entra):            # E5
 
 
 def test_the_token_check_runs_off_the_event_loop(login_api, monkeypatch):    # E4: a JWKS fetch must not stall every request
+    nonce = login_api.post("/api/auth/nonce").json()["nonce"]
+
     def check(token):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return {"sub": "s", "preferred_username": "u@example.org"}
+            return {"sub": "s", "preferred_username": "u@example.org", "nonce": nonce}
         raise AssertionError("verify_id_token ran on the event loop")
     monkeypatch.setattr(auth, "verify_id_token", check)
     assert login_api.post("/api/auth/azure", json={"id_token": "x"}).status_code == 200

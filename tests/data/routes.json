@@ -48,6 +48,12 @@
 ]
 ],
 [
+"/api/auth/nonce",
+[
+"POST"
+]
+],
+[
 "/api/backups/{bid}",
 [
 "GET"

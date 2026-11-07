@@ -112,7 +112,9 @@
     try {
       if (!window.msal) throw new Error("MSAL-Bibliothek konnte nicht geladen werden");
       if (!msalApp) { msalApp = new msal.PublicClientApplication({ auth: { clientId: authCfg.client_id, authority: "https://login.microsoftonline.com/" + authCfg.tenant, redirectUri: location.origin + "/" }, cache: { cacheLocation: "sessionStorage" } }); await msalApp.initialize(); }
-      const r = await msalApp.loginPopup({ scopes: ["openid", "profile", "email"], prompt: "select_account" });
+      // The server's nonce of this login attempt (bound to a cookie of this browser): Entra puts it into the id_token, /api/auth/azure checks it
+      const { nonce } = await api("POST", "/api/auth/nonce");
+      const r = await msalApp.loginPopup({ scopes: ["openid", "profile", "email"], prompt: "select_account", nonce });
       await api("POST", "/api/auth/azure", { id_token: r.idToken }); await start();
     } catch (e) { showLogin(e.message || String(e)); } finally { btn.disabled = false; }
   });

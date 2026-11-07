@@ -50,6 +50,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 # und der Start (lifespan) markiert die laufende Aenderung eines anderen Workers als abgebrochen.
 # The SSO key cache is in-process as well (auth._jwks, its reload marks auth._jwks_refreshed and the marks of a failed fetch
 # auth._jwks_failed): each worker would fetch from Microsoft and wait out the 30 s after a failed fetch on its own.
+# The used SSO nonces are in-process as well (auth._used_nonces): another worker would accept a nonce this one has seen.
 
 
 def check_startup_config(s: Settings) -> list[str]:
@@ -200,6 +201,23 @@ async def login_local(body: LocalLogin, request: Request, response: Response):
     return {"ok": True}
 
 
+# The 401 of an id_token without the nonce of this browser's login attempt (auth.check_nonce): too old, used, another browser's, or a
+# login page from before the nonce, whose script asks for none
+NONCE_FAILED = ("Anmeldung über Microsoft fehlgeschlagen: der Anmeldeversuch ist abgelaufen oder wurde schon benutzt – bitte erneut "
+                "anmelden")
+
+
+@app.post("/api/auth/nonce")
+async def login_nonce(request: Request, response: Response):
+    """A new SSO login attempt (sv-core.js, before MSAL's loginPopup): the nonce for the id_token, its binding value in the cookie
+    auth.LOGIN_COOKIE. Public, like the logins; a new attempt in the same browser replaces the one before (one cookie per browser)."""
+    if not settings.sso_active:
+        raise HTTPException(400, "SSO ist nicht eingerichtet")
+    nonce, binding = auth.issue_nonce()
+    _set_cookie(response, request, auth.LOGIN_COOKIE, binding, auth.NONCE_TTL_S)
+    return {"nonce": nonce}
+
+
 class AzureLogin(BaseModel):
     id_token: str = Field(max_length=20000)
 
@@ -220,9 +238,15 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
     except Exception:  # noqa: BLE001
         log.exception("id_token ungültig")
         raise HTTPException(401, "Anmeldung über Microsoft fehlgeschlagen")
+    try:  # only a token that passed the checks above: a forged one never takes a nonce out of use
+        auth.check_nonce(claims.get("nonce"), request.cookies.get(auth.LOGIN_COOKIE))
+    except ValueError as e:
+        log.warning("Anmeldung über Microsoft abgelehnt: %s", e)
+        raise HTTPException(401, NONCE_FAILED)
     user = claims.get("preferred_username") or claims.get("upn") or claims.get("email") or claims["sub"]
     token = await auth.create_session(user, claims.get("name") or user, "entra")
     _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
+    response.delete_cookie(auth.LOGIN_COOKIE, path="/")
     await audit(user, "login", "entra")
     return {"ok": True}
 

@@ -1,6 +1,7 @@
 """Anmeldung: Entra-SSO (MSAL-Popup, id_token per JWKS geprueft) und optionaler Notfall-Login."""
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 import time
@@ -10,6 +11,7 @@ import jwt
 from fastapi import HTTPException, Request
 
 from config import settings
+from crypto import keyed_digest
 from db import db, token_hash
 
 COOKIE = "sv_session"
@@ -31,6 +33,17 @@ _jwks: dict[str, tuple[object, float]] = {}
 _jwks_refreshed: dict[str, float] = {}      # tenant -> time.monotonic() of its last forced reload
 _jwks_failed: dict[str, float] = {}         # tenant -> time.monotonic() of its last fetch that could not reach Microsoft
 _jwks_lock = threading.Lock()               # the token checks run in worker threads (main.login_azure)
+# The nonce of an SSO login attempt (Phase 4a, Sicherheit Phase 2 A2): POST /api/auth/nonce hands out "<ts>.<mac>", the MAC over a
+# random binding value and ts; the binding value goes into the httponly cookie LOGIN_COOKIE of the browser that asked, the nonce through
+# MSAL into the id_token. main.login_azure takes the token only with the nonce of this browser's attempt, within NONCE_TTL_S, once.
+# Stateless until used: only a nonce that came back in a valid id_token is remembered (_used_nonces), until it would have expired
+# anyway, so the public route fills no memory.
+LOGIN_COOKIE = "sv_login"
+NONCE_TTL_S = 600
+NONCE_SKEW_S = 60                           # a nonce of up to this many seconds in the future (another clock) still counts
+NONCE_BAD = "Anmeldeversuch unbekannt, abgelaufen oder schon benutzt"
+_NONCE = re.compile(r"([0-9]{1,12})\.([0-9a-f]{32})")
+_used_nonces: dict[str, float] = {}         # nonce -> the time from which it may be forgotten (its ts + NONCE_TTL_S)
 
 
 def _jwks_client(tenant: str):
@@ -101,6 +114,38 @@ def verify_id_token(token: str) -> dict:
         if not ok:
             raise PermissionError("Keine Berechtigung für SwitchView")
     return payload
+
+
+def _nonce_mac(binding: str, ts: str) -> str:
+    return keyed_digest("sso-nonce", f"{binding}:{ts}")[:32]
+
+
+def issue_nonce(now: float | None = None) -> tuple[str, str]:
+    """A new login attempt: (nonce, binding). The binding value goes into LOGIN_COOKIE, the nonce into MSAL's login request."""
+    binding = secrets.token_urlsafe(16)
+    ts = int(now or time.time())
+    return f"{ts}.{_nonce_mac(binding, str(ts))}", binding
+
+
+def check_nonce(nonce: str | None, binding: str | None, now: float | None = None) -> None:
+    """Accepts the nonce of an id_token once: issued by issue_nonce for this binding value (the browser's LOGIN_COOKIE), not older
+    than NONCE_TTL_S, not more than NONCE_SKEW_S ahead, not used before. Then remembers it until it would have expired, and forgets
+    every used nonce whose time is over. Anything else raises ValueError(NONCE_BAD), never another exception: a claim that is no
+    text fails the shape, and the MAC is taken over ts as written, before ts is read as a number (a leading zero is another nonce
+    with another MAC, not a second spelling of a used one; no ts of a forged nonce ever meets a float)."""
+    now = time.time() if now is None else now
+    m = _NONCE.fullmatch(nonce) if isinstance(nonce, str) else None
+    if not m or not isinstance(binding, str) or not binding:
+        raise ValueError(NONCE_BAD)
+    ts_text, mac = m.groups()
+    if not hmac.compare_digest(_nonce_mac(binding, ts_text), mac):
+        raise ValueError(NONCE_BAD)
+    ts = int(ts_text)
+    if now - ts > NONCE_TTL_S or ts - now > NONCE_SKEW_S or nonce in _used_nonces:
+        raise ValueError(NONCE_BAD)
+    for used in [n for n, until in _used_nonces.items() if until < now]:
+        del _used_nonces[used]
+    _used_nonces[nonce] = ts + NONCE_TTL_S
 
 
 def _utf8(text: str) -> bytes:

@@ -132,6 +132,14 @@ def test_the_login_closes_open_layers():
                   '[$("#modal").hidden, $("#drawer").classList.contains("open"), $("#app").inert]') == [True, False, False]
 
 
+def test_the_sso_button_hands_the_servers_nonce_to_msal():                             # Phase 4a Task 2: the id_token's nonce
+    js = ('(async () => { const calls = []; api = async (m, u, b) => { calls.push([m, u, b]); return u === "/api/auth/nonce" ? {nonce: "n-1"} : {}; }; '
+          'start = async () => {}; let req = null; globalThis.msal = {PublicClientApplication: class { async initialize() {} '
+          'async loginPopup(r) { req = r; return {idToken: "tok"}; } }}; window.msal = msal; authCfg = {client_id: "c", tenant: "t"}; msalApp = null; '
+          'await $("#btn-sso").handlers.click[0](); return [req.nonce, calls]; })()')
+    assert in_dom(js) == ["n-1", [["POST", "/api/auth/nonce", None], ["POST", "/api/auth/azure", {"id_token": "tok"}]]]
+
+
 def test_toasts_stack_up_to_three_and_a_repeat_counts_once():
     assert in_dom('["a", "b", "c", "d", "d"].forEach(m => toast(m)); $("#toasts").children.map(t => t.textContent)') == ["b", "c", "d"]
 

@@ -89,9 +89,9 @@ def sample_running_config() -> str:
 def login_api(tmp_path, monkeypatch):
     """A TestClient on main.app that sends the CSRF header, without dependency_overrides: every request goes through the real login
     and session code. Its database is a fresh one under tmp_path, set up by the app's own init_db; the settings switch on the
-    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle is a fresh one, no JWKS reload and no
-    failed JWKS fetch is on record, and the scheduler is booby-trapped (apifix.never). The client is created without `with`, so the app's lifespan
-    never runs. The app modules are imported here, not at the top, like in _test_environment."""
+    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle is a fresh one, no JWKS reload, no
+    failed JWKS fetch and no used SSO nonce is on record, and the scheduler is booby-trapped (apifix.never). The client is created
+    without `with`, so the app's lifespan never runs. The app modules are imported here, not at the top, like in _test_environment."""
     import asyncio
 
     from fastapi.testclient import TestClient
@@ -111,9 +111,33 @@ def login_api(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_LOGIN", throttle.LoginThrottle())
     monkeypatch.setattr(auth, "_jwks_refreshed", {})
     monkeypatch.setattr(auth, "_jwks_failed", {})
+    monkeypatch.setattr(auth, "_used_nonces", {})    # every login of a test starts without a remembered SSO nonce
     monkeypatch.setattr(main.scheduler, "start", apifix.never)
     asyncio.run(db.init_db())
     return TestClient(main.app, headers=CSRF)
+
+
+@pytest.fixture
+def entra(monkeypatch):
+    """The tenant "t" of login_api with one RS256 signing key, kid "k1", served by a JWKS client that never leaves the process.
+    Returns sign(**claims): an id_token for client "c", signed with that key, with the given claims added or replaced. The modules
+    are imported here, not at the top, like the app modules in login_api."""
+    import json
+    import time
+    import types
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    import auth
+
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = jwt.PyJWK({**json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key())), "kid": "k1", "use": "sig"})
+    client = types.SimpleNamespace(get_signing_keys=lambda refresh=False: [jwk], match_kid=jwt.PyJWKClient.match_kid)
+    monkeypatch.setattr(auth, "_jwks_client", lambda tenant: client)
+    now = int(time.time())
+    base = {"iss": "https://login.microsoftonline.com/t/v2.0", "tid": "t", "aud": "c", "sub": "s", "iat": now, "exp": now + 600}
+    return lambda **claims: jwt.encode({**base, **claims}, private, algorithm="RS256", headers={"kid": "k1"})
 
 
 @pytest.fixture
