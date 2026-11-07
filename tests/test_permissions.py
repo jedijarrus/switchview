@@ -1,7 +1,8 @@
 """Rights per route (Phase 4a, Task 4): every route declares its minimum role through exactly one dependency auth.require(<role>),
 recognisable by its min_role, or is one of the public routes of auth.PUBLIC_ROUTES. A walk over main.app.routes holds both against
 MATRIX, the permission matrix of the plan (docs/superpowers/plans/2026-11-07-phase4a-rollen.md, Task 4; the rows of Tasks 5-7 come
-with them), so a new route without a right fails here, not in operation. A role below the minimum gets 403 with the German text of
+with them; since Phase 4b Task 1 the union of MATRIX_4A and MATRIX_4B, the routes of docs/superpowers/plans/2026-11-07-phase4b-verlauf.md),
+so a new route without a right fails here, not in operation. A role below the minimum gets 403 with the German text of
 roles.denial; without a session every non-public route is 401. Inside /plan and /apply the mode has rules of its own: preparing RADIUS
 is Admin (Sicherheit Phase 2 T2-R1, it sends the RADIUS secret), the expert mode and taking back an expert change are Freigeben. Every
 audit entry records the role: the role of the request, of the new session for a login, none for a failed login, and the role of
@@ -29,9 +30,11 @@ from loginfix import BAD, GOOD
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# The permission matrix of the plan, (method, path) -> minimum role, None for a public route (no sign-in). Written out by hand from the
-# plan's table; a new route needs a row here and one in tests/data/routes.json.
-MATRIX = {
+# The permission matrix of the plans, (method, path) -> minimum role, None for a public route (no sign-in). Written out by hand from
+# the plans' tables in two halves: MATRIX_4A the routes up to Phase 4a (the table of docs/rollen-phase4a.md), MATRIX_4B the routes of
+# Phase 4b (the table of docs/verlauf-phase4b.md); tests/test_readme.py holds each note to its half. MATRIX, their union, is what the
+# walk over the routes compares. A new route needs a row in one half and one in tests/data/routes.json.
+MATRIX_4A = {
     ("GET", "/"): None,
     ("GET", "/static/{name}"): None,
     ("GET", "/static/fonts/{name}"): None,
@@ -85,6 +88,8 @@ MATRIX = {
     ("POST", "/api/approvals/{aid}/preview"): "freigeben",
     ("POST", "/api/approvals/{aid}/approve"): "freigeben",
 }
+MATRIX_4B: dict = {}
+MATRIX = MATRIX_4A | MATRIX_4B
 
 
 @pytest.fixture
@@ -113,6 +118,10 @@ def test_every_route_declares_a_minimum_role_or_is_public():
 
 def test_the_rights_are_the_matrix_of_the_plan():
     assert declared() == MATRIX
+
+
+def test_the_two_halves_of_the_matrix_do_not_overlap():
+    assert not set(MATRIX_4A) & set(MATRIX_4B) and MATRIX == MATRIX_4A | MATRIX_4B
 
 
 def test_there_is_one_dependency_per_role():

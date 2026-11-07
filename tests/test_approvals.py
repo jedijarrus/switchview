@@ -592,12 +592,12 @@ def test_the_audit_names_the_request_its_change_and_the_trimmed_comment(world, c
     assert dbfix.query("SELECT id, decided_by, comment FROM approvals ORDER BY id") == [(aid, "ben", "passt"), (bid, "cleo", None)]
 
 
-def test_a_stale_request_keeps_who_found_it_and_why(world, client):
+def test_a_stale_request_keeps_who_found_it_and_a_neutral_reason(world, client):
     four_eyes()
     aid = ask(client, world)[1].json()["id"]
     STATE.shown = ["vlan 30 untagged 6"]
     r = approve(client, aid, "ben")
-    assert r.json()["detail"] == f"{api_approvals.STALE_REQUEST} ({api_changes.STALE})"
-    assert dbfix.query("SELECT status, decided_by, reason, change_id FROM approvals") == [("stale", "ben", api_changes.STALE, None)]
+    assert r.json()["detail"] == f"{api_approvals.STALE_REQUEST} ({api_approvals.OTHER_COMMANDS})"
+    assert dbfix.query("SELECT status, decided_by, reason, change_id FROM approvals") == [("stale", "ben", api_approvals.OTHER_COMMANDS, None)]
     assert dbfix.query("SELECT username, target, detail, role FROM audit WHERE action = 'approval_stale'") == [
-        ("ben", str(world), f"#{aid} Port 6: VLAN 20: {api_changes.STALE}", "freigeben")]
+        ("ben", str(world), f"#{aid} Port 6: VLAN 20: {api_approvals.OTHER_COMMANDS}", "freigeben")]

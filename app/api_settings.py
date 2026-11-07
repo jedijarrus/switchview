@@ -194,7 +194,7 @@ async def put_zone_scopes(body: ZoneScopesIn, user=Depends(auth.require(roles.AD
         await conn.executemany("INSERT INTO zone_scopes(principal, zone) VALUES (?, ?)", sorted(rows))
         entries = await _zone_scopes(conn)    # inside the transaction: exactly what this PUT stored
         await conn.commit()
-    detail = f"{len(entries)} Einträge"
+    detail = f"{len(entries)} {'Eintrag' if len(entries) == 1 else 'Einträge'}"
     if entries:
         detail += ": " + "; ".join(f"{e['principal']} → {', '.join(roles.zone_label(z) for z in e['zones'])}" for e in entries)
     await audit(user["username"], "zone_scopes_update", "", detail[:500], role=user["role"])

@@ -58,6 +58,6 @@ def zone_allows(user: dict, zone: str | None) -> bool:
 
 
 def zone_denial(zone: str | None, zones: list[str]) -> str:
-    """The detail of a 403 for a switch of zone outside the zones a user may change in."""
-    allowed = ", ".join(f"„{zone_label(z)}“" for z in zones)
-    return f"Keine Berechtigung: Der Switch liegt in der Zone „{zone_label(zone)}“ – du darfst nur an Switches der Zonen {allowed} ändern"
+    """The detail of a 403 for a switch of zone outside the zones a user may change in ("der Zone" for one of them, else "der Zonen")."""
+    allowed = ("der Zone " if len(zones) == 1 else "der Zonen ") + ", ".join(f"„{zone_label(z)}“" for z in zones)
+    return f"Keine Berechtigung: Der Switch liegt in der Zone „{zone_label(zone)}“ – du darfst nur an Switches {allowed} ändern"

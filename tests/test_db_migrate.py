@@ -312,7 +312,6 @@ async def test_migration_adds_the_phase3_columns(data_dir):
         assert {t: await _first_row_plain(conn, t) for t in before} == rows
 
 
-
 async def test_migration_adds_the_phase4a_columns(data_dir):
     """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA without the Phase 4a tables, every column added
     before Phase 4a, one session, one audit entry and one change of before) gets sessions.claims, sessions.subject, sessions.last_seen,

@@ -4,9 +4,11 @@ limitations and device checks. A driver added to drivers.DRIVERS without a READM
 security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
 with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections.
 Phase 4a: likewise the roles note, with its rights per route as tests/test_permissions.py pins them and a row per decision of
-its plan."""
+its plan. Phase 4b: likewise the history note, with its half of the rights per route (MATRIX_4B; the roles note keeps MATRIX_4A)."""
 import pathlib
 import re
+
+import pytest
 
 import roles
 from drivers import DRIVERS
@@ -142,18 +144,30 @@ def test_the_roles_note_has_a_row_per_decision_of_the_plan():
             assert f"\n| {rid} |" in note, rid
 
 
-def test_the_roles_note_repeats_the_permission_matrix():
-    """Phase 4a wrap-up: the note's table "Rechte je Route" has a row for every entry of MATRIX, the matrix the walk over the app's
-    routes holds (tests/test_permissions.py), with the German name of its minimum role, and no other row (none for a removed or
-    renamed route, none twice) - the note cannot go stale silently."""
-    from test_permissions import MATRIX
-    note = (ROOT / "docs" / "rollen-phase4a.md").read_text(encoding="utf-8")
+@pytest.mark.parametrize("note_name, half", [("rollen-phase4a.md", "MATRIX_4A"), ("verlauf-phase4b.md", "MATRIX_4B")])
+def test_each_note_repeats_its_half_of_the_permission_matrix(note_name, half):
+    """Phase 4a wrap-up, split in Phase 4b Task 1: each note's table "Rechte je Route" has a row for every entry of its half of the
+    matrix the walk over the app's routes holds (tests/test_permissions.py: MATRIX_4A for the roles note, MATRIX_4B for the history
+    note), with the German name of its minimum role, and no other row (none for a removed or renamed route, none twice, none of the
+    other half) - neither note can go stale silently."""
+    import test_permissions
+    matrix = getattr(test_permissions, half)
+    note = (ROOT / "docs" / note_name).read_text(encoding="utf-8")
     label = {None: "öffentlich", **roles.LABELS}
-    for (method, path), role in MATRIX.items():
+    for (method, path), role in matrix.items():
         assert f"| {method} | `{path}` | {label[role]} |" in note, (method, path)
     section = note.split("\n## Rechte je Route\n", 1)[1].split("\n## ", 1)[0]
     rows = re.findall(r"^\| ([A-Z]+) \| `([^`]+)` \|", section, re.M)
-    assert len(rows) == len(set(rows)) and set(rows) == set(MATRIX), set(rows) ^ set(MATRIX)
+    assert len(rows) == len(set(rows)) and set(rows) == set(matrix), set(rows) ^ set(matrix)
+
+
+def test_the_history_note_is_linked_and_has_its_sections():
+    """Phase 4b: the README links the German note on history, drift and alerts, which has the sections of the earlier notes."""
+    assert "History, drift and alerts notes (German): [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md)" in README
+    note = (ROOT / "docs" / "verlauf-phase4b.md").read_text(encoding="utf-8")
+    for heading in ("## Was gebaut wurde", "## Rechte je Route", "## Kosten der Erfassung", "## Bekannte Grenzen",
+                    "## Prüfungen vor dem Produktiveinsatz", "## Was beim Update zu tun ist", "## Später", "## Entscheidungen"):
+        assert f"\n{heading}\n" in note, heading
 
 
 def test_the_readme_describes_roles_and_approvals():

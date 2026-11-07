@@ -122,6 +122,11 @@ def test_an_idle_session_ends(login_api):
         "SELECT count(*) FROM sessions") == [(0,)]
 
 
+@pytest.mark.parametrize("minutes, said", [(1, "1 Minute"), (2, "2 Minuten"), (120, "120 Minuten")])
+def test_the_idle_reason_counts_one_minute_in_the_singular(minutes, said):
+    assert auth.idle_reason(minutes) == f"Abgemeldet nach {said} ohne Aktivität – bitte neu anmelden"
+
+
 def test_activity_keeps_a_session_and_is_written_at_most_once_a_minute(login_api):
     login_api.post("/api/auth/local", json=GOOD)
     for delta, written in ((dict(seconds=30), False), (dict(seconds=61), True), (dict(minutes=119), True)):

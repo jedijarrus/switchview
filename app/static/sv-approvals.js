@@ -76,6 +76,8 @@
     };
   }
 
+  // The commands of the preview the requester of a saw, one per line, escaped ("–" without any)
+  const apprCmds = a => esc(((a.preview && a.preview.commands) || []).join("\n") || "–");
   // Request a with everything it says: who asked and when, its status (open: until when), who decided, the comment, the reason of a
   // stale one, the change an approval started, and the preview its requester saw
   function approvalDetails(a) {
@@ -86,7 +88,7 @@
       ["Kommentar", esc(a.comment) || "–"], ["Grund", esc(a.reason) || "–"], ["Änderung", a.change_id ? `#${a.change_id}` : "–"]];
     modal(`Anfrage #${a.id}`, `<p style="margin:0"><b>${esc(a.summary)}</b> <span class="muted">· ${esc(a.switch_name || "–")} · ${esc(a.kind_label)}</span></p>
       <dl class="kv">${kv.map(([k, x]) => `<dt>${k}</dt><dd>${x}</dd>`).join("")}</dl>
-      <div><p class="eyebrow">Vorschau des Antragstellers</p><pre class="code">${esc(((a.preview && a.preview.commands) || []).join("\n") || "–")}</pre></div>`,
+      <div><p class="eyebrow">Vorschau des Antragstellers</p><pre class="code">${apprCmds(a)}</pre></div>`,
       [{ label: "Schließen", onClick: closeModal }]);
   }
 
@@ -121,7 +123,7 @@
     const body = `<p class="note" style="margin:0">Angefordert von <b>${apprWho(a)}</b> (${esc(SVLogic.roleLabel(a.requester_role))}) · ${esc(fmtTime(a.requested_at))}</p>`
       + previewBody(s, r, a.payload)
       + (r.matches ? "" : `<div class="error"><b>Freigeben geht nicht:</b> Der Switch hat sich seit der Anfrage geändert, diese Vorschau weicht von der des Antragstellers ab. Ablehnen oder neu anfordern lassen.</div>`
-        + `<details class="adv"><summary>Vorschau des Antragstellers</summary><pre class="code">${esc(((a.preview && a.preview.commands) || []).join("\n") || "–")}</pre></details>`)
+        + `<details class="adv"><summary>Vorschau des Antragstellers</summary><pre class="code">${apprCmds(a)}</pre></details>`)
       + (r.matches && !approve ? `<p class="note gate">Der Notfall-Login gibt keine Anfrage frei: er ist kein persönliches Konto.</p>` : "")
       + comment;
     const btns = [{ label: "Abbrechen", onClick: closeModal }, reject];

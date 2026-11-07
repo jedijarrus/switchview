@@ -24,6 +24,9 @@ SELF = "Die eigene Anfrage kann niemand selbst freigeben – auch nicht mit der 
 EMERGENCY = "Der Notfall-Login gibt keine Anfrage frei: er ist kein persönliches Konto"
 REVIEW_AGAIN = "Diese Vorschau ist nicht die der Anfrage – bitte die Anfrage neu prüfen"
 STALE_REQUEST = "Der Switch hat sich seit der Anfrage geändert: die Anfrage ist veraltet und muss neu gestellt werden"
+# The reason a request stale for other commands stores, names and hands on (Phase 4b: alerts carry it): api_changes.STALE asks to
+# reload the page, which fits a preview but not a request that has to be asked again
+OTHER_COMMANDS = "Die Befehle von jetzt sind andere als die der Vorschau der Anfrage"
 DECIDED = "Anfrage #{aid} ist schon entschieden"
 
 
@@ -189,9 +192,10 @@ async def approve_approval(aid: int, body: ApproveIn, user=Depends(auth.require(
     403 SELF, Admin too); the emergency login (403 EMERGENCY: a shared account, not a person); the switch disabled (409 DISABLED) or
     outside the approver's zones (403); body.token not the request's preview (409 REVIEW_AGAIN: the approver saw another preview).
     Then the run: a plan that is no longer the preview (api_changes.PreviewOutdated) sends nothing and makes the request stale (409
-    STALE_REQUEST with the reason; audited and announced when this call made it so); a request decided meanwhile (the claim in the
-    change's transaction, approvals.AlreadyDecided) is 409 DECIDED and leaves no change; every other refusal (busy, unreadable, a
-    write way no longer possible) goes through and leaves it open. The comment is trimmed and stored with the approval."""
+    STALE_REQUEST with the reason; audited and announced when this call made it so) - the reason is OTHER_COMMANDS for other commands
+    than the preview's (api_changes.STALE), else the refusal word for word ("Nicht ausführbar: …"); a request decided meanwhile
+    (the claim in the change's transaction, approvals.AlreadyDecided) is 409 DECIDED and leaves no change; every other refusal (busy,
+    unreadable, a write way no longer possible) goes through and leaves it open. The comment is trimmed and stored with the approval."""
     a = await _found(aid)
     if a["status"] != approvals.OPEN:
         raise not_open(a)
@@ -208,10 +212,11 @@ async def approve_approval(aid: int, body: ApproveIn, user=Depends(auth.require(
     try:
         cid = await approvals.KINDS[a["kind"]].run(a, user, comment)
     except api_changes.PreviewOutdated as e:
-        if await approvals.set_status(aid, approvals.STALE, user, reason=e.detail):
-            await audit(user["username"], "approval_stale", _target(a), f"#{aid} {a['summary']}: {e.detail}", role=user["role"])
+        reason = OTHER_COMMANDS if e.detail == api_changes.STALE else e.detail
+        if await approvals.set_status(aid, approvals.STALE, user, reason=reason):
+            await audit(user["username"], "approval_stale", _target(a), f"#{aid} {a['summary']}: {reason}", role=user["role"])
             await _announce("stale", aid)
-        raise HTTPException(409, f"{STALE_REQUEST} ({e.detail})")
+        raise HTTPException(409, f"{STALE_REQUEST} ({reason})")
     except approvals.AlreadyDecided:
         raise HTTPException(409, DECIDED.format(aid=aid))    # the change's INSERT was rolled back with the claim
     await audit(user["username"], "approval_approved", _target(a), f"#{aid} {a['summary']} → Änderung #{cid}" + (f": {comment}" if comment else ""),

@@ -40,6 +40,11 @@ def test_the_denial_names_the_zones():
                                                    "du darfst nur an Switches der Zonen „EK“, „VK“ ändern")
 
 
+@pytest.mark.parametrize("zones, said", [(["EK"], "der Zone „EK“"), (["EK", "VK"], "der Zonen „EK“, „VK“")])
+def test_the_zone_refusal_names_one_zone_in_the_singular(zones, said):                # 4a, Später 4b
+    assert roles.zone_denial("", zones) == f"Keine Berechtigung: Der Switch liegt in der Zone „Ohne Zone“ – du darfst nur an Switches {said} ändern"
+
+
 def test_the_scopes_take_effect_at_once(login_api, monkeypatch):
     monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, entra_role_mapping="on"))
     login_api.cookies.set(auth.COOKIE, asyncio.run(auth.create_session("anna", "Anna", "entra", roles=["SwitchView.Aendern", "Z.EK"])))
@@ -53,7 +58,7 @@ def test_put_replaces_every_entry_and_audits(api):
     r = api.put("/api/zone-scopes", json={"entries": [{"principal": " Z.VK ", "zones": ["VK", ""]}, {"principal": "Z.VK", "zones": ["Lager"]}]})
     assert r.json() == api.get("/api/zone-scopes").json() == {"entries": [{"principal": "Z.VK", "zones": ["", "Lager", "VK"]}]}
     assert dbfix.query("SELECT action, role FROM audit") == [("zone_scopes_update", "admin")] * 2
-    assert dbfix.query("SELECT detail FROM audit ORDER BY id") == [("1 Einträge: Z.EK → EK",), ("1 Einträge: Z.VK → Ohne Zone, Lager, VK",)]
+    assert dbfix.query("SELECT detail FROM audit ORDER BY id") == [("1 Eintrag: Z.EK → EK",), ("1 Eintrag: Z.VK → Ohne Zone, Lager, VK",)]
 
 
 @pytest.mark.parametrize("entries", [[{"principal": " ", "zones": ["EK"]}], [{"principal": "Z", "zones": []}], [{"principal": "Z", "zones": ["x" * 41]}]])

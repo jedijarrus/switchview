@@ -50,7 +50,6 @@ _NONCE = re.compile(r"([0-9]{1,12})\.([0-9a-f]{32})")
 _used_nonces: dict[str, float] = {}         # nonce -> the time from which it may be forgotten (its ts + NONCE_TTL_S)
 # The idle logout (Phase 4a, Sicherheit Phase 2 A3): a session without a request for settings.idle_minutes ends (current_user). Every
 # signed-in request counts as activity; its time (sessions.last_seen) is written at most once per TOUCH_S, not on every request.
-IDLE = "Abgemeldet nach {minutes} Minuten ohne Aktivität – bitte neu anmelden"
 TOUCH_S = 60
 # The routes anyone may call without a session (Phase 4a): the page, its static files and the login steps. Every other route declares
 # its minimum role through require() (tests/test_permissions.py walks the routes against both and against the matrix of the plan).
@@ -258,13 +257,19 @@ async def drop_user_sessions(username: str) -> int:
     return ended
 
 
+def idle_reason(minutes: int) -> str:
+    """The detail of the 401 for a session idle longer than minutes (settings.idle_minutes), one minute in the singular."""
+    said = "1 Minute" if minutes == 1 else f"{minutes} Minuten"
+    return f"Abgemeldet nach {said} ohne Aktivität – bitte neu anmelden"
+
+
 async def current_user(request: Request) -> dict:
     """The signed-in user of request: username, name, method, role (roles.role_of from the roles the session stored at its login,
     against the mapping of now: a changed mapping counts from the restart that reads it, without a new login), subject (the stable
     identity; a session of before the update has none and gets <method>:<username>) and zones (roles.zones_of: for Ändern and
     Freigeben from the stored roles against the zone_scopes of now, read on the same connection, so a new entry counts at once;
     None, no zone scope and no read, for every other role). 401 without a session, for an expired one, and for one idle longer than
-    settings.idle_minutes (then deleted, IDLE; a session that never recorded a request, from before the update, is not idle); 403
+    settings.idle_minutes (then deleted, idle_reason; a session that never recorded a request, from before the update, is not idle); 403
     for a write without the CSRF header. Every request that passes counts as activity: last_seen is written when it is unset or at
     least TOUCH_S old."""
     token = request.cookies.get(COOKIE)
@@ -281,7 +286,7 @@ async def current_user(request: Request) -> dict:
         if settings.idle_minutes and last_seen and last_seen < (now - timedelta(minutes=settings.idle_minutes)).isoformat():
             await conn.execute("DELETE FROM sessions WHERE token = ?", (hashed,))
             await conn.commit()
-            raise HTTPException(401, IDLE.format(minutes=settings.idle_minutes))
+            raise HTTPException(401, idle_reason(settings.idle_minutes))
         if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("X-Requested-With") != "SwitchView":
             raise HTTPException(403, "Ungültige Anfrage")
         if not last_seen or last_seen <= (now - timedelta(seconds=TOUCH_S)).isoformat():

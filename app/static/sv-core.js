@@ -140,12 +140,13 @@
   // Expert mode (uplinks, trunks): Freigeben, or with the four-eyes principle on a request for someone else to approve
   const expertOk = () => roleOk("freigeben") || !!(ME && ME.four_eyes);
   // Why the user may not change switch s, as one sentence ("" when they may): the role first, then the zone (roles.zone_denial's rule:
-  // the empty zone is "Ohne Zone", in the list too)
+  // the empty zone is "Ohne Zone", in the list too; "der Zone" for one allowed zone, else "der Zonen")
   function rightsWhy(s) {
     if (roleOk("aendern") && inZone(s)) return "";
     if (!roleOk("aendern")) return `Deine Rolle „${SVLogic.roleLabel(ME && ME.role)}“ kann hier nur ansehen. Ändern braucht die Rolle „Ändern“.`;
     const named = z => z || "Ohne Zone", zone = z => `„${named(z)}“`;
-    return `Dieser Switch liegt in der Zone ${zone(s && s.zone)}. Du darfst nur an Switches der Zonen ${ME.zones.map(zone).join(", ")} ändern.`;
+    const allowed = (ME.zones.length === 1 ? "der Zone " : "der Zonen ") + ME.zones.map(zone).join(", ");
+    return `Dieser Switch liegt in der Zone ${zone(s && s.zone)}. Du darfst nur an Switches ${allowed} ändern.`;
   }
 
   /* ── Daten ── */
