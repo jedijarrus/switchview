@@ -18,8 +18,8 @@
     `Treiber <span class="mono">${esc(s.driver || "procurve")}</span>`, `Stand ${esc(fmtTime(s.lastPoll))}`].filter(Boolean).join(" · ");
   // The banners above a switch's facts: the last poll failed or went through with gaps (poller.partial_note keeps its note in error),
   // the credential warnings, and how SwitchView writes here.
-  // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
-  // geht (Sicherung, Konfiguration lesen, RADIUS), zeigt die Ansicht nur bei einem Treiber, der es kann.
+  // Ways to write: the SSH CLI only with a driver that has cli and an SSH login, else SNMP (when SNMP writing is on). What only the CLI
+  // can do (backup, reading the configuration, RADIUS) the view shows only for a driver that can.
   function switchBanners(s) {
     const cli = has(s, "cli"), canW = writable(s);
     const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${EDIT_ACCESS}</div>`
@@ -301,10 +301,10 @@
     catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
     if (!modalShown(wait)) return;
     const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp";
-    // Per SNMP gibt es kein Staging und kein Backup: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das
-    // selbst tut (autosave der /plan-Antwort = snmp_autosave, R26), und der speichert dabei die gesamte laufende Konfiguration (welche
-    // SSH-Änderungen das mitspeichert, sagt eine Warnung des Servers); sonst bleibt das Speichern am Switch. Geht der SET fälschbar
-    // hinaus (insecure_write der /plan-Antwort), sagt es die Vorschau laut. Beides ist der Stand des Servers zur Planzeit.
+    // Over SNMP there is no staging and no backup: the SET takes effect at once. It is saved for good only with a driver that does
+    // that itself (autosave of the /plan answer = snmp_autosave, R26), and that one saves the whole running configuration with it
+    // (which SSH changes it saves along, a warning of the server says); otherwise saving stays with the switch. When the SET goes out
+    // spoofable (insecure_write of the /plan answer), the preview says so loudly. Both are the server's state at planning time.
     const way = !can || !snmp ? "" : (r.autosave
       ? `<div class="banner"><span><b>Wird per SNMP sofort angewendet und automatisch gespeichert – der Switch speichert dabei die gesamte laufende Konfiguration.</b> Kein gestuftes write memory, kein Backup über diesen Weg.</span></div>`
       : `<div class="banner warn"><span><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b> Kein Backup über diesen Weg.</span></div>`)

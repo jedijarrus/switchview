@@ -94,8 +94,8 @@
     if (!s.snmp_rw_insecure) return null;
     return (s.snmp_write_via === "rw" ? !!s.snmp_rw_user : s.snmp_version === "3") ? "v3" : "v2c";
   }
-  // Laut, wenn SNMP-SETs an diesen Switch fälschbar hinausgehen, nach ihrer Art kind ("v2c", "v3"; leer: sicher). Für das Formular,
-  // den Dialog nach dem Speichern (insecureKind der Zeile) und die SNMP-Vorschau (insecure_write der /plan-Antwort).
+  // Loud when SNMP SETs to this switch go out spoofable, by their kind ("v2c", "v3"; empty: secure). For the form, the dialog after
+  // saving (insecureKind of the row) and the SNMP preview (insecure_write of the /plan answer).
   function insecureBanner(kind) {
     if (!kind) return "";
     return `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${kind === "v3" ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>`;
@@ -109,9 +109,9 @@
     return `<p class="note" style="margin:0">Zurzeit: <span class="pill ${s.snmp_rw_insecure ? "crit" : "ok"}">${rw ? "schreibt mit eigenem Schreib-Zugang" : "schreibt mit Lese-Zugang"}</span> ${who}${rw ? "" : ", braucht dafür am Switch Schreibrechte"}</p>`
       + insecureBanner(insecureKind(s));
   }
-  // Nach dem Speichern: schreibt SNMP an diesem Switch fälschbar oder gar nicht, bleibt nach einer schreibrelevanten Änderung dieser
-  // Dialog stehen (SVLogic.writeAlertMode "dialog"), sonst sagt es ein Hinweis von 8 s (writeHint, "hint"). Die Quelle ist allein der
-  // Server (GET /api/switches, poller.write_identity).
+  // After saving: when SNMP writes to this switch spoofably or not at all, this dialog stays open after a write-relevant change
+  // (SVLogic.writeAlertMode "dialog"), else a hint of 8 s says it (writeHint, "hint"). The server alone is the source (GET
+  // /api/switches, poller.write_identity).
   const writeHint = row => row.snmp_write_via ? "Gespeichert. Hinweis: SNMP schreibt an diesem Switch unsicher – siehe „Zugang bearbeiten“."
     : "Gespeichert. Hinweis: SNMP-Schreiben geht an diesem Switch so nicht – siehe „Zugang bearbeiten“.";
   function writeAlert(row) {
@@ -224,8 +224,8 @@
       try {
         let id = s.id, cleared = [];
         if (isNew) id = (await api("POST", "/api/switches", payload)).id; else cleared = (await api("PUT", `/api/switches/${s.id}`, payload)).cleared;
-        // Wie SNMP jetzt schreibt, rechnet der Server (write_identity); fälschbar oder ohne Schreib-Zugang: nach einer schreibrelevanten
-        // Änderung ein Dialog, der stehen bleibt, sonst ein Hinweis statt der kurzen Meldung (R44)
+        // How SNMP writes now is the server's to say (write_identity); spoofable or without write access: after a write-relevant
+        // change a dialog that stays open, else a hint instead of the short message (R44)
         const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === id), () => null);
         const mode = SVLogic.writeAlertMode(isNew ? null : s, payload, row);
         closeModal();
