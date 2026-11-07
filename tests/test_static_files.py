@@ -85,3 +85,11 @@ def test_the_active_search_hit_is_marked_beyond_its_background():
     sel = r'\.results \[role="option"\]\[aria-selected="true"\]'
     assert "box-shadow: inset 2px 0 0 var(--accent)" in re.search(sel + r" \{([^}]*)\}", CSS).group(1)
     assert re.search(r"@media \(forced-colors: active\) \{\s*" + sel + r" \{[^}]*outline: 2px solid Highlight", CSS)
+
+
+def test_the_toast_stack_may_take_the_width_of_a_narrow_screen():
+    """Phase 5 final review: .toasts sits at left 50% (translateX(-50%) centres it), so its shrink-to-fit width stopped at half the
+    viewport, and an 8 s hint wrapped into a column of about 195 px at 390 px; max-content up to the screen less 32 px lets the
+    toast's own max-width decide."""
+    rule = re.search(r"^\.toasts \{([^}]*)\}", CSS, re.M).group(1)
+    assert "width: max-content;" in rule and "max-width: calc(100vw - 32px);" in rule
