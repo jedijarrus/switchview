@@ -68,11 +68,17 @@ def _host_ok(host: str) -> bool:
         return bool(HOST_LABELS.fullmatch(host))
 
 
+def _german_list(items: list[str]) -> str:
+    """items as German lists them: "a", "a und b", "a, b und c"."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} und {items[-1]}"
+
+
 def _checked(body: AlertSettingsIn, old: dict) -> dict:
     """The values PUT stores, trimmed, after the checks (422 with the German text, nothing stored): a mail server set that is no IP
     address and no host name; a sender or recipient that is no address (blank recipients are dropped); a login without TLS; mail on
-    without a server, a sender or a recipient; a new webhook URL that is not http(s)://; the webhook on without a URL stored or new;
-    an event that is not one of alerts.EVENTS. The events are stored in the order of EVENTS, each once."""
+    without a server, a sender, a recipient or, with a user, a password stored or new (each missing one named, the last after
+    „und“); a new webhook URL that is not http(s)://; the webhook on without a URL stored or new; an event that is not one of
+    alerts.EVENTS. The events are stored in the order of EVENTS, each once."""
     host, user, sender = body.smtp_host.strip(), body.smtp_user.strip(), body.mail_from.strip()
     recipients = [a.strip() for a in body.mail_to if a.strip()]
     url = None if body.webhook_url is None else body.webhook_url.strip()
@@ -83,10 +89,11 @@ def _checked(body: AlertSettingsIn, old: dict) -> dict:
             raise HTTPException(422, BAD_ADDRESS.format(address))
     if body.smtp_security == "none" and user:
         raise HTTPException(422, NO_LOGIN_IN_CLEAR)
-    missing = [what for what, have in (("den Mailserver", host), ("einen Absender", sender), ("mindestens einen Empfänger", recipients))
-               if not have]
+    password = body.smtp_pass if body.smtp_pass is not None else old["smtp_pass"]
+    missing = [what for what, have in (("den Mailserver", host), ("einen Absender", sender), ("mindestens einen Empfänger", recipients),
+                                       ("ein Kennwort", password or not user)) if not have]
     if body.mail_on and missing:
-        raise HTTPException(422, MAIL_NEEDS.format(", ".join(missing)))
+        raise HTTPException(422, MAIL_NEEDS.format(_german_list(missing)))
     if url and not WEBHOOK_URL.fullmatch(url):
         raise HTTPException(422, BAD_WEBHOOK)
     if body.hook_on and not (url if url is not None else old["webhook_url"]):

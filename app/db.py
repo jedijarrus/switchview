@@ -222,6 +222,8 @@ CREATE TABLE IF NOT EXISTS alert_outbox (
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON alert_outbox(status, next_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(channel, dedup_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_created ON alert_outbox(created_at);
+-- A page of one status, newest first (GET /api/alerts/deliveries?status=...): without it, every row of that status is sorted per page
+CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status, id);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

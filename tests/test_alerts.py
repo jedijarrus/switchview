@@ -9,11 +9,15 @@ No network: smtplib.SMTP and smtplib.SMTP_SSL are replaced by FakeSMTP, alerts.h
 (apifix.fresh_db).
 """
 import asyncio
+import contextlib
 import json
+import logging
+import re
 import secrets
 import smtplib
 import socket
 import ssl
+import threading
 import types
 from datetime import datetime, timezone
 
@@ -73,12 +77,13 @@ def setting(key: str, value: str) -> None:
 class FakeSMTP:
     """smtplib.SMTP and smtplib.SMTP_SSL as alerts uses them: every step of every connection in calls - ("connect", host, port,
     timeout), ("starttls",), ("login", user, password), ("send", Subject, From, To), ("quit",) - the class of each connection in
-    classes, the TLS context of the connection or its STARTTLS in contexts, the messages in sent; raises[step] is raised at that step
-    (after it is recorded)."""
+    classes, the thread each connection was opened in in threads, the TLS context of the connection or its STARTTLS in contexts, the
+    messages in sent; raises[step] is raised at that step (after it is recorded)."""
 
     def __init__(self):
         self.calls: list[tuple] = []
         self.classes: list[str] = []
+        self.threads: list[int] = []
         self.contexts: list[ssl.SSLContext | None] = []
         self.sent: list = []
         self.raises: dict[str, BaseException] = {}
@@ -94,6 +99,7 @@ class FakeSMTP:
         class Connection:
             def __init__(self, host, port, timeout=None, context=None):
                 fake.classes.append(cls)
+                fake.threads.append(threading.get_ident())
                 if cls == "SMTP_SSL":
                     fake.contexts.append(context)
                 fake.step("connect", host, port, timeout)
@@ -190,7 +196,8 @@ def test_a_secret_put_as_none_stays_and_as_empty_is_deleted(api):
     api.put("/api/settings/alerts", json={**MAIL, "webhook_url": HOOK_URL})
     api.put("/api/settings/alerts", json=MAIL | {"smtp_pass": None})
     assert api.get("/api/settings/alerts").json()["smtp_pass_set"] and api.get("/api/settings/alerts").json()["webhook_url_set"]
-    assert api.put("/api/settings/alerts", json=MAIL | {"smtp_pass": "", "webhook_url": ""}).json()["cleared"] == []
+    # without the user: mail that is on needs a password only for a login
+    assert api.put("/api/settings/alerts", json=MAIL | {"smtp_user": "", "smtp_pass": "", "webhook_url": ""}).json()["cleared"] == []
     got = api.get("/api/settings/alerts").json()
     assert not got["smtp_pass_set"] and not got["webhook_url_set"] and got["webhook_target"] == ""
     assert dbfix.query("SELECT detail FROM audit ORDER BY id DESC LIMIT 1") == [
@@ -213,7 +220,7 @@ def test_a_new_mail_server_keeps_a_password_the_put_brings(api):
 @pytest.mark.parametrize("change, detail", [
     ({"smtp_host": "a b"}, "Mailserver: Name oder IP-Adresse ungültig"), ({"mail_to": ["kein-at"]}, "Mail-Adresse ungültig: kein-at"),
     ({"smtp_security": "none"}, "Ohne TLS meldet sich SwitchView nicht am Mailserver an: das Kennwort ginge im Klartext übers Netz"),
-    ({"smtp_host": "", "mail_to": []}, "Mail einschalten braucht den Mailserver, mindestens einen Empfänger"),
+    ({"smtp_host": "", "mail_to": []}, "Mail einschalten braucht den Mailserver und mindestens einen Empfänger"),
     ({"hook_on": True, "webhook_url": "ftp://x"}, "Webhook-Adresse muss mit http:// oder https:// beginnen"),
     ({"hook_on": True}, "Webhook einschalten braucht eine Webhook-Adresse"), ({"mail_events": ["x"]}, "Unbekanntes Ereignis: x")])
 def test_bad_settings_are_named_in_german(api, change, detail):
@@ -224,7 +231,10 @@ def test_bad_settings_are_named_in_german(api, change, detail):
 @pytest.mark.parametrize("change, detail", [
     ({"mail_from": "a@b"}, "Mail-Adresse ungültig: a@b"), ({"mail_to": ["Netz <netz@example.org>"]}, "Mail-Adresse ungültig: Netz <netz@example.org>"),
     ({"smtp_host": "mail.example.org:25"}, "Mailserver: Name oder IP-Adresse ungültig"),
-    ({"mail_from": "", "smtp_host": ""}, "Mail einschalten braucht den Mailserver, einen Absender"),
+    ({"mail_from": "", "smtp_host": ""}, "Mail einschalten braucht den Mailserver und einen Absender"),
+    ({"smtp_pass": None}, "Mail einschalten braucht ein Kennwort"), ({"smtp_pass": ""}, "Mail einschalten braucht ein Kennwort"),
+    ({"smtp_host": "", "mail_from": "", "mail_to": [], "smtp_pass": None},
+     "Mail einschalten braucht den Mailserver, einen Absender, mindestens einen Empfänger und ein Kennwort"),
     ({"hook_on": True, "webhook_url": ""}, "Webhook einschalten braucht eine Webhook-Adresse"),
     ({"hook_events": ["drift", "cap"]}, "Unbekanntes Ereignis: cap")])
 def test_more_bad_settings_are_named_and_nothing_is_stored(api, change, detail):
@@ -236,6 +246,15 @@ def test_more_bad_settings_are_named_and_nothing_is_stored(api, change, detail):
 @pytest.mark.parametrize("host", ["10.0.0.25", "2001:db8::25", "smtp-relay", "Mail.Example.org"])
 def test_an_ip_address_or_a_hostname_is_a_mail_server(api, host):
     assert api.put("/api/settings/alerts", json={**MAIL, "smtp_host": host}).status_code == 200
+
+
+def test_mail_with_a_user_takes_the_stored_password_or_a_new_one(api):
+    assert api.put("/api/settings/alerts", json=MAIL).status_code == 200
+    assert api.put("/api/settings/alerts", json={**MAIL, "smtp_pass": None}).status_code == 200
+    r = api.put("/api/settings/alerts", json={**MAIL, "smtp_pass": ""})
+    assert (r.status_code, r.json()["detail"]) == (422, "Mail einschalten braucht ein Kennwort")
+    assert api.put("/api/settings/alerts", json={**MAIL, "mail_on": False, "smtp_pass": ""}).status_code == 200    # off it may wait for one
+    assert not api.get("/api/settings/alerts").json()["smtp_pass_set"]
 
 
 def test_without_tls_a_relay_without_login_is_fine(api):
@@ -344,6 +363,38 @@ async def test_the_summary_says_until_when_and_each_channel_counts_on_its_own(da
         ("mail", 1), ("webhook", 1)]
 
 
+async def test_the_summary_s_time_holds_the_channel_sends_again_after_it(database, monkeypatch):   # Review Focus 4
+    await configure(mail=True)
+    clock = [datetime(2026, 11, 7, 9, 15, tzinfo=timezone.utc)]
+    monkeypatch.setattr(alerts, "_now", lambda: clock[0])
+    await alerts.emit("drift", "T", "x", key="first")
+    clock[0] = FROZEN
+    for i in range(alerts.CAP_PER_HOUR):
+        await alerts.emit("reachability", "T", "x", key=str(i))
+    [(text,)] = dbfix.query("SELECT text FROM alert_outbox WHERE event = 'cap'")
+    assert "Bis 10:15 UTC sendet SwitchView hier keine weiteren" in text
+    clock[0] = datetime(2026, 11, 7, 10, 14, 59, tzinfo=timezone.utc)
+    assert await alerts.emit("reachability", "T", "x", key="before") == 0
+    # the summary is no message of the count: once the 09:15 one leaves the hour, the channel has room again
+    clock[0] = datetime(2026, 11, 7, 10, 15, 1, tzinfo=timezone.utc)
+    assert await alerts.emit("reachability", "T", "x", key="after") == 1
+    assert await alerts.emit("reachability", "T", "x", key="full again") == 0      # 30 in the hour, its summary still stands
+    assert outbox("dedup_key, status")[-3:] == [("reachability:before", "suppressed"), ("reachability:after", "queued"),
+                                                ("reachability:full again", "suppressed")]
+    assert dbfix.query("SELECT count(*) FROM alert_outbox WHERE event = 'cap'") == [(1,)]
+
+
+async def test_suppressed_rows_take_no_place_in_the_hour(database, monkeypatch):
+    # a storm that goes on stores suppressed rows all the time: counted, they would keep the channel silent for as long as it lasts
+    await configure(mail=True)
+    monkeypatch.setattr(alerts, "_now", lambda: FROZEN)
+    for i in range(alerts.CAP_PER_HOUR + 5):
+        dbfix.query("INSERT INTO alert_outbox(created_at, channel, event, dedup_key, title, text, status) "
+                    "VALUES ('2026-11-07 09:59:00', 'mail', 'drift', ?, 'T', 'x', 'suppressed')", (f"drift:{i}",))
+    assert await alerts.emit("drift", "T", "x", key="new") == 1
+    assert dbfix.query("SELECT status FROM alert_outbox WHERE dedup_key = 'drift:new'") == [("queued",)]
+
+
 async def test_concurrent_emits_never_pass_the_cap(database):
     await configure(mail=True)
     await asyncio.gather(*(alerts.emit("reachability", "T", "x", key=str(i)) for i in range(alerts.CAP_PER_HOUR + 10)))
@@ -373,6 +424,10 @@ async def test_a_mail_goes_out_with_starttls_login_and_a_timeout(database, monke
                               ("send", "[SwitchView] SW-A antwortet nicht", "switchview@example.org", "netz@example.org")]
     assert dbfix.query("SELECT status, attempts FROM alert_outbox") == [("sent", 0)]
     assert smtp.calls[4:] == [("quit",)] and dbfix.query("SELECT sent_at IS NOT NULL FROM alert_outbox") == [(1,)]
+    # Review Focus 4: smtplib blocks, so the mail goes out in a thread of its own - never on the loop that polls and serves
+    assert len(smtp.threads) == 1 and smtp.threads[0] != threading.get_ident()
+    [msg] = smtp.sent
+    assert msg["Date"] and re.fullmatch(r"<[^@<>\s]+@example\.org>", msg["Message-ID"])
 
 
 async def test_a_mail_reads_text_facts_and_the_event(database, monkeypatch):
@@ -549,6 +604,27 @@ async def test_no_secret_reaches_an_error_text(api, monkeypatch):               
     assert "mail-s3cret" not in shown and "hook-s3cret-token" not in shown and "prod.example.org" not in shown
 
 
+async def test_no_log_line_names_the_webhook_address(database, monkeypatch, caplog):   # Review Focus 4
+    # The real httpx client over httpx.MockTransport, not apifix.fake_httpx: httpx itself logs each answered request at INFO with
+    # its whole URL ("HTTP Request: POST https://…?sig=…"), and main sets the root logger to INFO (the container's log)
+    answers = iter([202, 500, 202])
+    seen = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(next(answers))
+
+    monkeypatch.setattr(alerts, "httpx", types.SimpleNamespace(
+        AsyncClient=lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(server), **kwargs)))
+    caplog.set_level(logging.INFO)
+    await configure(hook=True)
+    await alerts.emit("drift", "T", "x", key="a")
+    await alerts.emit("drift", "T", "x", key="b")
+    assert await alerts.deliver_due() == 2 and await alerts.send_test("webhook") == {"ok": True, "error": None}
+    assert seen == [HOOK_URL] * 3 and outbox("status, error") == [("sent", None), ("queued", "HTTP 500")]
+    assert "hook-s3cret-token" not in caplog.text and "prod.example.org" not in caplog.text
+
+
 @pytest.mark.parametrize("exc, text", [
     (TimeoutError(), "Zeitüberschreitung nach 10 s"), (httpx.ConnectTimeout("x"), "Zeitüberschreitung nach 10 s"),
     (alerts.HookStatus(404), "HTTP 404"), (httpx.RemoteProtocolError(HOOK_URL), "Verbindung fehlgeschlagen (RemoteProtocolError)"),
@@ -618,6 +694,14 @@ async def test_a_channel_switched_off_since_fails_its_queued_rows(database, monk
 def test_a_subject_with_a_line_break_is_one_line():                                        # Review Focus 5
     msg = alerts.mail_message(CFG_MAIL, item(title="Port 5\r\nBcc: x@evil.example"), None)
     assert msg["Subject"] == "[SwitchView] Port 5  Bcc: x@evil.example" and msg["Bcc"] is None
+
+
+def test_a_mail_has_its_date_and_a_message_id_of_the_sender_s_domain(monkeypatch):
+    # RFC 5322 requires Date; spam filters score a mail without Date or Message-ID, and a relay adds them only for local clients
+    monkeypatch.setattr(alerts, "_now", lambda: FROZEN)
+    first, second = (alerts.mail_message(CFG_MAIL, item(), None) for _ in range(2))
+    assert first["Date"] == "Sat, 07 Nov 2026 10:00:00 +0000"
+    assert re.fullmatch(r"<[^@<>\s]+@example\.org>", first["Message-ID"]) and first["Message-ID"] != second["Message-ID"]
 
 
 def test_a_mail_goes_to_every_recipient_and_names_its_link():
@@ -757,6 +841,32 @@ def test_the_deliveries_page_newest_first_by_a_cursor(api):
     second = api.get(f"/api/alerts/deliveries?limit=2&cursor={first['next']}").json()
     third = api.get(f"/api/alerts/deliveries?limit=2&cursor={second['next']}").json()
     assert [[r["id"] for r in p["rows"]] for p in (first, second, third)] == [[5, 4], [3, 2], [1]] and third["next"] is None
+
+
+@pytest.mark.parametrize("cursor", [None, 7])
+async def test_a_page_of_one_status_walks_its_index_and_sorts_nothing(database, monkeypatch, cursor):
+    # At HISTORY_DAYS some 268 000 sent rows stand (31 an hour, two channels, 180 days): sorting every row of a status for one
+    # page took about 160 ms, idx_outbox_status (status, id) gives the page in the order it is asked for
+    ran = []
+    real = alerts.db
+
+    @contextlib.asynccontextmanager
+    async def recording():
+        async with real() as conn:
+            execute = conn.execute
+
+            def logged(sql, args=()):
+                ran.append((sql, tuple(args)))
+                return execute(sql, args)
+
+            conn.execute = logged
+            yield conn
+
+    monkeypatch.setattr(alerts, "db", recording)
+    await alerts.deliveries(status="sent", cursor=cursor)
+    [(sql, args)] = ran
+    plan = [row[3] for row in dbfix.query("EXPLAIN QUERY PLAN " + sql, args)]
+    assert len(plan) == 1 and re.search(r" USING (COVERING )?INDEX idx_outbox_status\b", plan[0]), plan
 
 
 @pytest.mark.parametrize("query", ["status=offen", "limit=0", "limit=101", "cursor=0"])

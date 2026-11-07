@@ -12,13 +12,16 @@ then fails its rows at once. Rows survive a restart; delivered, failed and suppr
 (history.RETAINED).
 
 What never goes out: the SMTP password and the webhook URL (the URL of a Teams workflow is its key). Both are stored encrypted
-(crypto), served only as *_set and, of the URL, its scheme and host (public_view), never written to the audit or a log. An error
-text is made from a status or a type (error_text), never from str() of an httpx error (it names the URL), and goes through the mask
-with both secrets. A title is one line (no header injection into the mail's Subject); a Teams card escapes Markdown, so text from
-the network (a port description "[x](https://...)") never becomes a link.
+(crypto), served only as *_set and, of the URL, its scheme and host (public_view), never written to the audit or a log: httpx logs
+every answered request with its whole URL at INFO, so its logger "httpx" is set to WARNING when this module loads (main sets the
+root logger to INFO, and the container log shows it). An error text is made from a status or a type (error_text), never from str()
+of an httpx error (it names the URL), and goes through the mask with both secrets. A title is one line (no header injection into
+the mail's Subject); a Teams card escapes Markdown, so text from the network (a port description "[x](https://...)") never becomes
+a link.
 """
 import asyncio
 import email.message
+import email.utils
 import json
 import logging
 import re
@@ -36,6 +39,9 @@ from config import settings
 from db import audit, db, load_settings
 
 log = logging.getLogger("switchview.alerts")
+# httpx logs each answered request at INFO as 'HTTP Request: POST <the whole URL> "HTTP/1.1 202 Accepted"', and the URL of a Teams
+# workflow is its key: the request log stays off for every httpx client of the process (pf and names lose their request lines too)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 CHANNELS = ("mail", "webhook")
 # The events a channel can want, with the German label of the settings, the deliveries and the mail's last line
@@ -55,7 +61,7 @@ DEDUP_MINUTES = 60
 CAP_PER_HOUR = 30
 MAX_ATTEMPTS = 5
 BACKOFF_S = (60, 120, 240, 480)    # the wait after failed attempt 1-4
-TIMEOUT_S = 10                     # a webhook attempt as a whole; a mail attempt per step (connecting, each answer)
+TIMEOUT_S = 10                     # a webhook attempt as a whole; a mail attempt per read of its socket (connecting, each recv)
 BATCH = 20                         # rows per run of deliver_due
 TITLE_MAX = 200
 TEXT_MAX = 2000
@@ -195,11 +201,12 @@ async def emit(event: str, title: str, text: str, *, switch_id: int | None = Non
     """Queues the message for each channel that is on and wants event (CAP_EVENT: every channel that is on) and returns how many rows
     it queued; never sends, never raises (a failure is logged, „Benachrichtigung <event>“, and counts 0). Per channel: a row of the
     last DEDUP_MINUTES with the dedup_key f"{event}:{key}" and a status other than suppressed takes the repeat (repeats + 1), nothing
-    new; else, under CAP_PER_HOUR rows of the channel in the last hour (suppressed ones not counted), a queued row due now; else a
-    suppressed row and, without a CAP_EVENT row of the channel in that hour, the summary queued (until when: the oldest row counted
-    plus an hour). title is one line of at most TITLE_MAX characters, text at most TEXT_MAX; facts are shown as "key: value" (a key
-    starting with "_" steers instead: "_view" picks the link). The checks and the writes are one write transaction (BEGIN IMMEDIATE,
-    as changes.create_change): the polls of poll_all that report at once never count past the same cap."""
+    new; else, under CAP_PER_HOUR rows of the channel in the last hour (neither suppressed ones nor the summary counted: a sliding
+    hour sends at most CAP_PER_HOUR and the summary), a queued row due now; else a suppressed row and, without a CAP_EVENT row of the
+    channel in that hour, the summary queued (until when: the oldest row counted plus an hour, when the hour has room again). title
+    is one line of at most TITLE_MAX characters, text at most TEXT_MAX; facts are shown as "key: value" (a key starting with "_"
+    steers instead: "_view" picks the link). The checks and the writes are one write transaction (BEGIN IMMEDIATE, as
+    changes.create_change): the polls of poll_all that report at once never count past the same cap."""
     try:
         cfg = config_of(await load_settings(SETTINGS_KEYS))
         channels = [c for c in CHANNELS if cfg[c]["on"] and (event == CAP_EVENT or event in cfg[c]["events"])]
@@ -220,8 +227,9 @@ async def emit(event: str, title: str, text: str, *, switch_id: int | None = Non
                                          "LIMIT 1)", (channel, row["dedup_key"], window))
                 if cur.rowcount:
                     continue
+                # The summary is no message of the count: counted, it would hold the hour full past the time it names
                 async with conn.execute("SELECT count(*), min(created_at) FROM alert_outbox WHERE channel = ? AND created_at >= ? AND "
-                                        "status <> 'suppressed'", (channel, hour_ago)) as cur:
+                                        "status <> 'suppressed' AND event <> ?", (channel, hour_ago, CAP_EVENT)) as cur:
                     count, oldest = await cur.fetchone()
                 if count < CAP_PER_HOUR:
                     await _insert(conn, {**row, "channel": channel, "status": "queued", "next_at": at})
@@ -265,12 +273,16 @@ def link_for(switch_id: int | None, view: str | None = None) -> str | None:
 
 
 def mail_message(cfg: dict, item: dict, link: str | None) -> email.message.EmailMessage:
-    """The mail of a row for the mail channel cfg: Subject "[SwitchView] <title>" on one line, From the sender, To the recipients;
-    the text, the facts as "key: value", the link (if any) and the event, each block after an empty line."""
+    """The mail of a row for the mail channel cfg: Subject "[SwitchView] <title>" on one line, From the sender, To the recipients,
+    Date now and a Message-ID of the sender's domain (RFC 5322 requires Date; neither EmailMessage nor send_message adds them, a relay
+    only for its local clients, and spam filters score a mail without them; the domain given, make_msgid asks no DNS); the text, the
+    facts as "key: value", the link (if any) and the event, each block after an empty line."""
     msg = email.message.EmailMessage()
     msg["Subject"] = f"[SwitchView] {one_line(item['title'])}"
     msg["From"] = cfg["sender"]
     msg["To"] = ", ".join(cfg["recipients"])
+    msg["Date"] = email.utils.format_datetime(_now())
+    msg["Message-ID"] = email.utils.make_msgid(domain=cfg["sender"].rpartition("@")[2] or "switchview.invalid")
     blocks = [item["text"], "\n".join(f"{k}: {v}" for k, v in _facts(item).items())]
     if link:
         blocks.append(f"In SwitchView öffnen: {link}")
@@ -331,8 +343,10 @@ def error_text(e: BaseException, secrets: list[str]) -> str:
 
 def _send_mail(cfg: dict, msg: email.message.EmailMessage) -> None:
     """One mail over SMTP (in a thread: smtplib blocks): SMTP_SSL for "tls", else SMTP and, for "starttls", STARTTLS; the login only
-    with a user. timeout=TIMEOUT_S counts per step (connecting, each answer of the server), and a thread cannot be cancelled: an
-    attempt has at most six steps. Without the certificate check the context verifies nothing (an internal relay)."""
+    with a user. timeout=TIMEOUT_S is the socket's: it bounds connecting and each single read, not an answer or the attempt, and a
+    thread cannot be cancelled. A server that answers each step just within it holds an attempt about a minute (six steps); one that
+    trickles a byte at a time within it holds it, and the run of deliver_due with it, for as long as it trickles (Bekannte Grenzen).
+    Without the certificate check the context verifies nothing (an internal relay)."""
     context = ssl.create_default_context()
     if not cfg["verify_tls"]:
         context.check_hostname = False
@@ -385,7 +399,7 @@ async def deliver_due() -> int:
     failure adds one to attempts (the failed attempts) with its error_text, and waits BACKOFF_S[attempts - 1] under MAX_ATTEMPTS,
     else it is failed and audited (alert_failed, „#<id> <title>: <error>“). A row of a channel that is off or incomplete by now is
     failed at once (NOT_SET_UP), audited the same way, without an attempt. Each row is checked anew right before its attempt, with
-    the settings of that moment: a run takes up to BATCH attempts of up to a minute each, and a row dropped meanwhile (the channel
+    the settings of that moment: a run takes up to BATCH attempts of a minute or more each, and a row dropped meanwhile (the channel
     switched off) or a destination changed meanwhile counts from the next row on. Returns the number of attempts."""
     async with db() as conn:
         async with conn.execute("SELECT * FROM alert_outbox WHERE status = 'queued' AND next_at <= ? ORDER BY id LIMIT ?",
