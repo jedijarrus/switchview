@@ -158,11 +158,13 @@ def test_the_roles_note_repeats_the_permission_matrix():
 
 def test_the_readme_describes_roles_and_approvals():
     """Phase 4a wrap-up: the security section has a paragraph on the roles and approvals - four roles, the matrix in the note, zones,
-    four eyes off by default, the nonce, the idle logout - and the login list names zones and four eyes."""
+    four eyes off by default (with them on, Ändern may request an expert-mode change too), the nonce, the idle logout - and the
+    login list names zones and four eyes."""
     security = README.split("\n## Security\n", 1)[1].split("\n## ", 1)[0]
     login = README.split("\n**Login**\n", 1)[1].split("\n## ", 1)[0]
     assert "**Roles and approvals.**" in security
-    for text in ("Lesen", "Admin", "docs/rollen-phase4a.md", "zone", "four-eyes", "off by default", "nonce", "IDLE_MINUTES"):
+    for text in ("Lesen", "Admin", "docs/rollen-phase4a.md", "zone", "four-eyes", "off by default", "nonce", "IDLE_MINUTES",
+                 "Ändern may request an expert-mode change"):
         assert text in security.split("**Roles and approvals.**", 1)[1].split("\n\n", 1)[0], text
     for text in ("zone", "four-eyes"):
         assert text in login, text

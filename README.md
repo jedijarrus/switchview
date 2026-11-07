@@ -183,8 +183,8 @@ the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md),
 roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO user is Admin, as before; the emergency login
 is Admin always). An Admin can limit Ändern and Freigeben to the switches of some zones, by app role (Settings → "Zonen", read on
 every request). The four-eyes principle for expert-mode changes is off by default (Settings → "Vier-Augen-Prinzip", Admin): with
-it on, an expert-mode change is requested, and a second person with Freigeben or Admin approves exactly the preview the requester
-saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
+it on, an expert-mode change is requested instead of run (so Ändern may request an expert-mode change too), and a second person
+with Freigeben or Admin approves exactly the preview the requester saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
 cannot run until it is switched off again. The Entra login carries a single-use nonce bound to a cookie of the browser (a captured
 ID token cannot be replayed from another browser), and a session without a request for `IDLE_MINUTES` minutes ends. The audit
 log records the role of every entry.
