@@ -305,7 +305,7 @@ def test_cisco_routes_snmp(api, fake):
     assert r.json() == {"kind": "ports", "summary": "Port Gi1/0/2: VLAN 10", "mechanism": "snmp",
                         "commands": ["Port Gi1/0/2: Access-VLAN 1 → 10"], "warnings": [], "blocked": [],
                         "before": {"Gi1/0/2": {"u": "1"}}, "desired": {"Gi1/0/2": {"u": "10"}},
-                        "token": token(["Port Gi1/0/2: Access-VLAN 1 → 10"])}
+                        "token": token(["Port Gi1/0/2: Access-VLAN 1 → 10"]), "autosave": False, "insecure_write": "v2c"}
     assert fake.calls == [("snmp", "cisco", True), ("plan", "snmp")]
 
 
@@ -316,7 +316,7 @@ def test_procurve_prefers_ssh(api, fake):
     assert r.status_code == 200, r.text
     assert r.json() == {"kind": "ports", "summary": "Port 2: VLAN 20", "mechanism": "ssh", "commands": ["vlan 20 untagged 2"],
                         "warnings": [], "blocked": [], "before": {"2": {"u": "99"}}, "desired": {"2": {"u": "20"}},
-                        "token": token(["vlan 20 untagged 2"])}
+                        "token": token(["vlan 20 untagged 2"]), "autosave": True, "insecure_write": None}
     assert fake.calls == [("ssh", sid), ("plan", "ssh")]
 
 
@@ -980,7 +980,7 @@ def test_save_of_an_ssh_change_is_unchanged(api, fake, tmp_path):
     got = preview(api, sid, {"mode": "save", "of": cid})
     assert got == {"kind": "save", "summary": f"Speichern nach #{cid}", "mechanism": "ssh", "commands": [],
                    "warnings": ["Speichert den aktuellen Stand des Switches dauerhaft (write memory)."], "blocked": [], "before": {},
-                   "desired": {}, "token": token([])}
+                   "desired": {}, "token": token([]), "autosave": True, "insecure_write": None}
     assert fake.calls == [("ssh", sid)]      # the SSH read stays the pre-flight of a save
     refused(plan(api, sid, {"mode": "save", "of": add_change(tmp_path, sid, before={}, mechanism=None, status="ok")}), 409,
             "Diese Änderung muss nicht gespeichert werden")
@@ -1074,7 +1074,8 @@ def test_poe_preview_and_apply_go_snmp_on_a_procurve_with_ssh(api, fake):
     got = preview(api, sid, POE_OFF)
     assert got == {"kind": "ports", "summary": "Port 1: PoE aus", "mechanism": "snmp", "commands": ["Port 1: PoE an → aus"],
                    "warnings": ["Port 1: versorgt gerade ein Gerät mit Strom (PoE), es verliert die Stromversorgung"], "blocked": [],
-                   "before": {"1": {"poe": True}}, "desired": {"1": {"poe": False}}, "token": token(["Port 1: PoE an → aus"])}
+                   "before": {"1": {"poe": True}}, "desired": {"1": {"poe": False}}, "token": token(["Port 1: PoE an → aus"]),
+                   "autosave": True, "insecure_write": "v2c"}
     assert fake.calls == [("snmp", "procurve", True), ("plan", "snmp")]
     r = apply(api, sid, POE_OFF, got["token"], mechanism="snmp")
     assert r.status_code == 200, r.text
@@ -1122,3 +1123,14 @@ def test_the_api_serves_the_follow_up_actions_of_each_change(api, fake, tmp_path
     single = {cid: [api.get(f"/api/changes/{cid}").json()[k] for k in ("can_revert", "can_save")] for cid in want}
     assert listed == single == want
     assert {type(v) for flags in listed.values() for v in flags} == {bool}
+
+
+# ── Phase 5 Task 7: the plan answer names autosave (the driver's cap) and, on the SNMP way, an insecure write identity ──────────────
+V3_NOAUTH_RW = {"snmp_rw_user": "rw"}     # SNMPv3 without authentication
+
+
+@pytest.mark.parametrize("driver, ssh, creds, autosave, insecure", [("procurve", False, RW, True, "v2c"), ("cisco", False, V3_AUTHPRIV_RW, False, None),
+                                                                    ("cisco", False, V3_NOAUTH_RW, False, "v3"), ("procurve", True, RW, True, None)])
+def test_the_plan_answer_names_autosave_and_an_insecure_write(api, fake, driver, ssh, creds, autosave, insecure):
+    got = preview(api, switch(api, driver, ssh=ssh, creds=creds), GI_PROBE if driver == "cisco" else PC_PROBE)
+    assert (got["autosave"], got["insecure_write"]) == (autosave, insecure)

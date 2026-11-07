@@ -149,6 +149,25 @@ def _update_detail(fields: dict, old) -> str:
     return ", ".join(parts)
 
 
+def _insecurity(cred: dict) -> str | None:
+    """How a SET with the write identity cred would go out spoofable: "v2c" (the community in plain text), "v3" (SNMPv3 without
+    authentication: auth protocol or auth password missing), None when it is authenticated."""
+    if cred["snmp_version"] != "3":
+        return "v2c"
+    if not (cred["snmp_auth_proto"] and cred["snmp_auth_pass"]):
+        return "v3"
+    return None
+
+
+def write_insecurity(row) -> str | None:
+    """_insecurity of the identity SNMP SETs to this switch go out with (poller.write_identity), None when SNMP cannot write here.
+    The /plan answer names it for a change over SNMP (insecure_write)."""
+    try:
+        return _insecurity(poller.write_identity(row)[1])
+    except snmp.SnmpError:
+        return None
+
+
 def _write_info(row) -> dict:
     """Mit welcher Identitaet SNMP-SETs an diesen Switch gingen, ohne ein Geheimnis, aus poller.write_identity: snmp_write_via "rw"
     (die eigene RW-Identitaet) oder "read" (die Lese-Identitaet, sie muss am Geraet schreiben duerfen), sonst None und der Grund in
@@ -157,8 +176,7 @@ def _write_info(row) -> dict:
         via, cred = poller.write_identity(row)
     except snmp.SnmpError as e:
         return {"snmp_write_via": None, "snmp_write_error": str(e), "snmp_rw_insecure": False}
-    insecure = cred["snmp_version"] != "3" or not (cred["snmp_auth_proto"] and cred["snmp_auth_pass"])
-    return {"snmp_write_via": via, "snmp_write_error": None, "snmp_rw_insecure": insecure}
+    return {"snmp_write_via": via, "snmp_write_error": None, "snmp_rw_insecure": _insecurity(cred) is not None}
 
 
 def _public(row) -> dict:

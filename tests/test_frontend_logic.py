@@ -146,3 +146,31 @@ PORTS = [{"n": "1", "u": ["20"], "t": ["30"], "tr": ""}, {"n": "2", "u": ["20"],
 def test_vlan_counts_are_the_matrix_of_before():
     assert run(f"L.vlanCounts({json.dumps(PORTS)})") == {"20": {"u": 1, "t": 1}, "30": {"u": 0, "t": 2}, "1": {"u": 1, "t": 0},
                                                           "40": {"u": 0, "t": 0}, "99": {"u": 0, "t": 1}}
+
+
+# Phase 5 Task 7 (R44): after saving a switch whose SNMP writing goes out insecure or not at all, the dialog only follows a
+# write-relevant change (or a new switch, or a write state of the server that moved), else a hint
+BAD = {"snmp_write": True, "snmp_write_via": "rw", "snmp_rw_insecure": True, "snmp_write_error": None, "host": "10.0.0.1", "snmp_version": "2c"}
+NONE = {**BAD, "snmp_write_via": None, "snmp_write_error": "Keine SNMP-Schreib-Zugangsdaten hinterlegt", "snmp_rw_insecure": False}
+
+
+@pytest.mark.parametrize("stored, payload, row, want", [
+    (None, {"host": "10.0.0.1"}, BAD, "dialog"),
+    (BAD, {"host": "10.0.0.1", "snmp_version": "2c", "snmp_community": None, "snmp_rw_community": None}, BAD, "hint"),
+    (BAD, {"host": "10.0.0.1", "snmp_write": True}, BAD, "dialog"), (BAD, {"host": "10.0.0.1", "driver": "cisco"}, BAD, "dialog"),
+    (BAD, {"host": "10.0.0.1", "snmp_rw_community": "neu"}, BAD, "dialog"), (BAD, {"host": "10.0.0.1", "snmp_rw_community": ""}, BAD, "dialog"),
+    (BAD, {"host": "10.0.0.2"}, BAD, "dialog"), (BAD, {"host": "10.0.0.1", "snmp_version": "3"}, BAD, "dialog"),
+    ({**BAD, "snmp_rw_insecure": False}, {"host": "10.0.0.1"}, BAD, "dialog"), (BAD, {"host": "10.0.0.1"}, NONE, "dialog"),
+    (NONE, {"host": "10.0.0.1"}, NONE, "hint"),
+    (BAD, {"host": "10.0.0.1"}, {**BAD, "snmp_rw_insecure": False}, ""), (BAD, {"host": "10.0.0.1"}, {**BAD, "snmp_write": False}, ""),
+    (None, {"host": "10.0.0.1"}, None, "")])
+def test_write_alert_mode(stored, payload, row, want):
+    assert run(f"L.writeAlertMode({json.dumps(stored)}, {json.dumps(payload)}, {json.dumps(row)})") == want
+
+
+# Beyond the brief: each clause of "moved" on its own (the cases above move the writing identity only together with the rest)
+@pytest.mark.parametrize("row", [{**BAD, "snmp_write_via": "read"}, {**NONE, "snmp_write_error": "Community 'public' wird nicht zum Schreiben verwendet"}],
+                         ids=["identity", "error"])
+def test_write_alert_mode_sees_each_move_of_the_write_state(row):
+    stored = BAD if row["snmp_write_via"] else NONE
+    assert run(f"L.writeAlertMode({json.dumps(stored)}, {json.dumps({'host': '10.0.0.1'})}, {json.dumps(row)})") == "dialog"

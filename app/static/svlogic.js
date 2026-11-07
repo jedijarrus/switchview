@@ -99,5 +99,21 @@ const SVLogic = {
     }
     return c;
   },
+  // What follows saving a switch (R44), from the stored row before (null: a new switch), the payload sent and the row the server
+  // now has (GET /api/switches): "" when SNMP writing is off or goes out authenticated; else "dialog" (SNMP-Schreiben prüfen) after
+  // a write-relevant change, "hint" (a toast) otherwise. Write-relevant: a new switch; driver, SNMP writing, RW user or its
+  // protocols sent (the form sends them only when they change); address or SNMP version changed; an SNMP secret entered or
+  // deleted ("" deletes); or the write state of the server moved (writing identity, insecure, error).
+  writeAlertMode(stored, payload, row) {
+    if (!(row && row.snmp_write && (row.snmp_rw_insecure || !row.snmp_write_via || row.snmp_write_error))) return "";
+    if (!stored) return "dialog";
+    const same = (a, b) => (a == null ? "" : String(a)) === (b == null ? "" : String(b));
+    const touched = ["driver", "snmp_write", "snmp_rw_user", "snmp_rw_auth_proto", "snmp_rw_priv_proto"].some(k => k in payload)
+      || ["host", "snmp_version"].some(k => k in payload && !same(payload[k], stored[k]))
+      || ["snmp_community", "snmp_auth_pass", "snmp_priv_pass", "snmp_rw_community", "snmp_rw_auth_pass", "snmp_rw_priv_pass"].some(k => payload[k] != null);
+    const moved = !same(stored.snmp_write_via, row.snmp_write_via) || !!stored.snmp_rw_insecure !== !!row.snmp_rw_insecure
+      || !same(stored.snmp_write_error, row.snmp_write_error);
+    return touched || moved ? "dialog" : "hint";
+  },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;

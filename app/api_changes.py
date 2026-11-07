@@ -15,7 +15,7 @@ import poller
 import snmp
 import snmpwrite
 import sshcli
-from api_switches import _row
+from api_switches import _row, write_insecurity
 from db import db
 
 router = APIRouter()
@@ -429,9 +429,12 @@ async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
     row = await _enabled_row(sid)
     # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
     plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
+    # What the preview says about the SNMP way, as the server sees it at plan time (Phase 5): whether the driver saves an SNMP change
+    # by itself (R26), and how a SET would go out spoofable ("v2c" / "v3", None when authenticated or not over SNMP)
     return {"kind": kind, "summary": summary, "mechanism": plan["mechanism"], "commands": plan["shown"], "warnings": plan.get("warnings", []),
             "blocked": plan["blocked"], "before": plan.get("before", {}), "desired": plan.get("desired", {}),
-            "token": changes.cmd_token(plan["shown"])}
+            "token": changes.cmd_token(plan["shown"]), "autosave": drivers.can(drivers.driver_for(row), "snmp_autosave"),
+            "insecure_write": write_insecurity(row) if plan["mechanism"] == "snmp" else None}
 
 
 @router.post("/api/switches/{sid}/apply")

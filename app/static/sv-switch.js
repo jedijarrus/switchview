@@ -250,25 +250,25 @@
   async function previewChange(s, payload, back) {
     const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
     const wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
-    let r, row;
+    let r;
     // A live read takes seconds: closed meanwhile (Back, Escape, ✕, the login) or replaced by another dialog, the answer opens nothing
-    try { [r, row] = await Promise.all([api("POST", `/api/switches/${s.id}/plan`, payload), liveRow(s)]); }
+    try { r = await api("POST", `/api/switches/${s.id}/plan`, payload); }
     catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
     if (!modalShown(wait)) return;
-    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp", caps = (row && row.caps) || s.caps || [];
+    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp";
     // Per SNMP gibt es kein Staging und kein Backup: der SET wirkt sofort. Dauerhaft gespeichert ist er nur bei einem Treiber, der das
-    // selbst tut (snmp_autosave, R26), und der speichert dabei die gesamte laufende Konfiguration (welche SSH-Änderungen das mitspeichert,
-    // sagt eine Warnung des Servers); sonst bleibt das Speichern am Switch. Geht der SET fälschbar hinaus (snmp_rw_insecure), sagt es die
-    // Vorschau laut.
-    const way = !can || !snmp ? "" : (caps.includes("snmp_autosave")
+    // selbst tut (autosave der /plan-Antwort = snmp_autosave, R26), und der speichert dabei die gesamte laufende Konfiguration (welche
+    // SSH-Änderungen das mitspeichert, sagt eine Warnung des Servers); sonst bleibt das Speichern am Switch. Geht der SET fälschbar
+    // hinaus (insecure_write der /plan-Antwort), sagt es die Vorschau laut. Beides ist der Stand des Servers zur Planzeit.
+    const way = !can || !snmp ? "" : (r.autosave
       ? `<div class="banner"><span><b>Wird per SNMP sofort angewendet und automatisch gespeichert – der Switch speichert dabei die gesamte laufende Konfiguration.</b> Kein gestuftes write memory, kein Backup über diesen Weg.</span></div>`
       : `<div class="banner warn"><span><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b> Kein Backup über diesen Weg.</span></div>`)
-      + (row ? insecureBanner(row) : "");
-    const poeNote = snmp && caps.includes("cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
+      + insecureBanner(r.insecure_write);
+    const poeNote = snmp && has(s, "cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
     const body = `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>
       ${r.blocked.length ? `<div class="error"><b>Nicht möglich:</b><ul class="blist">${r.blocked.map(b => `<li>${b.port === "*" ? "" : "Port " + esc(b.port) + ": "}${esc(b.reason)}</li>`).join("")}</ul></div>` : ""}
       ${way}
-      ${r.warnings.length ? `<div class="banner warn"><ul class="blist">${r.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+      ${warnList(r.warnings)}
       ${r.commands.length ? `<div><p class="eyebrow">${snmp ? "Änderungen per SNMP" : "Befehle am Switch"}</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
       ${can ? `<p class="note" style="margin:0">${snmp ? "Danach liest SwitchView den Zustand per SNMP zurück und prüft ihn." + poeNote : "Danach liest SwitchView die Konfiguration zurück und prüft sie. Erst wenn alles passt, wird gespeichert (write memory)."}</p>` : ""}`;
     const btns = [];
@@ -281,11 +281,6 @@
       catch (e) { toast(e.message); b.disabled = false; }
     } });
     modal(title, body, btns);
-  }
-  // Die Switch-Zeile, wie der Server sie jetzt kennt (Treiber-Fähigkeiten, Schreib-Identität; der Netzplan im Browser kann älter sein),
-  // oder null: dann gelten die Fähigkeiten aus dem Netzplan
-  async function liveRow(s) {
-    try { return (await api("GET", "/api/switches")).find(x => x.id === s.id) || null; } catch (e) { return null; }
   }
 
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };

@@ -85,12 +85,17 @@
   const capsTxt = caps => [caps.includes("cli") ? "SSH-CLI" + (caps.includes("nac") ? " mit RADIUS/802.1X" : "") + (caps.includes("backup") ? " und Sicherung" : "") : "keine SSH-CLI",
     "SNMP: " + (Object.keys(CAP_TXT).filter(c => caps.includes(c)).map(c => CAP_TXT[c]).join(", ") || "nichts"),
     caps.includes("snmp_autosave") ? "speichert SNMP-Änderungen selbst" : "speichert SNMP-Änderungen nicht selbst"].join(" · ");
-  // Laut, wenn SNMP-SETs an diesen Switch fälschbar hinausgehen (snmp_rw_insecure vom Server: v2c-Community im Klartext oder SNMPv3 ohne
-  // Authentifizierung). Für das Formular, den Dialog nach dem Speichern und die SNMP-Vorschau.
-  function insecureBanner(s) {
-    if (!s.snmp_rw_insecure) return "";
-    const v3 = s.snmp_write_via === "rw" ? !!s.snmp_rw_user : s.snmp_version === "3";
-    return `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${v3 ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>`;
+  // How SNMP SETs to the switch row s go out spoofable, as the server's insecure_write of /plan names it: null without
+  // snmp_rw_insecure, else "v3" (SNMPv3 without authentication: the writing identity is a v3 user) or "v2c" (the community in plain text)
+  function insecureKind(s) {
+    if (!s.snmp_rw_insecure) return null;
+    return (s.snmp_write_via === "rw" ? !!s.snmp_rw_user : s.snmp_version === "3") ? "v3" : "v2c";
+  }
+  // Laut, wenn SNMP-SETs an diesen Switch fälschbar hinausgehen, nach ihrer Art kind ("v2c", "v3"; leer: sicher). Für das Formular,
+  // den Dialog nach dem Speichern (insecureKind der Zeile) und die SNMP-Vorschau (insecure_write der /plan-Antwort).
+  function insecureBanner(kind) {
+    if (!kind) return "";
+    return `<div class="banner crit" role="alert"><span><b>Unsicher:</b> SNMP schreibt hier ${kind === "v3" ? "per SNMPv3 ohne Authentifizierung" : "per SNMPv2c, die Community geht im Klartext übers Netz"}. Wer mitliest, kann damit selbst an diesem Switch schreiben. Empfohlen: eigener SNMPv3-Benutzer mit Auth und Verschlüsselung (authPriv).</span></div>`;
   }
   // Mit welcher Identität SNMP-SETs an diesen Switch gehen, gespeicherter Stand (der Server rechnet es mit poller.write_identity)
   function writeState(s) {
@@ -99,11 +104,13 @@
     const rw = s.snmp_write_via === "rw", v3 = rw ? !!s.snmp_rw_user : s.snmp_version === "3";
     const who = v3 ? `SNMPv3-Benutzer „${esc(rw ? s.snmp_rw_user : s.snmp_user)}“` : "v2c-Community";
     return `<p class="note" style="margin:0">Zurzeit: <span class="pill ${s.snmp_rw_insecure ? "crit" : "ok"}">${rw ? "schreibt mit eigenem Schreib-Zugang" : "schreibt mit Lese-Zugang"}</span> ${who}${rw ? "" : ", braucht dafür am Switch Schreibrechte"}</p>`
-      + insecureBanner(s);
+      + insecureBanner(insecureKind(s));
   }
-  // Nach dem Speichern: schreibt SNMP an diesem Switch fälschbar oder gar nicht, bleibt dieser Dialog stehen, statt nur einer kurzen
-  // Meldung. Die Quelle ist allein der Server (GET /api/switches, poller.write_identity).
-  const writeNeedsAlert = row => !!row && !!row.snmp_write && (!!row.snmp_rw_insecure || !row.snmp_write_via || !!row.snmp_write_error);
+  // Nach dem Speichern: schreibt SNMP an diesem Switch fälschbar oder gar nicht, bleibt nach einer schreibrelevanten Änderung dieser
+  // Dialog stehen (SVLogic.writeAlertMode "dialog"), sonst sagt es ein Hinweis von 8 s (writeHint, "hint"). Die Quelle ist allein der
+  // Server (GET /api/switches, poller.write_identity).
+  const writeHint = row => row.snmp_write_via ? "Gespeichert. Hinweis: SNMP schreibt an diesem Switch unsicher – siehe „Zugang bearbeiten“."
+    : "Gespeichert. Hinweis: SNMP-Schreiben geht an diesem Switch so nicht – siehe „Zugang bearbeiten“.";
   function writeAlert(row) {
     modal(`SNMP-Schreiben prüfen: ${row.name}`, `<p style="margin:0">Gespeichert. SNMP-Schreiben an diesem Switch, wie der Server es jetzt sieht:</p>${writeState(row)}`,
       [{ label: "Zugang bearbeiten", onClick: () => editSwitch(row) }, { label: "Verstanden", cls: "primary", onClick: closeModal }]);
@@ -214,10 +221,13 @@
       try {
         let id = s.id, cleared = [];
         if (isNew) id = (await api("POST", "/api/switches", payload)).id; else cleared = (await api("PUT", `/api/switches/${s.id}`, payload)).cleared;
-        // Wie SNMP jetzt schreibt, rechnet der Server (write_identity); fälschbar oder ohne Schreib-Zugang: ein Dialog, der stehen bleibt
+        // Wie SNMP jetzt schreibt, rechnet der Server (write_identity); fälschbar oder ohne Schreib-Zugang: nach einer schreibrelevanten
+        // Änderung ein Dialog, der stehen bleibt, sonst ein Hinweis statt der kurzen Meldung (R44)
         const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === id), () => null);
-        closeModal(); toast(isNew ? "Angelegt, wird abgefragt …" : savedTxt(cleared));
-        if (writeNeedsAlert(row)) writeAlert(row);
+        const mode = SVLogic.writeAlertMode(isNew ? null : s, payload, row);
+        closeModal();
+        if (mode === "hint") toast(writeHint(row), 8000); else toast(isNew ? "Angelegt, wird abgefragt …" : savedTxt(cleared));
+        if (mode === "dialog") writeAlert(row);
         if (isNew) await api("POST", `/api/switches/${id}/poll`).catch(() => {});
         await loadMap(true); go("switches", id);
       } catch (e) { toast(e.message); btn.disabled = false; }

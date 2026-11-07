@@ -188,8 +188,8 @@ def test_the_browser_does_not_restore_the_scroll_position():                    
     assert in_dom("history.scrollRestoration") == "manual"
 
 
-# previewChange with /plan pending until the test answers it (liveRow's /api/switches answers [] at once). The loading dialog has
-# no buttons, so #m-foot lists only those of a dialog opened after it
+# previewChange with /plan pending until the test answers it (any other call would answer [] at once; since Phase 5 Task 7 the
+# preview makes none). The loading dialog has no buttons, so #m-foot lists only those of a dialog opened after it
 PENDING_PLAN = (NO_VIEWS + '$("#app").hidden = false; let answer; '
                 'api = (m, u) => u.endsWith("/plan") ? new Promise((ok, no) => { answer = [ok, no]; }) : Promise.resolve([]); '
                 'const p = previewChange({id: 1, k: "SW A", caps: []}, {mode: "ports", ports: ["1"], change: {untagged: 5}}); ')
@@ -504,3 +504,51 @@ def test_the_device_lists_show_the_packetfence_error_and_the_flags_as_text():
     devices, unknown = in_dom(js)
     assert '<span class="pill crit" title="HTTP 500">Fehler</span><span class="cellnote">HTTP 500</span>' in devices
     assert '<div class="muted">Port gilt als Uplink (unbestätigt): dort wird die Basis-MAC eines Switches gelernt</div>' in unknown
+
+
+# Phase 5 Task 7: the preview takes autosave and an insecure write identity from the /plan answer (no GET /api/switches); its
+# warnings go through warnList. SNMP_PLAN is the brief's PLAN, renamed: PLAN above is the pending-preview fixture of Task 4
+SNMP_PLAN = {"kind": "ports", "summary": "Port 2: VLAN 20", "mechanism": "snmp", "commands": ["Port 2: VLAN ungetaggt 99 → 20"],
+             "warnings": ["Port 2: VLAN 1 ist das Standard-VLAN"], "blocked": [], "token": "t", "autosave": True, "insecure_write": "v2c"}
+PREVIEW = ('(async () => { const calls = []; api = async (m, u) => { calls.push(u); return %s; }; '
+           'await previewChange({id: 1, k: "SW", caps: ["cli"]}, {mode: "ports", ports: ["2"], change: {untagged: "20"}}); '
+           'return [calls, $("#m-body").innerHTML]; })()')
+
+
+def test_the_preview_takes_autosave_and_insecurity_from_the_plan_answer():
+    calls, html = in_dom(PREVIEW % json.dumps(SNMP_PLAN))
+    assert calls == ["/api/switches/1/plan"] and "automatisch gespeichert" in html and "per SNMPv2c, die Community geht im Klartext" in html
+    assert '<div class="banner warn"><ul class="blist"><li>Port 2: VLAN 1 ist das Standard-VLAN</li></ul></div>' in html
+    calls, html = in_dom(PREVIEW % json.dumps({**SNMP_PLAN, "autosave": False, "insecure_write": None}))
+    assert "NICHT dauerhaft gespeichert" in html and "Unsicher" not in html
+
+
+def test_the_write_hint_names_what_is_wrong():
+    assert in_dom('[writeHint({snmp_write_via: "rw"}), writeHint({snmp_write_via: null})]') == [
+        "Gespeichert. Hinweis: SNMP schreibt an diesem Switch unsicher – siehe „Zugang bearbeiten“.",
+        "Gespeichert. Hinweis: SNMP-Schreiben geht an diesem Switch so nicht – siehe „Zugang bearbeiten“."]
+    assert in_dom('[insecureKind({snmp_rw_insecure: true, snmp_write_via: "rw", snmp_rw_user: "rw"}), '
+                  'insecureKind({snmp_rw_insecure: true, snmp_write_via: "read", snmp_version: "2c"}), '
+                  'insecureKind({snmp_rw_insecure: false})]') == ["v3", "v2c", None]
+
+
+# Beyond the brief: the save handler of "Zugang bearbeiten" acts on SVLogic.writeAlertMode. SW-HP writes with a v2c community
+# (insecure); the form sends what the user typed (%s), the secret fields answer closest(".sec") without the "clr" mark
+SAVE_SWITCH = ('(async () => { const shown = []; toast = (m, ms) => shown.push([m, ms == null ? null : ms]); const ended = new Promise(r => { go = r; }); '
+               'const S = {id: 1, name: "SW-HP", host: "10.0.0.1", zone: "", sort: 0, enabled: 1, driver: "procurve", snmp_version: "2c", '
+               'snmp_write: true, snmp_rw_user: null, snmp_rw_community_set: true, snmp_write_via: "rw", snmp_rw_insecure: true, snmp_write_error: null, '
+               'caps: ["cli"]}; api = async (m, u) => u === "/api/drivers" ? [{name: "procurve", caps: ["cli"], notes: ""}] : u === "/api/switches" ? [S] '
+               ': m === "PUT" ? {cleared: []} : {}; await editSwitch(S); '
+               '["f-comm", "f-apass", "f-ppass", "f-ssh-pass", "f-rwcomm", "f-rwapass", "f-rwppass"]'
+               '.forEach(id => { $("#" + id).closest = () => $("#sec"); }); '
+               '$("#f-name").value = "SW-HP"; $("#f-host").value = "10.0.0.1"; $("#f-snmpv").value = "2c"; $("#f-driver").value = "procurve"; '
+               '$("#f-sw").checked = true; %s $("#m-foot").children.find(b => b.textContent === "Speichern").fire("click"); await ended; '
+               'return [shown, $("#modal").hidden, $("#m-title").textContent]; })()')
+
+
+@pytest.mark.parametrize("typed, want", [
+    ('$("#f-zone").value = "Büro";', [[["Gespeichert. Hinweis: SNMP schreibt an diesem Switch unsicher – siehe „Zugang bearbeiten“.", 8000]], True,
+                                      "Zugang bearbeiten: SW-HP"]),
+    ('$("#f-rwcomm").value = "neu";', [[["Gespeichert", None]], False, "SNMP-Schreiben prüfen: SW-HP"])], ids=["zone-only", "rw-community"])
+def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_change(typed, want):      # R44
+    assert in_dom(SAVE_SWITCH % typed) == want
