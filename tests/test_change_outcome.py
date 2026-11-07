@@ -4,7 +4,8 @@
     taken something (right before send_config_set / write memory over SSH, right before the SET over SNMP). An exception after that
     point ends the change "unclear", not "failed", like the SNMP way: the commands can be in effect (netmiko's ReadTimeout from
     send_config_set, say); its last step says what that leaves open (changes.SSH_KEPT). A cancelled run ends the same way, with
-    changes.CANCELLED. Only a revert that ends ok marks the change it took back (reverted_by).
+    changes.CANCELLED; one that sent nothing ends "aborted" with changes.CANCELLED_UNSENT (Phase 5 Task 10). Only a revert that ends
+    ok marks the change it took back (reverted_by).
   * changes.actions_of(ch): the two follow-up actions the UI offers, decided in one place. "Rückgängig" (can_revert) for a port change
     that ended ok / unclear / failed, is not reverted and may have sent something; "Trotzdem speichern" (can_save) for an SSH change
     (NULL = SSH) that ended unclear / failed, is not saved and may have sent something. A row from before the column counts as sent.
@@ -157,9 +158,9 @@ async def test_an_unclear_ssh_change_says_what_is_open(ssh_env, monkeypatch, cas
 
 @pytest.mark.parametrize("when", ["waiting-for-the-lock", "sending"])
 async def test_a_cancelled_ssh_change_ends_by_whether_it_sent(ssh_env, monkeypatch, when):
-    """The app shuts down (asyncio cancels the task). While the change waits for the switch's lock: failed, nothing went out. While
-    send_config_set runs: the line may be out, so unclear, as over SNMP. Either way it ends with the reason, never "failed" without an
-    error, and never stays running."""
+    """The app shuts down (asyncio cancels the task). While the change waits for the switch's lock: aborted with "…, nichts gesendet"
+    and no re-poll, nothing went out (Phase 5 Task 10, as after a restart). While send_config_set runs: the line may be out, so unclear,
+    as over SNMP, and re-polled. Either way it ends with the reason, never without an error, and never stays running."""
     started, release = threading.Event(), threading.Event()
 
     def send_blocks(self, commands, **kwargs):
@@ -187,10 +188,11 @@ async def test_a_cancelled_ssh_change_ends_by_whether_it_sent(ssh_env, monkeypat
             lock.release()
     [(cid,)] = query("SELECT id FROM changes")
     row, sent = ssh_env.change(cid), when == "sending"
-    assert (row["status"], row["error"], row["sent"], row["finished_at"] is not None) == ("unclear" if sent else "failed", CANCELLED,
-                                                                                         int(sent), True)
-    assert json.loads(row["steps"])[-1][1:] == [f"{CANCELLED}. {KEPT}" if sent else CANCELLED, "error"]
+    assert (row["status"], row["error"], row["sent"], row["finished_at"] is not None) == (("unclear", CANCELLED, 1, True) if sent else
+                                                                                         ("aborted", f"{CANCELLED}, nichts gesendet", 0, True))
+    assert json.loads(row["steps"])[-1][1:] == [f"{CANCELLED}. {KEPT}" if sent else f"{CANCELLED}, nichts gesendet", "error"]
     assert ssh_env.sent == ([["interface 2 disable"]] if sent else [])
+    assert ssh_env.repolls == ([ssh_env.sid] if sent else [])
 
 
 @pytest.mark.parametrize("after, on_send, status", [

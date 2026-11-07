@@ -339,8 +339,9 @@
     const unclear = c.mechanism === "snmp" ? (told || err)
       : c.saved ? `${sentence(err)} Die Änderung ist gespeichert.`
       : told && told !== err ? told : `${sentence(err)} Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert.`;
-    // "Abgebrochen durch Neustart …" (changes.mark_interrupted) reads "Abgebrochen: durch Neustart …", not "Abgebrochen: Abgebrochen …"
-    const aborted = err.replace(/^Abgebrochen\s+/, "");
+    // "Abgebrochen durch Neustart …" (changes.mark_interrupted) reads "Abgebrochen: durch Neustart …", "Abgebrochen (Prozess beendet),
+    // nichts gesendet" (changes.CANCELLED_UNSENT) "Abgebrochen: Prozess beendet, nichts gesendet", never "Abgebrochen: Abgebrochen …"
+    const aborted = err.replace(/^Abgebrochen\s+\(?([^)]*)\)?/, "$1");
     return { ok: c.saved ? `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>` : `<div class="banner warn"><b>Erledigt, aber nicht dauerhaft gespeichert – am Switch speichern.</b></div>`,
       unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(unclear)}</span></div>`,
       failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(err)}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(aborted)}</span></div>` }[c.status] || "";

@@ -202,3 +202,9 @@ async def test_a_save_without_a_read_names_no_state(ssh_env):
 async def test_other_changes_name_no_state(ssh_env):
     cid = await ssh_env.run_prepare(radius_server="10.0.0.1", radius_key="S3cretKey1")
     assert last_audit_detail() == f"#{cid} RADIUS vorbereiten"
+
+
+def test_backup_sha_takes_a_lone_surrogate_and_keeps_every_valid_sha():
+    text = "hostname \"SW-ä\"\nvlan 20\n"
+    assert sshcli.backup_sha(text) == hashlib.sha256(cfgparse.mask_secrets(text).encode()).hexdigest()
+    assert len(sshcli.backup_sha("hostname x\ud800\n")) == 64

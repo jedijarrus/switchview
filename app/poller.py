@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Container
 from datetime import datetime, timezone
 
 import drivers
@@ -565,8 +566,9 @@ async def poll_switch(switch_id: int) -> dict:
         # A failed walk that carries the uplink protection keeps what the last poll stored, and what this poll read of the same table
         # joins it (an empty or cut table would leave a link only it shows unprotected; a fresh row may be the only one that shows a
         # new link): the MAC rows stay and the rows read now go on top (mac_count is then the port's rows of the merged table), the
-        # LLDP neighbours of a port (by its name) are the ones read now and then the kept ones; a failed baseMac walk keeps the stored
-        # base MAC, which every other switch that learns it protects its port with
+        # LLDP neighbours of a port (by its name) are the ones read now and then the kept ones, without a fresh one that a kept one
+        # covers (merge_lldp: the same neighbour, shortened by the failed walk); a failed baseMac walk keeps the stored base MAC,
+        # which every other switch that learns it protects its port with
         keep_macs = any(k in failed for k in MAC_WALKS)
         keep_lldp = any(k in failed for k in lldp_walks(driver_name))
         keep_base = "baseMac" in failed
@@ -617,7 +619,7 @@ async def poll_switch(switch_id: int) -> dict:
                 return counts.get(p["trunk"] or p["name"], 0) if keep_macs else p["mac_count"]
 
             def lldp(p: dict) -> str:
-                return json.dumps(p["lldp"] + [e for e in last_lldp.get(p["name"], []) if e not in p["lldp"]])
+                return json.dumps(merge_lldp(p["lldp"], last_lldp.get(p["name"], []), failed))
 
             await conn.executemany(
                 "INSERT INTO ports(switch_id, ifindex, name, alias, oper, admin, speed, pvid, untagged, tagged, trunk, members, lldp, mac_count, "
@@ -629,6 +631,26 @@ async def poll_switch(switch_id: int) -> dict:
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
             await conn.commit()
         return {"ok": True, "ports": len(data["ports"]), "macs": len(data["macs"])}
+
+
+def merge_lldp(fresh: list[list[str]], kept: list[list[str]], failed: Container[str]) -> list[list[str]]:
+    """The LLDP entries of a port ([sysName, PortDesc or PortId, PortId], _build) after a poll whose LLDP walks may have failed:
+    fresh are the ones read now, kept the ones the last poll stored (empty unless an LLDP walk failed), failed the names of the
+    failed walks (the dict `failed` of poll_switch). The fresh entries, then every kept one not among them, as before Phase 5; but a
+    fresh entry is left out when a kept one other than it covers it: the same sysName, and each field equal, except a field of a
+    failed walk that came out missing (field 1 equal to field 2 once lldpPortDesc failed, as _build falls back to the PortId; field
+    2 empty once lldpPortId failed). Then the kept entry is the same neighbour at the same port, and it makes every claim the
+    shortened one makes (topology._lldp_claims reads the name and fields 1 and 2): display only, the uplink protection keeps all it
+    had. A field a walk that broke off did read counts (snmp.Rows.broken_off: its rows before the break are real), so a neighbour
+    that moved to another port stays listed with both, as before. Without a failed lldpPortDesc or lldpPortId walk only an equal
+    entry covers, and that one does not count. A kept entry from before R40 (two fields) covers only through its first two."""
+    desc_failed, id_failed = "lldpPortDesc" in failed, "lldpPortId" in failed
+
+    def covers(k: list[str], e: list[str]) -> bool:
+        return (k != e and k[:1] == e[:1] and (k[1:2] == e[1:2] or (desc_failed and e[1] == e[2]))
+                and (k[2:3] == e[2:3] or (id_failed and not e[2])))
+
+    return [e for e in fresh if not any(covers(k, e) for k in kept)] + [k for k in kept if k not in fresh]
 
 
 def partial_note(failed: dict[str, Exception], kept: dict[str, bool], vlan_rows_skipped: int) -> str | None:

@@ -13,7 +13,9 @@
     poll read of the same table joins them, so a link only the fresh rows show stays protected; bp2if counts for both (for LLDP at a
     driver by ifType), and a failed baseMac walk keeps the stored base MAC. A lenient walk that broke off after some rows
     (snmp.Rows.broken_off) counts as failed there. The poll says "Teilweise gelesen", and "behalten" only where the last poll had
-    something to keep; a walk the driver does not use (ifType at a ProCurve) says nothing.
+    something to keep; a walk the driver does not use (ifType at a ProCurve) says nothing. A fresh neighbour a kept one at the same
+    port covers (same sysName, every field equal except one the failed walk left missing) is left out, so it is not listed twice
+    (poller.merge_lldp, Phase 5 Task 10).
 
 No network, no net-snmp: the process is a switchfix.FakeProcess (spawn), the switches are the test network of tests/netfix.py (the
 `net` fixture of tests/conftest.py), the database a fresh one under tmp_path.
@@ -656,3 +658,50 @@ async def test_a_failed_fid_walk_adds_no_second_row_under_the_fid(net, failing):
     assert sorted(query("SELECT port, mac, vlan FROM macs WHERE switch_id = ?", (a,))) == [("2", MAC_B, "20"), ("6", MAC1, "5")]
     assert query("SELECT last_seen FROM macs WHERE switch_id = ? AND mac = ?", (a, MAC_B)) != [("2000-01-01 00:00:00",)]
     assert query("SELECT name, mac_count FROM ports WHERE switch_id = ? AND mac_count > 0 ORDER BY ifindex", (a,)) == [("2", 1), ("6", 1)]
+
+
+# ── Phase 5 Task 10: a kept neighbour is not listed twice ────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("fresh, kept, failed, want", [
+    ([["B", "Gi1/0/2", "Gi1/0/2"]], [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]], {"lldpPortDesc"}, [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]]),
+    ([["B", "GigabitEthernet1/0/2", ""]], [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]], {"lldpPortId"}, [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]]),
+    ([["B", "", ""]], [["B", "y", "1"]], {"lldpPortDesc", "lldpPortId"}, [["B", "y", "1"]]),
+    ([["B", "Gi1/0/3", "Gi1/0/3"]], [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]], {"lldpPortDesc"},
+     [["B", "Gi1/0/3", "Gi1/0/3"], ["B", "GigabitEthernet1/0/2", "Gi1/0/2"]]),
+    ([["C", "x", "x"]], [["B", "y", "y"]], {"lldpPortDesc", "lldpPortId"}, [["C", "x", "x"], ["B", "y", "y"]]),
+    ([["B", "x", "1"]], [["B", "y", "1"], ["B", "x", "1"]], set(), [["B", "x", "1"], ["B", "y", "1"]])])
+def test_merge_lldp(fresh, kept, failed, want):
+    assert poller.merge_lldp(fresh, kept, failed) == want
+
+
+@pytest.mark.parametrize("key", ["lldpPortDesc", "lldpPortId"])
+async def test_a_kept_neighbour_is_not_listed_twice_while_one_lldp_walk_fails(net, failing, key):     # Phase 3 T10-RR2
+    c = await add(net, "C", C_HOST, "cisco", CATALYST, lldp("1", "B", "Gi1/0/2", "GigabitEthernet1/0/2"))
+    failing(net, C_HOST, poller.O[key])
+    assert (await poller.poll_switch(c))["ok"] is True
+    assert port(await main.build_map(), "Gi1/0/1", "C")["l"] == [["B", "GigabitEthernet1/0/2", "Gi1/0/2"]]
+
+
+@pytest.mark.parametrize("fresh, kept, failed", [
+    ([["B", "Uplink", "Gi1/0/3"]], [["B", "Uplink", "Gi1/0/2"]], {"lldpPortId"}),
+    ([["B", "1/1/3", "aa:bb:cc:00:00:01"]], [["B", "1/1/2", "aa:bb:cc:00:00:01"]], {"lldpPortDesc"})])
+def test_merge_lldp_keeps_what_a_walk_that_broke_off_did_read(fresh, kept, failed):
+    """A field of a failed walk counts as missing only where it came out so (field 1 equal to field 2, field 2 empty): a walk that
+    broke off after this row did read it, and a neighbour whose port changed stays listed with both entries, as before Phase 5."""
+    assert poller.merge_lldp(fresh, kept, failed) == fresh + kept
+
+
+def test_merge_lldp_takes_a_kept_entry_from_before_r40():
+    """A port stored before R40 has entries of two fields: no IndexError, and such an entry covers only through its first two."""
+    assert poller.merge_lldp([["B", "x", ""]], [["B", "x"]], {"lldpPortId"}) == [["B", "x"]]
+    assert poller.merge_lldp([["B", "x", "1"]], [["B", "x"]], {"lldpPortDesc"}) == [["B", "x", "1"], ["B", "x"]]
+
+
+async def test_a_neighbour_a_broken_off_walk_did_read_keeps_its_new_port(net, failing):
+    """lldpPortId broke off after the row of port 1, which now names B's Gi1/0/3 (the description "Uplink" stayed): the fresh entry
+    is no shortened copy of the kept one and stays next to it, so the claim of the new port is not lost for this poll."""
+    c = await add(net, "C", C_HOST, "cisco", CATALYST, lldp("1", "B", "Gi1/0/2", "Uplink"))
+    new = lldp("1", "B", "Gi1/0/3", "Uplink")
+    net.rec[C_HOST].update(new)
+    failing(net, C_HOST, poller.O["lldpPortId"], BROKE_OFF, rows=new[poller.O["lldpPortId"]])
+    assert (await poller.poll_switch(c))["ok"] is True
+    assert port(await main.build_map(), "Gi1/0/1", "C")["l"] == [["B", "Uplink", "Gi1/0/3"], ["B", "Uplink", "Gi1/0/2"]]

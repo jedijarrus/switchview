@@ -725,3 +725,10 @@ def test_vlan_chip_buttons_keep_the_markup_of_the_port_form():
                     '<i class="sw"></i><span class="id">20</span><span class="nm">Clients</span></button></div>')
     assert none == '<span class="muted" style="font-size:12.5px">keine</span>'
     assert 'data-ta="30" aria-pressed="false" style="--vc:hsl(330 55% 50%)" disabled aria-describedby="f-gate-mem">' in form   # a member's gate
+
+
+@pytest.mark.parametrize("error, want", [("Abgebrochen (Prozess beendet), nichts gesendet", "<b>Abgebrochen:</b> Prozess beendet, nichts gesendet"),
+                                         ("Abgebrochen durch Neustart von SwitchView, nichts gesendet",
+                                          "<b>Abgebrochen:</b> durch Neustart von SwitchView, nichts gesendet")])
+def test_an_aborted_change_reads_once_as_aborted(error, want):
+    assert want in in_dom(f'resultHead({{status: "aborted", error: {json.dumps(error)}, steps: []}})')

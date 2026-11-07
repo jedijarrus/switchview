@@ -162,14 +162,14 @@ async def test_an_unreadable_config_still_ends_the_change(ssh_env, monkeypatch):
 
 async def test_an_oversized_config_fails_the_change_cleanly(ssh_env, monkeypatch):
     """The real parse: a running-config beyond MAX_REFS (lowered to 1000 here) fails the change before anything is sent, with the
-    parse error; it is kept as the backup "vor", and audit and re-poll run."""
+    parse error; it is kept as the backup "vor", the audit runs, no re-poll (nothing was sent)."""
     monkeypatch.setattr(cfgparse, "MAX_REFS", 1000)
     ssh_env.running = 'hostname "SW"\ninterface 1-100\n   tagged vlan 1-20\n   exit\n'
     cid = await ssh_env.run_prepare(radius_server="203.0.113.10", radius_key="S3cretKey1")
     row = ssh_env.change(cid)
     assert (row["status"], row["error"]) == ("failed", "ValueError: Konfiguration zu groß: mehr als 1000 Port-/VLAN-Einträge")
     assert ssh_env.sent == [] and query("SELECT trigger FROM config_backups") == [(f"vor #{cid}",)]
-    assert [a for (a,) in query("SELECT action FROM audit")] == ["change_failed"] and ssh_env.repolls == [ssh_env.sid]
+    assert [a for (a,) in query("SELECT action FROM audit")] == ["change_failed"] and ssh_env.repolls == []
 
 
 async def test_every_step_text_is_masked(ssh_env, monkeypatch):

@@ -779,7 +779,8 @@ async def test_snmp_set_error_then_readback_bad(env):
     (FileNotFoundError(2, "No such file or directory", "snmpbulkwalk"), "[Errno 2] No such file or directory: 'snmpbulkwalk'"),
 ])
 async def test_snmp_preread_failure_failed(env, error, text):
-    """The live read before anything is written fails: "failed" with the reason, no SET, `before` stays the preview's."""
+    """The live read before anything is written fails: "failed" with the reason, no SET, `before` stays the preview's; no re-poll,
+    nothing was sent."""
     sid = await env.switch("procurve")
     cid, plan = await apply(sid, PC_PROBE)
     env.agent.read_error = error
@@ -787,7 +788,7 @@ async def test_snmp_preread_failure_failed(env, error, text):
     assert (ch["status"], ch["error"], ch["saved"]) == ("failed", f"Zustand per SNMP nicht lesbar: {text}", 0)
     assert steps(ch) == [(f"Lese {HOST} per SNMP", "info"), (f"Zustand per SNMP nicht lesbar: {text}", "error")]
     assert env.agent.sets == [] and ch["before"] == plan["before"]
-    assert env.repolls == [sid] and env.ssh == []                 # re-polled after "failed", as on the SSH path
+    assert env.repolls == [] and env.ssh == []                   # nothing sent: no re-poll (Phase 5 Task 10)
 
 
 async def test_snmp_readback_failure_unclear(env):
@@ -883,10 +884,11 @@ async def test_snmp_before_is_stored_before_the_set(env):
     assert seen == [{"3": {"u": None, "pvid": "30"}}]
 
 
-@pytest.mark.parametrize("when, status", [("first read", "failed"), ("set", "unclear"), ("verify", "unclear")])
+@pytest.mark.parametrize("when, status", [("first read", "aborted"), ("set", "unclear"), ("verify", "unclear")])
 async def test_snmp_cancelled_run_ends_by_whether_the_set_was_out(env, monkeypatch, when, status):
-    """Cancelled (say the app shuts down) during the first read: failed, nothing was sent. Cancelled during the SET or after it (here in
-    the verify): unclear, never failed. Either way the change does not stay "running", and says why it ended."""
+    """Cancelled (say the app shuts down) during the first read: aborted with "…, nichts gesendet" and no re-poll, nothing was sent
+    (Phase 5 Task 10). Cancelled during the SET or after it (here in the verify): unclear, never failed, and re-polled. Either way the
+    change does not stay "running", and says why it ended."""
     sid = await env.switch("procurve")
     cid, _ = await apply(sid, PC_PROBE)
     if when == "first read":
@@ -900,9 +902,11 @@ async def test_snmp_cancelled_run_ends_by_whether_the_set_was_out(env, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await changes.run_change(cid)
     ch = await change(cid)
-    assert (ch["status"], ch["error"], len(env.agent.sets)) == (status, CANCELLED, 0 if when == "first read" else 1)
-    assert steps(ch)[-1] == ((CANCELLED, "error") if status == "failed" else (f"{CANCELLED}. {SAVED_NOTE}", "error"))
+    assert (ch["status"], len(env.agent.sets)) == (status, 0 if when == "first read" else 1)
+    assert ch["error"] == (f"{CANCELLED}, nichts gesendet" if status == "aborted" else CANCELLED)
+    assert steps(ch)[-1] == ((f"{CANCELLED}, nichts gesendet", "error") if status == "aborted" else (f"{CANCELLED}. {SAVED_NOTE}", "error"))
     assert ch["finished_at"] is not None
+    assert env.repolls == ([] if status == "aborted" else [sid])
 
 
 # ── R33: the write identity once more after the wait for the lock ─────────────────────────────────────────────────────────────────

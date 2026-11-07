@@ -239,8 +239,10 @@ async def test_ssh(row) -> dict:
 
 
 def backup_sha(content: str) -> str:
-    """The sha of the backup of the running-config content: the SHA-256 (hex) of its masked text, as config_backups.sha stores it."""
-    return hashlib.sha256(cfgparse.mask_secrets(content).encode()).hexdigest()
+    """The sha of the backup of the running-config content: the SHA-256 (hex) of its masked text, as config_backups.sha stores it.
+    Encoded with surrogatepass: the same bytes as plain UTF-8 for every valid text (every stored sha stays valid), and a lone surrogate
+    no longer raises, which would cost the audit of a save (run_change calls this outside _logged)."""
+    return hashlib.sha256(cfgparse.mask_secrets(content).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 async def store_backup(switch_id: int, content: str, trigger: str) -> bool:

@@ -62,8 +62,10 @@ SNMP_KEPT = {True: "Was der Switch davon übernommen hat, wirkt schon und ist ge
 # Behind each step with which an SSH run ends unclear, by what was going out: lines (send_config_set, and a read-back that does not
 # match) or write memory. The progress dialog shows that step, as over SNMP (sv-switch.js resultHead).
 SSH_KEPT = {"lines": SNMP_KEPT[False], "save": "Ob der Switch gespeichert hat (write memory), ist offen."}
-# The error of a run whose task was cancelled (the app shut down): unclear once something went out, failed before
+# The error of a run whose task was cancelled (the app shut down): unclear once something went out; before that the run ends aborted
+# with CANCELLED_UNSENT, the label a restart gives such a change too (mark_interrupted)
 CANCELLED = "Abgebrochen (Prozess beendet)"
+CANCELLED_UNSENT = f"{CANCELLED}, nichts gesendet"
 # The error of a change whose switch was disabled while it waited for the lock (run_change, _run_snmp)
 DISABLED_RUN = "Switch ist deaktiviert: nichts gesendet"
 
@@ -557,9 +559,11 @@ async def run_change(cid: int):
     something. An exception after that point ends "unclear", not "failed" (the SNMP way's rule): netmiko's ReadTimeout from
     send_config_set, say, comes after the lines went out; its last step says what that leaves open (SSH_KEPT). A line the switch
     refused (ConfigInvalidException) stays "failed", with sent = 1 (the lines before it can be in effect). A cancelled task (the app
-    shut down) ends the same way with CANCELLED, as on the SNMP way. Before lines go out the cached read is marked stale and dropped
-    (R27, mark_cfg_stale): the end stores the read-back as the fresh read, or the read from before when no line went out; after lines
-    without a read-back it stores neither. A revert that ends ok marks the change it took back (_mark_reverted).
+    shut down) ends the same way with CANCELLED, as on the SNMP way; one cancelled before anything went out ends "aborted" with
+    CANCELLED_UNSENT, as after a restart (mark_interrupted). A change that ends "failed" without having sent anything (a switch
+    disabled meanwhile, a read that failed) gets no re-poll (_repolls_after). Before lines go out the cached read is marked stale and
+    dropped (R27, mark_cfg_stale): the end stores the read-back as the fresh read, or the read from before when no line went out;
+    after lines without a read-back it stores neither. A revert that ends ok marks the change it took back (_mark_reverted).
 
     Inside the lock, before anything else, the switch row of then: a switch disabled while the change waited ends it failed with
     DISABLED_RUN, no session. Only then the inventory of a port change (the poll's ports and uplinks): a change before it may have
@@ -687,12 +691,13 @@ async def run_change(cid: int):
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:
         if status is None:    # did not run to its end: the task was cancelled (the app shut down)
-            status, error = ("unclear" if sent else "failed"), CANCELLED
+            status, error = ("unclear", CANCELLED) if sent else ("aborted", CANCELLED_UNSENT)
             await _logged(cid, "Abbruch vermerken", step(f"{error}. {kept}" if sent else error, "error"))
         await _upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=_now(), output=mask(output or ""))
-        # Each step on its own: what fails is logged and costs the rest nothing, audit and re-poll run always. A read that does not
-        # parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped (R27). After lines without a
-        # read-back the read from before them is no fresh read: the entry stays dropped and marked stale (going_out, mark_cfg_stale).
+        # Each step on its own: what fails is logged and costs the rest nothing, the audit and the re-poll (by _repolls_after) still
+        # run. A read that does not parse (beyond the limits of cfgparse) is still kept as the backup, and the cached read is dropped
+        # (R27). After lines without a read-back the read from before them is no fresh read: the entry stays dropped and marked stale
+        # (going_out, mark_cfg_stale).
         if pre:
             await _logged(cid, "Sicherung vorher", sshcli.store_backup(sid, pre, f"vor #{cid}"))
         if post:
@@ -707,7 +712,7 @@ async def run_change(cid: int):
         # names the state it read before, the start of the sha of its backup "vor #cid" (or of the equal one before it)
         stand = f", Stand {sshcli.backup_sha(pre)[:12]}" if kind == "save" and pre else ""
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}")
-        if status in ("ok", "unclear", "failed") and kind != "save":
+        if _repolls_after(status, kind, sent):
             asyncio.create_task(_repoll(sid))
 
 
@@ -757,8 +762,9 @@ async def _run_snmp(cid: int, ch, row):
          Ein SET mit Fehler, das das Zuruecklesen nicht bestaetigt, markiert nichts.
       5. Zuruecklesen und pruefen (verify_snmp, die ganze VLAN-Zugehoerigkeit, R32): scheitert der Read oder weicht etwas ab, unclear.
          Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
-    Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed; ein
-    abgebrochener Task (etwa beim Beenden des Prozesses) ebenso, mit "Abgebrochen (Prozess beendet)". The row gets sent = 1 right
+    Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed (without a
+    re-poll: nothing went out, _close, _repolls_after). A cancelled task (the app shut down, say) ends unclear with CANCELLED once the
+    SET was handed over, before that "aborted" with CANCELLED_UNSENT, as after a restart (mark_interrupted). The row gets sent = 1 right
     before the SET is handed over (changes.sent), so a restart (mark_interrupted) and the follow-up actions (actions_of) know it too; a
     revert that ends ok marks the change it took back (_close, _mark_reverted). Nie SSH, keine Sicherung, kein
     switch_cfg: es gibt keine running-config. Den zwischengespeicherten SSH-Read verwirft das SET (invalidate_cfg, und mark_cfg_stale
@@ -873,9 +879,9 @@ async def _run_snmp(cid: int, ch, row):
         await step(f"{error}. {kept}" if sent else error, "error")
     finally:
         if status is None:  # nicht zu Ende gelaufen: der Task wurde abgebrochen
-            status, error = ("unclear" if sent else "failed"), CANCELLED
+            status, error = ("unclear", CANCELLED) if sent else ("aborted", CANCELLED_UNSENT)
             steps.append([_now(), f"{error}. {kept}" if sent else error, "error"])
-        await _close(cid, ch, status, error and mask(error), saved, mask(output or ""), steps)
+        await _close(cid, ch, status, error and mask(error), saved, mask(output or ""), steps, sent)
 
 
 ALSO_SAVED = "der Switch speichert bei jedem SNMP-SET die gesamte laufende Konfiguration"
@@ -942,16 +948,24 @@ async def _refuse(cid: int, ch, error: str):
     await _close(cid, ch, "aborted", error, 0, "", [[_now(), error, "error"]])
 
 
-async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str, steps: list):
+async def _close(cid: int, ch, status: str, error: str | None, saved: int, output: str, steps: list, sent: bool = True):
     """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis und Schritte in EINEM Schreiben in die Zeile, Audit wie auf dem
-    SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort. Keine Sicherung und kein switch_cfg: es gibt keine running-config. A
-    revert that ended ok marks the change it took back (_mark_reverted), as on the SSH way."""
+    SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort (_repolls_after; sent: whether the switch may have taken something,
+    _run_snmp's sent). Keine Sicherung und kein switch_cfg: es gibt keine running-config. A revert that ended ok marks the change it
+    took back (_mark_reverted), as on the SSH way."""
     sid = ch["switch_id"]
     await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
-    await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))    # as in run_change: audit and re-poll run always
+    await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))    # as in run_change: audit and re-poll still run
     await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
-    if status in ("ok", "unclear", "failed") and ch["kind"] != "save":
+    if _repolls_after(status, ch["kind"], sent):
         asyncio.create_task(_repoll(sid))
+
+
+def _repolls_after(status: str, kind: str, sent: bool) -> bool:
+    """Whether a change that ended with status re-polls its switch (run_change, _close): after ok or unclear, and after failed only
+    when something went out (sent; a change that failed before that left the switch as it was, which may just have been disabled,
+    DISABLED_RUN); never after aborted (nothing went out) or a save (write memory changes no port)."""
+    return status in ("ok", "unclear", "failed") and kind != "save" and (status != "failed" or sent)
 
 
 async def _mark_reverted(ch, cid: int, status: str):

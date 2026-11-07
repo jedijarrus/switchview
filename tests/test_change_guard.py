@@ -1,7 +1,8 @@
 """Phase 3 Task 6: what a change checks before anything goes out.
 
   * Inside the switch lock: run_change (SSH) and _run_snmp read the switch row again once they hold sshcli.lock(sid), and a switch that
-    was disabled meanwhile ends the change "failed" with "Switch ist deaktiviert: nichts gesendet", before anything else. The inventory
+    was disabled meanwhile ends the change "failed" with "Switch ist deaktiviert: nichts gesendet", before anything else, and without
+    a re-poll: a change that ends "failed" re-polls only when it sent something (Phase 5 Task 10). The inventory
     (changes.inventory, the poll's ports and uplinks) is read only after that, inside the lock: a change that waited may find a poll a
     change before it renewed.
   * A disabled switch gets no change in any mode: POST /plan and /apply answer 409 main.DISABLED; main._inventory turns the LookupError
@@ -269,6 +270,11 @@ async def test_a_switch_disabled_while_the_change_waits_gets_nothing(ssh_env, po
     row = ssh_env.change(await waited_change(ssh_env, disable=True))
     assert (row["status"], row["error"], row["sent"], ssh_env.sent) == ("failed", DISABLED_RUN, 0, [])
     assert [s[1:] for s in json.loads(row["steps"])] == [["Warte auf laufende Aktion an diesem Switch", "info"], [DISABLED_RUN, "error"]]
+
+
+async def test_a_failed_change_re_polls_only_when_it_sent_something(ssh_env, port_inv):         # Phase 3 T6-R2
+    row = ssh_env.change(await waited_change(ssh_env, disable=True))
+    assert (row["status"], row["sent"], ssh_env.repolls) == ("failed", 0, [])
 
 
 @pytest.mark.parametrize("kind", ["save", "prepare"])
