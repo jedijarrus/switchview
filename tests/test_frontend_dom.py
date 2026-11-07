@@ -927,9 +927,20 @@ def test_an_old_progress_never_writes_into_a_newer_dialog():                    
     done = {**DONE, "status": "ok", "saved": 1, "sent": 1, "kind": "ports", "error": None}
     js = ('(async () => { MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "audit"; loadMap = async () => {}; '
           'let n = 0; api = async () => (n++ ? %s : %s); const run = runProgress({id: 1, k: "SW"}, 5); await new Promise(r => setTimeout(r, 50)); '
-          'modal("Änderung #6", "", []); $("#prog").innerHTML = "sechs"; await run; '
-          'return [$("#prog").innerHTML, $("#toasts").children.map(t => t.textContent)]; })()') % (json.dumps(done), json.dumps(running))
-    assert in_dom(js) == ["sechs", ["Änderung erledigt"]]
+          'modal("Änderung #6", "", []); $("#prog").innerHTML = "sechs"; const foot = $("#m-foot").children.length; await run; '
+          'return [$("#prog").innerHTML, $("#toasts").children.map(t => t.textContent), $("#m-foot").children.length - foot]; })()') % (
+        json.dumps(done), json.dumps(running))
+    # the footer: the stub keeps the children an innerHTML = "" would clear, so only what runProgress adds after the new dialog counts
+    assert in_dom(js) == ["sechs", ["Änderung erledigt"], 0]
+
+
+def test_a_failed_poll_after_the_dialog_was_replaced_is_a_toast():                     # Phase 4a Task 1, runProgress's catch
+    running = {**DONE, "status": "running"}
+    js = ('(async () => { MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "audit"; loadMap = async () => {}; '
+          'let n = 0; api = async () => { if (n++) throw new Error("Server weg"); return %s; }; const run = runProgress({id: 1, k: "SW"}, 5); '
+          'await new Promise(r => setTimeout(r, 50)); modal("Änderung #6", "", []); $("#prog").innerHTML = "sechs"; await run; '
+          'return [$("#prog").innerHTML, $("#toasts").children.map(t => t.textContent)]; })()') % json.dumps(running)
+    assert in_dom(js) == ["sechs", ["Server weg"]]
 
 
 @pytest.mark.parametrize("port, title, row", [
@@ -956,6 +967,15 @@ def test_the_audit_keeps_its_filter_across_a_new_render():                      
     html = in_dom(js)
     assert ('id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="bob"' in html
             and '<option value="login" selected>' in html)
+
+
+def test_the_audit_drops_a_kept_action_the_new_entries_no_longer_have():              # Phase 4a Task 1 (T1-f)
+    later = [r for r in AUDIT if r["action"] != "login"]
+    js = ('(async () => { let rows = %s; api = async (m, u) => u === "/api/audit" ? rows : []; await renderAudit(); '
+          '$("#au-act").value = "login"; $("#au-act").fire("change"); rows = %s; await renderAudit(); '
+          'return [$("#view").innerHTML, $("#au-body").innerHTML]; })()') % (json.dumps(AUDIT), json.dumps(later))
+    html, body = in_dom(js)
+    assert re.search(r"<option[^>]* selected", html) is None and body.count("<tr>") == len(later) == 2
 
 
 # Phase 4a Task 8: the header names the user and the role; each view hides or locks what the role or the zone does not allow and
