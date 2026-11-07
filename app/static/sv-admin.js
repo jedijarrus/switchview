@@ -492,6 +492,11 @@
         ${lossy.length ? `<p class="note warn" id="s-scopes-lossy" style="margin:0">Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: ${lossy.map(x => `„${esc(x)}“`).join(", ")}. Eine Zone mit Komma oder mit dem Namen „Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben; „Zonen speichern“ würde sie ändern.</p>` : ""}
         <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint${lossy.length ? " s-scopes-lossy" : ""}"${dis}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label>
         ${admin ? `<div><button class="btn small" type="button" id="s-zones-save">Zonen speichern</button></div>` : ""}</div></section>
+      <section class="card"><div class="card-h"><h2>Vier-Augen-Prinzip</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
+        <label class="check"><input type="checkbox" id="s-4e"${s.four_eyes ? " checked" : ""}${dis}> Änderungen im Expertenmodus brauchen die Freigabe durch eine zweite Person (Rolle „Freigeben“ oder „Admin“)</label>
+        <label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" max="168" value="${esc(s.approval_hours)}"${dis}></label>
+        <p class="note warn" style="margin:0">Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit „Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus dann nicht.</p>
+        ${admin ? `<div><button class="btn small" type="button" id="s-4save">Vier-Augen-Einstellung speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
         <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>`;
@@ -513,6 +518,17 @@
       if (r.errors.length) { toast(r.errors[0]); return; }
       e.target.disabled = true;
       try { const saved = await api("PUT", "/api/zone-scopes", { entries: r.entries }); $("#s-scopes").value = SVLogic.formatScopes(saved.entries); toast("Gespeichert"); }
+      catch (err) { toast(err.message); }
+      e.target.disabled = false;
+    });
+    // The four-eyes principle and the hours of a new request (PUT /api/settings/approvals, apart from "Speichern"): hours outside
+    // 1-168 are named here (the server's 422 would read in English); saved, ME is read again, so the expert mode, the forms' note
+    // and the tab "Freigaben" follow at once
+    if (admin) $("#s-4save").addEventListener("click", async e => {
+      const hours = Number($("#s-4h").value.trim() || NaN);
+      if (!Number.isInteger(hours) || hours < 1 || hours > 168) { toast("Anfragen verfallen nach 1 bis 168 Stunden: bitte eine ganze Zahl eintragen"); return; }
+      e.target.disabled = true;
+      try { await api("PUT", "/api/settings/approvals", { four_eyes: $("#s-4e").checked, hours }); toast("Gespeichert"); ME = await api("GET", "/api/auth/me"); refreshApprovals(); }
       catch (err) { toast(err.message); }
       e.target.disabled = false;
     });

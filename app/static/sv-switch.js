@@ -178,6 +178,10 @@
 
   /* ── Ports bearbeiten: Formular → Vorschau → Ausführen mit Fortschritt ── */
   const LIMITS = [1, 2, 4, 8, 16, 32];
+  // With the four-eyes principle on (ME.four_eyes), the note under the expert-mode box of the port and the trunk form, which the box
+  // names as its description: such a change is requested, a second person approves it (previewChange, sv-approvals.js)
+  const fourEyesNote = () => ME && ME.four_eyes ? `<p class="note" id="f-4eyes">Im Expertenmodus braucht die Änderung eine Freigabe durch eine zweite Person (Vier-Augen-Prinzip).</p>` : "";
+  const fourEyesDesc = () => ME && ME.four_eyes ? ' aria-describedby="f-4eyes"' : "";
   // The VLAN chips of a form (port and trunk): one toggle button per VLAN id in ids, pressed when sel holds it; data-<attr> names the
   // list it belongs to (ta: tagged add, tr: tagged remove), gate the attributes of a locked chip (disabled plus its reason)
   const vlanChipButtons = (ids, sel, attr, gate = "") => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"${gate}><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
@@ -229,8 +233,8 @@
         <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
           <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
       </div></details>
-      ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}${expertOk() ? "" : ' disabled aria-describedby="f-gate-exp"'}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>
-        ${expertOk() ? "" : `<p class="note gate" id="f-gate-exp">Der Expertenmodus braucht die Rolle „Freigeben“.</p>`}` : ""}`;
+      ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}${expertOk() ? fourEyesDesc() : ' disabled aria-describedby="f-gate-exp"'}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>
+        ${expertOk() ? fourEyesNote() : `<p class="note gate" id="f-gate-exp">Der Expertenmodus braucht die Rolle „Freigeben“.</p>`}` : ""}`;
     const collect = () => {
       f.status = (document.querySelector('input[name="f-st"]:checked') || {}).value || "";
       f.untagged = mem ? "" : $("#f-u").value; f.name = $("#f-name").value.trim().replace(/\s+/g, "_"); f.nameClear = $("#f-nclear").checked;
@@ -280,7 +284,8 @@
       <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select></label></div>
       <div class="field"><span>Getaggt hinzufügen</span>${vlanChipButtons(vl, f.add, "ta")}</div>
       <div class="field"><span>Getaggt entfernen</span>${vlanChipButtons(p.t, f.rem, "tr")}</div>
-      <label class="check warnbox"><input type="checkbox" id="f-expert"${f.expert ? " checked" : ""}> Expertenmodus: Trunk ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>`;
+      <label class="check warnbox"><input type="checkbox" id="f-expert"${f.expert ? " checked" : ""}${fourEyesDesc()}> Expertenmodus: Trunk ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>
+      ${fourEyesNote()}`;
     const collect = () => {
       f.untagged = $("#f-u").value;
       f.add = [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta);
@@ -299,15 +304,12 @@
     $("#m-body").onclick = e => { const b = e.target.closest("[data-ta],[data-tr]"); if (b) b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); };
   }
 
-  async function previewChange(s, payload, back) {
-    const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
-    const wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
-    let r;
-    // A live read takes seconds: closed meanwhile (Back, Escape, ✕, the login) or replaced by another dialog, the answer opens nothing
-    try { r = await api("POST", `/api/switches/${s.id}/plan`, payload); }
-    catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
-    if (!modalShown(wait)) return;
-    const can = !r.blocked.length && (r.commands.length || r.kind === "save"), snmp = r.mechanism === "snmp";
+  // Whether the preview r (a /plan answer) can run: nothing blocked and something to send, or a save
+  const runnable = r => !r.blocked.length && (r.commands.length || r.kind === "save");
+  // The body of the preview r of payload at switch s: summary, blocked ports, the banner of the write way, warnings, what goes out
+  // and the closing sentence. previewChange shows it, and the review of a four-eyes request with its fresh preview (reviewApproval)
+  function previewBody(s, r, payload) {
+    const can = runnable(r), snmp = r.mechanism === "snmp";
     // Over SNMP there is no staging and no backup: the SET takes effect at once. It is saved for good only with a driver that does
     // that itself (autosave of the /plan answer = snmp_autosave, R26), and that one saves the whole running configuration with it
     // (which SSH changes it saves along, a warning of the server says); otherwise saving stays with the switch. When the SET goes out
@@ -317,22 +319,47 @@
       : `<div class="banner warn"><span><b>Wird per SNMP sofort angewendet, aber NICHT dauerhaft gespeichert – danach am Switch speichern (z. B. write memory / copy running-config startup-config).</b> Kein Backup über diesen Weg.</span></div>`)
       + insecureBanner(r.insecure_write);
     const poeNote = snmp && has(s, "cli") && payload.change && payload.change.poe != null ? " PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." : "";
-    const body = `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>
+    return `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${esc(s.k)}</span></p>
       ${r.blocked.length ? `<div class="error"><b>Nicht möglich:</b><ul class="blist">${r.blocked.map(b => `<li>${b.port === "*" ? "" : "Port " + esc(b.port) + ": "}${esc(b.reason)}</li>`).join("")}</ul></div>` : ""}
       ${way}
       ${warnList(r.warnings)}
       ${r.commands.length ? `<div><p class="eyebrow">${snmp ? "Änderungen per SNMP" : "Befehle am Switch"}</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" || r.blocked.length ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
       ${can ? `<p class="note" style="margin:0">${snmp ? "Danach liest SwitchView den Zustand per SNMP zurück und prüft ihn." + poeNote : "Danach liest SwitchView die Konfiguration zurück und prüft sie. Erst wenn alles passt, wird gespeichert (write memory)."}</p>` : ""}`;
+  }
+
+  async function previewChange(s, payload, back) {
+    const title = payload.mode === "prepare" ? `RADIUS vorbereiten: ${s.k}` : payload.mode === "revert" ? `Rückgängig #${payload.of}` : payload.mode === "save" ? "Speichern (write memory)" : "Vorschau";
+    const wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration von ${esc(s.k)} …</div>`, []);
+    let r;
+    // A live read takes seconds: closed meanwhile (Back, Escape, ✕, the login) or replaced by another dialog, the answer opens nothing
+    try { r = await api("POST", `/api/switches/${s.id}/plan`, payload); }
+    catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [...(back ? [{ label: "Zurück", onClick: back }] : []), { label: "Schließen", onClick: closeModal }]); return; }
+    if (!modalShown(wait)) return;
+    // With the four-eyes principle on, an expert-mode change is requested instead of run (approval of the /plan answer): the request
+    // stores exactly this payload and this preview, on its write way and with its token, for a second person to approve
+    // (sv-approvals.js); /apply would refuse it
+    const can = runnable(r), ask = can && !!r.approval;
+    const body = (ask ? `<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus führt erst aus, wenn eine zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>` : "")
+      + previewBody(s, r, payload);
     const btns = [];
     if (back) btns.push({ label: "Zurück", onClick: back });
     btns.push({ label: "Abbrechen", onClick: closeModal });
-    if (can) btns.push({ label: r.kind === "save" ? "Speichern" : "Ausführen", cls: "primary", onClick: async b => {
+    if (ask) btns.push({ label: "Freigabe anfordern", cls: "primary", onClick: async b => {
+      b.disabled = true;
+      try {
+        const res = await api("POST", "/api/approvals", { kind: "port_change", switch_id: s.id, plan: { ...payload, mechanism: r.mechanism, token: r.token } });
+        if (modalShown(shown)) closeModal();
+        toast(`Freigabe angefordert (Anfrage #${res.id})`);
+        refreshApprovals(); if (current === "approvals") renderApprovals();
+      } catch (e) { toast(e.message); b.disabled = false; }
+    } });
+    else if (can) btns.push({ label: r.kind === "save" ? "Speichern" : "Ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
       // genau der Schreibweg dieser Vorschau (nie eine eigene Wahl): geht er nicht mehr, lehnt der Server ab statt still den anderen zu nehmen
       try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, mechanism: r.mechanism, token: r.token }); runProgress(s, res.id); }
       catch (e) { toast(e.message); b.disabled = false; }
     } });
-    modal(title, body, btns);
+    const shown = modal(title, body, btns);
   }
 
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };
@@ -415,7 +442,8 @@
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
       if (d) {
         const c = await api("GET", `/api/changes/${d.dataset.cd}`);
-        modal(`Änderung #${c.id}`, `<p style="margin:0"><b>${esc(c.summary)}</b></p><p class="note" style="margin:0">${esc(c.switch_name)} · ${esc(c.username || "")} · ${esc(fmtTime(c.created_at))}${c.mechanism === "snmp" ? " · per SNMP" : ""} · ${chPill(c)}</p>
+        // A change that ran after a four-eyes approval is the requester's (username); approved_by names the second person
+        modal(`Änderung #${c.id}`, `<p style="margin:0"><b>${esc(c.summary)}</b></p><p class="note" style="margin:0">${esc(c.switch_name)} · ${esc(c.username || "")}${c.approved_by ? ` · freigegeben von ${esc(c.approved_by)}` : ""} · ${esc(fmtTime(c.created_at))}${c.mechanism === "snmp" ? " · per SNMP" : ""} · ${chPill(c)}</p>
           ${c.error ? `<div class="error">${esc(c.error)}</div>` : ""}<div><p class="eyebrow">${c.mechanism === "snmp" ? "Änderungen per SNMP" : "Befehle"}</p><pre class="code">${esc((c.commands || []).join("\n") || "–")}</pre></div>
           <div><p class="eyebrow">Ablauf</p>${stepsHtml(c)}</div>${c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`,
           [{ label: "Schließen", onClick: closeModal }]);

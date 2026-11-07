@@ -79,7 +79,8 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .tabs button { background: none; border: 0; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--fg-2); cursor: pointer; white-space: nowrap; }
 .tabs button:hover { background: var(--surface-2); }
 .tabs button[aria-current="page"] { background: var(--surface-2); color: var(--fg); font-weight: 500; }
-.search { position: relative; flex: 1 1 220px; min-width: 0; max-width: 380px; margin-left: auto; }
+.tabs .count { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--warn); color: var(--surface); font-size: 11px; }
+.search { position: relative; flex: 1 1 160px; min-width: 0; max-width: 380px; margin-left: auto; }
 .search input { width: 100%; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px 6px 30px; }
 .search input:focus { outline: none; border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-bg); }
 .search svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }

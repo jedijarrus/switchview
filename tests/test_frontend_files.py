@@ -15,7 +15,8 @@ import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
-SCRIPTS = ["msal-browser.min.js", "svlogic.js", "sv-core.js", "sv-overview.js", "sv-switch.js", "sv-admin.js", "sv-main.js"]
+SCRIPTS = ["msal-browser.min.js", "svlogic.js", "sv-core.js", "sv-overview.js", "sv-switch.js", "sv-admin.js", "sv-approvals.js",
+           "sv-main.js"]
 
 
 def test_index_loads_every_script_in_order():
@@ -124,3 +125,17 @@ def test_the_layers_can_take_the_focus():                                       
     assert '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title" tabindex="-1">' in INDEX
     drawer = re.search(r'<aside\b[^>]*\bid="drawer"[^>]*>', INDEX).group(0)
     assert all(a in drawer for a in ('role="dialog"', 'aria-modal="true"', 'tabindex="-1"', 'aria-labelledby="dr-title"')), drawer
+
+
+def test_the_approvals_tab_sits_between_backups_and_audit():                          # Phase 4a Task 9
+    """The tab starts hidden (refreshApprovals shows it), its count too; the count is a pill of the warning colour."""
+    tabs = re.findall(r'<button type="button" data-view="(\w+)"', INDEX)
+    assert tabs[tabs.index("backups") + 1:tabs.index("audit")] == ["approvals"]
+    assert ('<button type="button" data-view="approvals" id="tab-appr" hidden>Freigaben <span class="count" id="appr-n" hidden></span></button>'
+            in INDEX)
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    assert (".tabs .count { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--warn); color: var(--surface); "
+            "font-size: 11px; }") in css
+    # Browser check: with the tab the header wrapped the user to a second row at 1280 px (the search asked for 220 px before it
+    # shrinks); from 160 px the row holds the tab, the search and a name like "Lena Grünwalder" (T9-e)
+    assert ".search { position: relative; flex: 1 1 160px; min-width: 0; max-width: 380px; margin-left: auto; }" in css

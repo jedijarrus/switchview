@@ -239,3 +239,21 @@ def test_lossy_scopes_names_the_entries_the_text_cannot_hold():
     entries = [{"principal": "Z.EK", "zones": ["", "EK"]}, {"principal": "Z.H", "zones": ["Haus 1, Nord"]}, {"principal": "A=B", "zones": ["EK"]},
                {"principal": "#X", "zones": ["EK"]}, {"principal": "Z.O", "zones": ["Ohne Zone"]}, {"principal": "Z.K", "zones": ["Lager", "VK"]}]
     assert run(f"L.lossyScopes({json.dumps(entries)})") == ["Z.H", "A=B", "#X", "Z.O"]
+
+
+# Phase 4a Task 9: the number in the tab "Freigaben" - for Freigeben and Admin the open requests of others, for everyone else their
+# own open ones
+@pytest.mark.parametrize("role, want", [("aendern", 1), ("freigeben", 2), ("admin", 2)])
+def test_approval_count(role, want):
+    rows = [{"status": "open", "own": True}, {"status": "open", "own": False}, {"status": "open", "own": False}, {"status": "stale", "own": True}]
+    assert run(f"L.approvalCount({json.dumps(rows)}, {{role: {json.dumps(role)}}})") == want
+
+
+# Beyond the brief: a reviewer limited to zones counts only the requests at switches of those zones (the ones "Prüfen" is offered
+# for, inZone), a switch without a zone as ""; without zones (null) every one; without a user only the own ones, as for Lesen
+@pytest.mark.parametrize("me, want", [({"role": "freigeben", "zones": ["EK"]}, 1), ({"role": "freigeben", "zones": [""]}, 1),
+                                      ({"role": "freigeben", "zones": None}, 3), (None, 1)])
+def test_approval_count_follows_the_zones_of_a_reviewer(me, want):
+    rows = [{"status": "open", "own": False, "switch_zone": "EK"}, {"status": "open", "own": False, "switch_zone": "VK"},
+            {"status": "open", "own": False, "switch_zone": None}, {"status": "open", "own": True, "switch_zone": "VK"}]
+    assert run(f"L.approvalCount({json.dumps(rows)}, {json.dumps(me)})") == want

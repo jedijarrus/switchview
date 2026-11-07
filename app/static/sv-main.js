@@ -2,7 +2,8 @@
 
   /* ── Router: #overview, #switches, #sw=<id>, #vlans, … (#switch=<name>: a bookmark from before ids, still valid). Every navigation
      of the user adds a history entry, so Back and Forward walk the views; popstate / hashchange show the view of the hash. ── */
-  const VIEWS = { overview: renderOverview, switches: renderSwitchDetail, vlans: renderVlans, devices: renderDevices, backups: renderBackups, audit: renderAudit, settings: renderSettings };
+  const VIEWS = { overview: renderOverview, switches: renderSwitchDetail, vlans: renderVlans, devices: renderDevices, backups: renderBackups,
+    approvals: renderApprovals, audit: renderAudit, settings: renderSettings };
   // selSwitch: the id of the shown switch (a name is not unique); from an old bookmark briefly a name, which renderSwitchDetail resolves
   // with SVLogic.switchIdOf
   let current = "overview", selSwitch = null, swVlan = null, swPortFilter = "all", swText = "";
@@ -25,6 +26,9 @@
     closeDrawer(true); drLast = null;
     $("#view").onclick = null;
     VIEWS[view]();
+    // The count of open requests in the tab "Freigaben", at every navigation (start() too, through goToHash), never by timer: a
+    // request in the background would count as activity and keep an open tab from the idle logout (T3-f, T9-a)
+    refreshApprovals();
     window.scrollTo(0, 0);
   }
   $(".tabs").addEventListener("click", e => { const b = e.target.closest("[data-view]"); if (b) go(b.dataset.view); });

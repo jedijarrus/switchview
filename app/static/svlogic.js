@@ -136,6 +136,14 @@ const SVLogic = {
     const order = ["lesen", "aendern", "freigeben", "admin"], i = order.indexOf(role), j = order.indexOf(min);
     return i >= 0 && j >= 0 && i >= j;
   },
+  // The number in the tab "Freigaben" of user me (/api/auth/me) over the requests list (GET /api/approvals, own: me asked for it):
+  // with Freigeben or Admin the open requests of others it may review, at a switch of its zones (me.zones, null = every zone; a
+  // switch without a zone is ""), as inZone in the list; below that the open requests of its own
+  approvalCount(list, me) {
+    const reviewer = SVLogic.atLeast(me && me.role, "freigeben"), zones = me && me.zones;
+    return (list || []).filter(a => a.status === "open"
+      && (reviewer ? !a.own && (zones == null || zones.includes(a.switch_zone || "")) : !!a.own)).length;
+  },
   // The name of a role as the UI shows it; an unknown one as it stands, none as "–" (an audit entry from before Phase 4a)
   roleLabel(role) {
     return { lesen: "Lesen", aendern: "Ändern", freigeben: "Freigeben", admin: "Admin" }[role] || (role ? String(role) : "–");
