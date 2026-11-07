@@ -21,7 +21,8 @@
     if (view === "switches" && arg !== undefined) selSwitch = arg;
     document.querySelectorAll(".tabs [data-view]").forEach(b => { if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
     syncHash(how);
-    closeDrawer(true);
+    // The tile the panel came from goes with the view it stood in
+    closeDrawer(true); drLast = null;
     $("#view").onclick = null;
     VIEWS[view]();
     window.scrollTo(0, 0);

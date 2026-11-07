@@ -766,3 +766,54 @@ def test_closing_the_panel_takes_the_focus_out_of_it_first(focused, want):
           '$("#dr-x").blur = () => { hid = $("#drawer").getAttribute("aria-hidden"); document.activeElement = document.body; }; '
           'closeDrawer(true); [hid, document.activeElement.sel]') % f'$("{focused}")'
     assert in_dom(js) == want
+
+
+# Phase 5 final review: the focus after a dialog. The port tile the panel came from (drLast) takes the focus back once, when the
+# panel or the dialog chain it started closes; a later dialog whose opener left the DOM (a change list re-rendered after a change
+# that sent nothing) gives the focus to #view, not to that tile. go() forgets the tile with the view it leaves.
+TILE = PANEL + 'const t = $("#tile"); t.focus(); openPort({id: 1, k: "A", model: "x", caps: [], ports: []}, "1", t); '
+LIST_DIALOG = ('const b = $("#list-btn"); b.focus(); modal("Änderung #7", "", []); b.isConnected = false; closeModal(); '
+               'a.push(document.activeElement.sel); a')
+
+
+@pytest.mark.parametrize("used, want", [
+    ("closeDrawer(); a.push(document.activeElement.sel); ", ["#tile", "#view"]),
+    ('closeDrawer(true); document.body.focus(); modal("Port 1 bearbeiten", "", []); closeModal(); a.push(document.activeElement.sel); ',
+     ["#tile", "#view"]),
+    (NO_VIEWS + 'go("vlans"); ', ["#view"])], ids=["panel-closed", "dialog-chain-from-the-panel", "navigation"])
+def test_the_tile_takes_the_focus_back_only_once(used, want):                             # Review Focus 2
+    assert in_dom(TILE + "const a = []; " + used + LIST_DIALOG) == want
+
+
+def test_a_dialog_over_the_open_panel_leaves_the_tile_to_the_panel():
+    """A dialog whose opener is live (here a control in the open panel) takes the focus back there; the tile stays the panel's."""
+    js = (TILE + 'const a = []; const x = $("#dr-x"); x.focus(); modal("T", "", []); closeModal(); a.push(document.activeElement.sel); '
+          'closeDrawer(); a.push(document.activeElement.sel); a')
+    assert in_dom(js) == ["#dr-x", "#tile"]
+
+
+# A dialog without a field or a footer button (the preview's loading dialog) takes the focus itself (.modal, tabindex -1): the
+# focus would stay on its opener, inert behind the dialog. With a control the first one takes it, as before.
+FIRST_CONTROL = "#m-body input, #m-body select, #m-foot .btn"
+
+
+@pytest.mark.parametrize("control, want", [("", ".modal"), (f'document.els["{FIRST_CONTROL}"] = $("#f-u"); ', "#f-u")],
+                         ids=["none", "a-field"])
+def test_a_dialog_gives_the_focus_to_its_first_control_else_to_itself(control, want):
+    assert in_dom(control + '$("#opener").focus(); modal("Vorschau", "<div class=\\"empty\\">Lese …</div>", []); document.activeElement.sel') == want
+
+
+# runProgress replaces the footer once the change has ended: the focused "Schließen" goes with the old one, and in a browser the focus
+# falls to body while the dialog stays open. It moves to the new "Schließen" then; a focus still in the dialog (the ✕) stays, and
+# a dialog closed meanwhile takes none. The stub's .modal contains only the ✕ (#m-x).
+PROGRESS = ('(async () => { current = "audit"; api = async () => (%s); const x = $("#m-x"); $(".modal").contains = n => n === x; '
+            'const p = runProgress({id: 1, k: "SW"}, 4); %s await p; const f = document.activeElement; return [f.sel, f.textContent]; })()')
+FAILED_UNSENT = {**DONE, "status": "failed", "sent": 0, "kind": "ports", "saved": 0, "can_revert": False, "can_save": False}
+
+
+@pytest.mark.parametrize("meanwhile, want", [("document.body.focus();", ["<button>", "Schließen"]), ("x.focus();", ["#m-x", ""]),
+                                             ("document.body.focus(); closeModal();", ["#view", ""])],
+                         ids=["focus-fell-to-body", "focus-on-the-close-button", "closed-meanwhile"])
+def test_the_result_of_a_change_keeps_the_focus_in_its_dialog(meanwhile, want):
+    assert in_dom(PROGRESS % (json.dumps(FAILED_UNSENT), meanwhile)) == want
+

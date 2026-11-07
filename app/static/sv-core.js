@@ -55,9 +55,12 @@
     if (to === null) return;
     e.preventDefault(); (to < 0 ? root : list[to]).focus();
   }
-  // drLast (sv-switch.js): the port tile the panel was opened from; an element in the closed panel is hidden and takes no focus
+  // drLast (sv-switch.js): the port tile the panel was opened from, until it has taken the focus back once (a later dialog whose
+  // opener left the DOM, a change list re-rendered say, goes to #view, not to that tile); an element in the closed panel is hidden
+  // and takes no focus
   function restoreFocus(el) {
     const to = [el, drLast].find(x => x && x.isConnected && x !== document.body && typeof x.focus === "function" && !x.closest(".drawer:not(.open)"));
+    if (to && to === drLast) drLast = null;
     (to || $("#view")).focus();
   }
   function syncLayers() {
@@ -85,7 +88,9 @@
     const foot = $("#m-foot"); foot.innerHTML = "";
     buttons.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
     $("#modal").hidden = false; syncLayers();
-    const f = $("#m-body input, #m-body select, #m-foot .btn"); if (f) f.focus();
+    // Without a field or a footer button (the preview's loading dialog) the dialog itself takes the focus: it stays in the dialog,
+    // not on the opener behind it
+    const f = $("#m-body input, #m-body select, #m-foot .btn"); if (f) f.focus(); else $(".modal").focus();
     return modalSeq;
   }
   // syncLayers first: a browser does not focus an element inside an inert subtree

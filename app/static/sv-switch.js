@@ -350,7 +350,7 @@
       failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(err)}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(aborted)}</span></div>` }[c.status] || "";
   }
   async function runProgress(s, id) {
-    modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
+    const shown = modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
     for (;;) {
       if (!$("#prog")) return;
       let c; try { c = await api("GET", `/api/changes/${id}`); } catch (e) { $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
@@ -366,7 +366,10 @@
         if (c.can_save) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
         btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
         const foot = $("#m-foot"); foot.innerHTML = "";
-        btns.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
+        const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
+        // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
+        // new "Schließen"; a focus still in the dialog (the ✕) stays, a dialog closed meanwhile takes none
+        if (modalShown(shown) && !$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
         if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
         // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
         const next = SVLogic.afterChange(c);
