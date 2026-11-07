@@ -845,3 +845,16 @@ def test_an_arrow_after_escape_runs_the_search_of_the_field():
           'q.fire("keydown", {key: "ArrowDown"}); await new Promise(r => setTimeout(r, 50)); '
           'return [$("#results").hidden, q.getAttribute("aria-activedescendant"), searchFound.map(h => h.port)]; })()')
     assert in_dom(js) == [False, "hit-0", ["2"]]
+
+
+# Phase 5 final review: a preview whose ports are all blocked (every LAG trunk on a driver that cannot write its VLANs by SNMP) says
+# why, not also that there is nothing to change; a plan without commands and without a block still says that
+BLOCKED = {**SNMP_PLAN, "commands": [], "warnings": [], "blocked": [{"port": "Po1", "reason": "Trunk-VLANs per SNMP gehen an diesem Treiber nicht"}]}
+
+
+@pytest.mark.parametrize("plan, blocked, nothing", [(BLOCKED, True, False), ({**BLOCKED, "blocked": []}, False, True)], ids=["blocked", "nothing-to-do"])
+def test_a_blocked_preview_does_not_say_there_is_nothing_to_change(plan, blocked, nothing):
+    calls, html = in_dom(PREVIEW % json.dumps(plan))
+    assert ("<b>Nicht möglich:</b>" in html) is blocked and ("Es gibt nichts zu ändern" in html) is nothing
+    assert in_dom(PREVIEW.replace("return [calls, $(\"#m-body\").innerHTML];", "return $(\"#m-foot\").children.map(b => b.textContent);")
+                  % json.dumps(plan)) == ["Abbrechen"]

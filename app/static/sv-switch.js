@@ -314,7 +314,7 @@
       ${r.blocked.length ? `<div class="error"><b>Nicht möglich:</b><ul class="blist">${r.blocked.map(b => `<li>${b.port === "*" ? "" : "Port " + esc(b.port) + ": "}${esc(b.reason)}</li>`).join("")}</ul></div>` : ""}
       ${way}
       ${warnList(r.warnings)}
-      ${r.commands.length ? `<div><p class="eyebrow">${snmp ? "Änderungen per SNMP" : "Befehle am Switch"}</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
+      ${r.commands.length ? `<div><p class="eyebrow">${snmp ? "Änderungen per SNMP" : "Befehle am Switch"}</p><pre class="code">${esc(r.commands.join("\n"))}</pre></div>` : r.kind === "save" || r.blocked.length ? "" : `<div class="banner">Es gibt nichts zu ändern, die Ports sind schon so eingestellt.</div>`}
       ${can ? `<p class="note" style="margin:0">${snmp ? "Danach liest SwitchView den Zustand per SNMP zurück und prüft ihn." + poeNote : "Danach liest SwitchView die Konfiguration zurück und prüft sie. Erst wenn alles passt, wird gespeichert (write memory)."}</p>` : ""}`;
     const btns = [];
     if (back) btns.push({ label: "Zurück", onClick: back });
