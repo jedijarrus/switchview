@@ -142,6 +142,21 @@ def switch_keys(switches: list[dict]) -> dict[str, set[int]]:
     return dict(keys)
 
 
+def device_port(p: dict) -> bool:
+    """Whether devices are listed at port p of build_map (the access-port rule, F3): not a Trk port, no trunk or LAG and no member of
+    one ("tr"), not a confirmed uplink (up and uc). An unconfirmed uplink is a device port: one forged LLDP frame or a MAC flood on an
+    access port must not hide the devices behind it. api_devices.unknown_devices and history.record take it."""
+    return not (p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]))
+
+
+def suspect_port(p: dict, keys: dict[str, set[int]]) -> bool:
+    """Whether port p of build_map may be an uplink (keys: switch_keys of the map's switches): a link ends there (up; at a device
+    port one nobody confirms), an LLDP neighbour is named like a managed switch, or another managed switch's base MAC is learned there
+    (bm). history.record records the devices of such a device port, but marked; api_devices.unknown_devices flags them in the same
+    cases."""
+    return bool(p.get("up") or any(e[0] in keys for e in p["l"]) or p["bm"])
+
+
 def _lldp_claims(switches: list[dict], keys: dict[str, set[int]]) -> set[tuple[tuple[int, str], tuple[int, str]]]:
     """((A, P), (B, Q)) for every LLDP entry on port P of switch A whose sysName maps (keys, switch_keys) to another switch B and whose
     element 1 or 2 (stripped) is B's port Q; a name several switches carry maps to each of them. A pair is reported by both sides

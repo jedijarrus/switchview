@@ -68,12 +68,12 @@ NO_ROLE_MAPPING = ("ENTRA_ROLE_MAPPING ist aus: jeder SSO-Benutzer hat volle Rec
 
 def check_startup_config(s: Settings) -> list[str]:
     """Stops a start that cannot run safely (RuntimeError): a SECRET_KEY under 16 characters, a COOKIE_SECURE other than auto or
-    always, an ENTRA_ROLE_MAPPING other than on or off, a negative IDLE_MINUTES. Returns the warnings for the log: a SECRET_KEY under
-    32 characters or with fewer than 8 different characters is weak but only warned about (E16: changing it means entering every
-    stored credential anew, a stop would shut out running installations). Likewise SSO with neither ENTRA_ALLOWED_ROLES nor
-    ENTRA_ALLOWED_GROUPS: documented behaviour (every user of the tenant may sign in, auth.verify_id_token), so a warning, not a stop
-    (OPEN_TENANT, with the role mapping OPEN_TENANT_READ); and SSO without the role mapping, where every SSO user is Admin as before
-    the roles (NO_ROLE_MAPPING). No message contains the key."""
+    always, an ENTRA_ROLE_MAPPING other than on or off, a negative IDLE_MINUTES or HISTORY_DAYS. Returns the warnings for the log: a
+    SECRET_KEY under 32 characters or with fewer than 8 different characters is weak but only warned about (E16: changing it means
+    entering every stored credential anew, a stop would shut out running installations). Likewise SSO with neither
+    ENTRA_ALLOWED_ROLES nor ENTRA_ALLOWED_GROUPS: documented behaviour (every user of the tenant may sign in, auth.verify_id_token),
+    so a warning, not a stop (OPEN_TENANT, with the role mapping OPEN_TENANT_READ); and SSO without the role mapping, where every SSO
+    user is Admin as before the roles (NO_ROLE_MAPPING). No message contains the key."""
     if len(s.secret_key) < 16:
         raise RuntimeError("SECRET_KEY fehlt oder ist zu kurz")
     if s.cookie_secure not in ("auto", "always"):
@@ -82,6 +82,8 @@ def check_startup_config(s: Settings) -> list[str]:
         raise RuntimeError("ENTRA_ROLE_MAPPING muss on oder off sein")
     if s.idle_minutes < 0:
         raise RuntimeError("IDLE_MINUTES muss 0 oder größer sein")
+    if s.history_days < 0:
+        raise RuntimeError("HISTORY_DAYS muss 0 oder größer sein")
     messages = []
     if len(s.secret_key) < 32 or len(set(s.secret_key)) < 8:
         messages.append("SECRET_KEY ist schwach (kürzer als 32 Zeichen oder weniger als 8 verschiedene Zeichen). Ein neuer Schlüssel "

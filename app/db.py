@@ -169,6 +169,21 @@ CREATE TABLE IF NOT EXISTS approvals (
     requested_at TEXT NOT NULL, expires_at TEXT NOT NULL,
     decided_by TEXT, decided_subject TEXT, decided_at TEXT, comment TEXT, reason TEXT, change_id INTEGER);
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, id);
+-- Phase 4b, Task 2: where each device was seen (app/history.py). Written only by history.record after a good poll (one round of
+-- poll_all at once, a single poll for its switch). One row per place - a MAC at a switch, a port and a VLAN, with the IP and name
+-- known for it - from the poll that first saw it there to the last one that did; a new row only when the place changes or another
+-- IP turns up there, otherwise last_seen moves on. Trunks and confirmed uplinks are no place; suspect marks a possible uplink.
+-- Purged after HISTORY_DAYS (history.purge). A deleted switch keeps its rows (ON DELETE SET NULL, its name in switch_name): where a
+-- device was stays a question after a switch is replaced.
+CREATE TABLE IF NOT EXISTS sightings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, mac TEXT NOT NULL,
+    switch_id INTEGER REFERENCES switches(id) ON DELETE SET NULL, switch_name TEXT NOT NULL DEFAULT '',
+    port TEXT NOT NULL, vlan TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
+    suspect INTEGER NOT NULL DEFAULT 0, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_sightings_mac ON sightings(mac, last_seen);
+CREATE INDEX IF NOT EXISTS idx_sightings_ip ON sightings(ip, last_seen) WHERE ip <> '';
+CREATE INDEX IF NOT EXISTS idx_sightings_port ON sightings(switch_id, port, last_seen);
+CREATE INDEX IF NOT EXISTS idx_sightings_seen ON sightings(last_seen);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

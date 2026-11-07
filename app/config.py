@@ -33,6 +33,9 @@ class Settings:
     })
     # A session without a request for this many minutes ends (auth.current_user); 0 = never. main.check_startup_config refuses < 0.
     idle_minutes: int = field(default_factory=lambda: int(os.getenv("IDLE_MINUTES", "120") or 120))
+    # Days of history kept (Phase 4b: the sightings, and the tables history.RETAINED names), purged nightly by history.purge; 0 = keep
+    # forever. main.check_startup_config refuses < 0.
+    history_days: int = field(default_factory=lambda: int(os.getenv("HISTORY_DAYS", "180") or 180))
 
     @property
     def role_mapping_on(self) -> bool:

@@ -157,6 +157,7 @@ The settings that matter, in `.env` unless noted:
 | `ENTRA_ROLE_MAPPING` | `off` | `on`: the role of an SSO user comes from the Entra app roles; `off`: every SSO user is Admin; any other value stops the start |
 | `ENTRA_ROLE_LESEN`, `ENTRA_ROLE_AENDERN`, `ENTRA_ROLE_FREIGEBEN`, `ENTRA_ROLE_ADMIN` | `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben`, `SwitchView.Admin` | the app role values of each role, comma-separated |
 | `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off (the behaviour before Phase 4a); a negative value stops the start |
+| `HISTORY_DAYS` | `180` | days of history kept (sightings, events, resolved findings, delivered alerts), purged nightly at 04:00; `0` = keep forever; a negative value stops the start |
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |

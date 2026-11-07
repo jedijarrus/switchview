@@ -13,7 +13,7 @@ import names as names_mod
 import pf
 import roles
 from db import audit, db
-from topology import build_map, switch_keys
+from topology import build_map, device_port, switch_keys
 
 router = APIRouter()
 
@@ -95,9 +95,10 @@ async def unknown_devices(user=Depends(auth.require(roles.LESEN))):
     out = []
     for s in m["switches"]:
         for p in s["ports"]:
-            # F3: only trunks and confirmed uplinks are skipped. An LLDP frame or a MAC flood on an access port no longer hides the
-            # devices behind it; such entries are flagged and listed after the unflagged ones, so they push no one past the cap.
-            if p["n"].startswith("Trk") or p["tr"] or (p.get("up") and p["uc"]):
+            # F3: only trunks and confirmed uplinks are skipped (topology.device_port, which history.record takes as well). An LLDP
+            # frame or a MAC flood on an access port no longer hides the devices behind it; such entries are flagged and listed after
+            # the unflagged ones, so they push no one past the cap.
+            if not device_port(p):
                 continue
             # One of the two uplink flags wherever the port table shows "Uplink (unbestätigt)" (sv-core.js isUnconfirmedUplink;
             # changes.inventory's backstop protects such ports). "uplink_lldp" keeps its name for the API, though it covers more than

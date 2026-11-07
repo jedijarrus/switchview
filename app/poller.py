@@ -507,7 +507,16 @@ def lldp_ports(num: str, ports: list[str], ifname: dict[str, str], bp2if: dict[s
     return out
 
 
-async def poll_switch(switch_id: int) -> dict:
+def utc_now() -> str:
+    """Now in UTC as the poll stores it (switches.last_poll, macs.last_seen; history.record takes a sighting's time from there):
+    YYYY-MM-DD HH:MM:SS. poll_switch takes its time only from here (the clock of the tests)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
+    """Polls the switch and stores what it read; the result is {"ok": True, "ports": n, "macs": n} or {"ok": False, "error": text}.
+    With record (a single poll: "Jetzt abfragen", the poll after a change) a good poll records its sightings right away
+    (history.record), wrapped: a failure is logged and changes nothing of the result. poll_all records once for its whole round."""
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
         async with db() as conn:
@@ -525,7 +534,7 @@ async def poll_switch(switch_id: int) -> dict:
         # Dazu die PoE-Walks des Treibers mit der Leistung, nachsichtig wie jeder andere hier (ohne snmp_poe keiner), und wo die Ports nach
         # ifType gewaehlt werden die LLDP-Tabelle der eigenen Ports (lldp_ports)
         walks = {**O, **poe_walks(drivers.driver_for(row), power=True), **(LLDP_LOC if by_iftype(driver_name) else {})}
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now = utc_now()
         failed: dict[str, Exception] = {}    # walks that failed and that _build uses for this driver, in walk order
         keeping = set(MAC_WALKS) | set(lldp_walks(driver_name))    # the walks with kept values: one that broke off counts as failed
         try:
@@ -630,6 +639,12 @@ async def poll_switch(switch_id: int) -> dict:
             )
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
             await conn.commit()
+        if record:
+            import history  # late: history → topology → changes → poller
+            try:
+                await history.record([switch_id])
+            except Exception:  # noqa: BLE001
+                log.exception("Verlauf %s", host)
         return {"ok": True, "ports": len(data["ports"]), "macs": len(data["macs"])}
 
 
@@ -772,16 +787,25 @@ def _build(W: dict, driver_name: str = "procurve") -> dict:
 
 
 async def poll_all():
+    """One round: every enabled switch, four at a time, then the sightings of every good poll recorded at once (history.record, one
+    build_map for the round: the uplink rule needs the links of all switches), wrapped like each poll."""
     async with db() as conn:
         async with conn.execute("SELECT id FROM switches WHERE enabled = 1") as cur:
             ids = [r["id"] for r in await cur.fetchall()]
     sem = asyncio.Semaphore(4)
+    good: list[int] = []
 
     async def one(i):
         async with sem:
             try:
-                await poll_switch(i)
+                if (await poll_switch(i, record=False))["ok"]:
+                    good.append(i)
             except Exception:  # noqa: BLE001
                 log.exception("Abfrage Switch %s", i)
 
     await asyncio.gather(*(one(i) for i in ids))
+    import history  # late: history → topology → changes → poller
+    try:
+        await history.record(good)
+    except Exception:  # noqa: BLE001
+        log.exception("Verlauf der Abfragerunde (%d Switches)", len(good))

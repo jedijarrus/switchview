@@ -12,8 +12,9 @@ import pytest
 # a test-only key, and a db() that no test pointed at its own tmp_path opens a throwaway database, never /data/switchview.db.
 # COOKIE_SECURE is forced to its default for the same reason (Settings reads it whenever one is made): a shell exporting
 # COOKIE_SECURE=always would put the Secure flag on every cookie, and a TestClient on http://testserver never sends those back.
-# ENTRA_ROLE_MAPPING and IDLE_MINUTES are forced to their defaults and the role values of ENTRA_ROLE_* are removed, likewise: a shell
-# exporting ENTRA_ROLE_MAPPING=on would make every SSO session of a test "Lesen", a short IDLE_MINUTES would sign tests out.
+# ENTRA_ROLE_MAPPING, IDLE_MINUTES and HISTORY_DAYS are forced to their defaults and the role values of ENTRA_ROLE_* are removed,
+# likewise: a shell exporting ENTRA_ROLE_MAPPING=on would make every SSO session of a test "Lesen", a short IDLE_MINUTES would sign
+# tests out, a HISTORY_DAYS of its own would change what history.purge() deletes.
 TEST_SECRET_KEY = "switchview-tests-only-secret-key"
 TEST_DATA_DIR = tempfile.mkdtemp(prefix="switchview-tests-")
 atexit.register(shutil.rmtree, TEST_DATA_DIR, True)
@@ -22,6 +23,7 @@ os.environ["DATA_DIR"] = TEST_DATA_DIR
 os.environ["COOKIE_SECURE"] = "auto"
 os.environ["ENTRA_ROLE_MAPPING"] = "off"
 os.environ["IDLE_MINUTES"] = "120"
+os.environ["HISTORY_DAYS"] = "180"
 for _name in ("ENTRA_ROLE_LESEN", "ENTRA_ROLE_AENDERN", "ENTRA_ROLE_FREIGEBEN", "ENTRA_ROLE_ADMIN"):
     os.environ.pop(_name, None)
 
@@ -32,7 +34,7 @@ def _test_environment():
     import config
     s = config.settings
     assert (s.secret_key, s.data_dir, s.cookie_secure) == (TEST_SECRET_KEY, TEST_DATA_DIR, "auto")
-    assert (s.entra_role_mapping, s.idle_minutes) == ("off", 120)
+    assert (s.entra_role_mapping, s.idle_minutes, s.history_days) == ("off", 120, 180)
 
 # A `show running-config` of a modular ProCurve (24-port module in slot A), 15.x layout with global port-access lines.
 # What it contains, because tests/test_cfgparse.py asserts on it by hand:

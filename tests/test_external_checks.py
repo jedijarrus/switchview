@@ -27,6 +27,7 @@ import auth
 import crypto
 import db
 import dbfix
+import history
 import main
 import names
 import pf
@@ -279,6 +280,16 @@ def test_the_scheduler_expires_requests(api, monkeypatch):
     monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
     asyncio.run(main._schedule())
     assert jobs["approvals"][0] is approvals.expire_due and jobs["approvals"][1] == "interval" and jobs["approvals"][2]["minutes"] == 10
+
+
+def test_the_scheduler_purges_the_history_nightly(api, monkeypatch):
+    """Phase 4b, Task 2: the sightings older than HISTORY_DAYS (later also events, resolved findings and delivered alerts) are purged
+    every night at 04:00 (history.purge)."""
+    jobs = {}
+    monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
+    asyncio.run(main._schedule())
+    assert jobs["history_purge"][0] is history.purge and jobs["history_purge"][1] == "cron" and (
+        jobs["history_purge"][2]["hour"], jobs["history_purge"][2]["minute"]) == (4, 0)
 
 
 async def test_the_start_prunes_sessions(database, monkeypatch):

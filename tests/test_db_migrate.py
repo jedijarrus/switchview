@@ -355,3 +355,66 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
     async with aiosqlite.connect(path) as conn:
         assert await _schema_version(conn) == version
         assert {t: await _first_row_plain(conn, t) for t in before} == rows
+
+
+# The tables and the columns Phase 4b adds (Tasks 2-8 extend both): Task 2 the sightings. A database as Phase 4a left it has none of
+# them; init_db creates each table empty, with the indexes db.SCHEMA gives it, and adds each column, which a row of before reads as
+# the column's default.
+PHASE4B_TABLES = {"sightings"}
+PHASE4B_COLUMNS: set[tuple[str, str]] = set()
+
+
+async def _index_names(conn, tables: set[str]) -> set[str]:
+    """The names of every index on the tables in tables."""
+    async with conn.execute("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'") as cur:
+        return {r[0] for r in await cur.fetchall() if r[1] in tables}
+
+
+async def _default_of(conn, table: str, column: str):
+    """What a row of before reads in table.column once migrate() added it: the value of its default expression, NULL without one."""
+    [default] = [r[3] for r in await _table_info(conn, table) if r[0] == column]
+    if default is None:
+        return None
+    async with conn.execute(f"SELECT {default}") as cur:
+        return (await cur.fetchone())[0]
+
+
+async def test_migration_adds_the_phase4b_tables_and_columns(data_dir):
+    """A database as Phase 4a left it (db.SCHEMA without the tables of PHASE4B_TABLES, every column of db.ADDED_COLUMNS but those of
+    PHASE4B_COLUMNS, one switch and one backup) gets the tables (empty, with their indexes) and the columns (the rows: the column's
+    default) from init_db, the rows keep what they held; a second init_db changes nothing."""
+    path = data_dir / "switchview.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(db.SCHEMA)
+        indexes = await _index_names(conn, PHASE4B_TABLES)
+        for table in PHASE4B_TABLES:
+            await conn.execute(f"DROP TABLE {table}")
+        for table, column, definition in db.ADDED_COLUMNS:
+            if (table, column) not in PHASE4B_COLUMNS:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        await conn.execute("INSERT INTO switches (name, host) VALUES ('SW-EK-01', '203.0.113.21')")
+        await conn.execute("INSERT INTO config_backups (switch_id, taken_at, sha, content) VALUES (1, '2026-11-01 02:30:00', 'abc', 'x')")
+        await conn.commit()
+        # the premise: none of the tables, their indexes or the columns is there yet
+        assert not await _table_names(conn) & PHASE4B_TABLES and not await _index_names(conn, PHASE4B_TABLES)
+        assert set((await _added_state(conn, PHASE4B_COLUMNS)).values()) <= {(None, None)}
+        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups")}
+
+    await db.init_db()
+
+    async with aiosqlite.connect(path) as conn:
+        assert PHASE4B_TABLES <= await _table_names(conn) and await _index_names(conn, PHASE4B_TABLES) == indexes
+        for table in PHASE4B_TABLES:
+            async with conn.execute(f"SELECT count(*) FROM {table}") as cur:
+                assert (await cur.fetchone())[0] == 0, table
+        for (table, column), (definition, value) in (await _added_state(conn, PHASE4B_COLUMNS)).items():
+            assert definition is not None and value == await _default_of(conn, table, column), (table, column)
+        for table, row in before.items():
+            assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row
+        version, rows = await _schema_version(conn), {t: await _first_row_plain(conn, t) for t in before}
+
+    await db.init_db()    # every restart of the app runs it once more
+
+    async with aiosqlite.connect(path) as conn:
+        assert await _schema_version(conn) == version
+        assert {t: await _first_row_plain(conn, t) for t in before} == rows
