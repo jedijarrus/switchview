@@ -134,7 +134,14 @@
   const isPeer = p => p.l.some(x => peerSet().has(x[0]));
   const isUplink = p => isPeer(p) || !!p.tr || !!p.up || !!p.bm;
   const isUnconfirmedUplink = p => !p.tr && ((p.up && !p.uc) || (!p.up && (isPeer(p) || p.bm)));
-  const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="Nur per LLDP gemeldet, die Gegenseite bestätigt es nicht. Ein Gerät am Port kann LLDP fälschen – vor Ort prüfen.">Uplink (unbestätigt)</span>`
+  // Why a port counts as an unconfirmed uplink, as text for the port panel and the pill's title ("" for any other port): on a link
+  // that not both switches confirm (up, not uc), else without a link by what makes it one (an LLDP neighbour named like a switch, a
+  // base MAC of another switch learned on it; isUnconfirmedUplink)
+  const unconfirmedWhy = p => !isUnconfirmedUplink(p) ? ""
+    : p.up ? "Liegt auf einer Verbindung zu einem anderen Switch, die nicht beide Switches bestätigen. Vor Ort prüfen, ob dort wirklich ein Switch steckt."
+    : [isPeer(p) && "Ein LLDP-Nachbar an diesem Port heißt wie ein verwalteter Switch.", p.bm && "An diesem Port wird die Basis-MAC eines verwalteten Switches gelernt."]
+      .filter(Boolean).join(" ") + " Eine Verbindung ist nicht erkannt. Ein Gerät am Port kann LLDP und MAC-Adressen fälschen – vor Ort prüfen.";
+  const uplinkPill = p => isUnconfirmedUplink(p) ? ` <span class="pill warn" title="${esc(unconfirmedWhy(p))}">Uplink (unbestätigt)</span>`
     : isUplink(p) ? ` <span class="pill neutral" title="Uplink: Änderungen nur im Expertenmodus">Uplink</span>` : "";
   // The ports of a link that build_map does not confirm ("uc": neither LLDP from both sides nor mutual base MACs), as "SW-A 3"; a link
   // can join a confirmed pair and a one-sided claim, so the tooltip names the ports instead of calling the whole link one-sided.

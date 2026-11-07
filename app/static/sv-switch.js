@@ -2,13 +2,31 @@
 
   /* ── Switch-Detail (Master-Detail) ── */
   const ST = { off: ["Aus", "st-off"], on: ["An", "st-prot"], protected: ["Protected", "st-prot"], known: ["Bekannte Geräte", "st-known"], radius: ["RADIUS", "st-radius"] };
-  const stPill = st => ST[st] ? `<span class="pill ${ST[st][1]}">${ST[st][0]}</span>` : `<span class="muted" title="Konfiguration noch nicht gelesen">–</span>`;
+  // A state not read yet: the dash says it to the eye (the switch view's banner says why), the hidden text to a screen reader
+  const stPill = st => ST[st] ? `<span class="pill ${ST[st][1]}">${ST[st][0]}</span>`
+    : `<span class="muted" title="Konfiguration noch nicht gelesen">–<span class="sr-only"> Konfiguration noch nicht gelesen</span></span>`;
   // Der Zugang eines Ports, wie die Ansicht ihn zeigt und zählt. Ohne NAC (802.1X/MAC-Anmeldung liest und ändert SwitchView dort nicht)
   // gibt es nur An oder Aus: ein eingeschalteter Port heißt „An“ statt „Protected“. Nur die Beschriftung, p.st vom Server bleibt der Schlüssel.
   const stOf = (s, st) => s && !has(s, "nac") ? (st === "off" ? "off" : "on") : st;
   let portIdx = {}, picked = new Set(), pickedFor = null;
   // The server's credential warnings (poller.credential_warnings: fallback to "public", SNMPv3 downgrade, secrets that do not decrypt)
   const warnList = ws => (ws || []).length ? `<div class="banner warn"><ul class="blist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "";
+  // The button of the switch view's actions and write banners (its click: data-a="edit")
+  const EDIT_ACCESS = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
+  // The banners above a switch's facts: the last poll failed or went through with gaps (poller.partial_note keeps its note in error),
+  // the credential warnings, and how SwitchView writes here.
+  // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
+  // geht (Sicherung, Konfiguration lesen, RADIUS), zeigt die Ansicht nur bei einem Treiber, der es kann.
+  function switchBanners(s) {
+    const cli = has(s, "cli"), canW = writable(s);
+    const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${EDIT_ACCESS}</div>`
+      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports aus- und wieder einschalten („An“, die Anmeldung bleibt, wie sie ist). RADIUS, Bekannte Geräte und Protected brauchen SSH. ${EDIT_ACCESS}</div>`
+      : cli && !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
+    return `${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
+      ${s.ok && s.error ? `<div class="banner warn">Abfrage unvollständig: ${esc(s.error)}</div>` : ""}
+      ${warnList(s.credWarnings)}
+      ${banner}`;
+  }
 
   async function renderSwitchDetail() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
@@ -25,19 +43,11 @@
     const links = MAP.links.filter(l => l.a === s.id || l.b === s.id);
     const cnt = st => ph.filter(p => stOf(s, p.st) === st).length;
     const stFacts = (has(s, "nac") ? [["radius", "RADIUS"], ["known", "Bekannte Geräte"], ["protected", "Protected"]] : [["on", "An"]]).concat([["off", "Aus"]]);
-    // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
-    // geht (Sicherung, Konfiguration lesen, RADIUS), zeigt die Ansicht nur bei einem Treiber, der es kann.
-    const cli = has(s, "cli"), canW = writable(s), edit = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
-    const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${edit}</div>`
-      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports aus- und wieder einschalten („An“, die Anmeldung bleibt, wie sie ist). RADIUS, Bekannte Geräte und Protected brauchen SSH. ${edit}</div>`
-      : cli && !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
+    const canW = writable(s);
     v.innerHTML = `<div class="md">${side}<div style="display:grid;gap:16px;min-width:0">
       <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
-        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${edit}</div></div>
-      ${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
-      ${s.ok && s.error ? `<div class="banner warn">Abfrage unvollständig: ${esc(s.error)}</div>` : ""}
-      ${warnList(s.credWarnings)}
-      ${banner}
+        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${EDIT_ACCESS}</div></div>
+      ${switchBanners(s)}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
       <section class="card"><div class="card-h"><h2>Ports</h2><span class="sub">VLAN wählen, um es hervorzuheben</span></div>
         <div class="card-b" style="display:grid;gap:12px">
@@ -358,9 +368,9 @@
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
-    const canEdit = writable(s) && !isTrunkPort(p);
+    const canEdit = writable(s) && !isTrunkPort(p), why = unconfirmedWhy(p);
     $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">Port bearbeiten</button></div>` : ""}
-      <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd><dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
+      <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
       <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;

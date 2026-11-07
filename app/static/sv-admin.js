@@ -271,6 +271,14 @@
   const today = () => new Date().toISOString().slice(0, 10);
   const freePill = d => !d.allowed ? `<span class="pill neutral">nicht freigegeben</span>` : d.valid_until && d.valid_until < today() ? `<span class="pill warn">abgelaufen</span>` : `<span class="pill st-known">freigegeben</span>`;
   const pfPill = d => d.pf_state === "ok" && d.pf_error ? `<span class="pill warn" title="${esc(d.pf_error)}">übernommen, Hinweis</span>` : d.pf_state === "ok" ? `<span class="pill ok" title="${esc(fmtTime(d.pf_synced_at))}">übernommen</span>` : d.pf_state === "fehler" ? `<span class="pill crit" title="${esc(d.pf_error || "")}">Fehler</span>` : d.pf_state === "aus" ? `<span class="pill neutral" title="PacketFence-API nicht eingerichtet">nicht verbunden</span>` : `<span class="muted">–</span>`;
+  // PacketFence's error under the pill (a title reaches no touch or keyboard user): for "übernommen, Hinweis" and "Fehler"
+  const pfNote = d => d.pf_error && (d.pf_state === "ok" || d.pf_state === "fehler") ? `<span class="cellnote">${esc(d.pf_error)}</span>` : "";
+  // The flags of GET /api/devices/unknown (api_devices.unknown_devices) as text under the entry's place; uplink_lldp keeps its name
+  // for the API and stands for any unconfirmed uplink with a link or a switch as LLDP neighbour, uplink_bm for a port that is one
+  // only by a base MAC learned on it
+  const UNKNOWN_FLAG_TEXT = { uplink_lldp: () => "Port gilt als Uplink (unbestätigt)",
+    uplink_bm: () => "Port gilt als Uplink (unbestätigt): dort wird die Basis-MAC eines Switches gelernt",
+    lldp: d => d.lldp ? `hinter LLDP-Gerät „${d.lldp}“` : "hinter LLDP-Gerät", many: d => `Port mit ${d.mc} Geräten` };
   async function renderDevices() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     let list;
@@ -289,7 +297,7 @@
         && (!t || [d.name, d.mac, d.location, d.owner, d.role, d.notes, KINDS[d.kind]].some(x => String(x || "").toLowerCase().includes(t))));
       $("#dbody").innerHTML = f.length ? f.map(d => `<tr class="clickrow" data-mac="${esc(d.mac)}"><td><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}</div></td>
         <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td>
-        <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}</td></tr>`).join("")
+        <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}${pfNote(d)}</td></tr>`).join("")
         : `<tr><td colspan="6" class="muted">${list.length ? "Kein Gerät passt zum Filter." : "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“."}</td></tr>`;
     };
     rows();
@@ -300,8 +308,7 @@
     $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     try {
       const un = await api("GET", "/api/devices/unknown");
-      const flagText = { uplink_lldp: () => "Port gilt per LLDP als Uplink (unbestätigt)", lldp: d => d.lldp ? `hinter LLDP-Gerät „${d.lldp}“` : "hinter LLDP-Gerät", many: d => `Port mit ${d.mc} Geräten` };
-      const unknownFlags = d => (d.flags || []).filter(f => flagText[f]).map(f => `<div class="muted">${esc(flagText[f](d))}</div>`).join("");
+      const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
       if (!$("#ulist")) return;
       $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th></th></tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
@@ -316,7 +323,8 @@
     const roleField = ROLES.roles.length
       ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${d.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
       : `<input id="dv-role" value="${esc(d.role || "")}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
-    const body = `<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
+    // PacketFence's error of a stored device stands above the form (the list shows it under the pill)
+    const body = `${!isNew && d.pf_error ? `<div class="banner warn"><span><b>PacketFence:</b> ${esc(d.pf_error)}</span></div>` : ""}<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
         <label class="field"><span>Name</span><input id="dv-name" value="${esc(d.name || "")}" maxlength="64" required autocomplete="off"></label>
         <label class="field"><span>Typ</span><select id="dv-kind">${Object.entries(KINDS).map(([k, l]) => `<option value="${k}" ${d.kind === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <label class="field"><span>Rolle</span>${roleField}</label>
@@ -393,32 +401,41 @@
   }
 
   /* ── Einstellungen ── */
+  // A stored secret that does not decrypt (s = GET /api/settings, k its key in s.unreadable; SECRET_KEY changed?): it has to be
+  // entered anew. id is the note's own id (<field id>-unread), which its field names in aria-describedby; the note stands beside the
+  // field, not in its label (no block in a label, and a click on the note does not focus the field)
+  const unreadNote = (s, k, id) => (s.unreadable || []).includes(k) ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – bitte neu eingeben</span>` : "";
   async function renderSettings() {
     const v = $("#view");
     const s = await api("GET", "/api/settings").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!s) return;
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
-    // A stored secret that does not decrypt (GET /api/settings "unreadable", SECRET_KEY changed?): it has to be entered anew
-    const unreadNote = k => (s.unreadable || []).includes(k) ? `<p class="note warn" style="margin:0">lässt sich nicht entschlüsseln – bitte neu eingeben</p>` : "";
+    // A secret field (k its key in s.unreadable, set: a value is stored): the input with its hint and its unread note as siblings,
+    // both naming the input's description
+    const secretField = (id, label, k, set, hint = "") => {
+      const note = unreadNote(s, k, id + "-unread"), desc = [hint && id + "-hint", note && id + "-unread"].filter(Boolean).join(" ");
+      return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? "gesetzt – leer lassen = unverändert" : ""}"${desc ? ` aria-describedby="${desc}"` : ""}>`
+        + `${hint ? `<span class="hint" id="${id}-hint">${hint}</span>` : ""}${note}</div>`;
+    };
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
         <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table"</span></label>
         ${destNote("s-url")}
-        <div class="grid2"><label class="field"><span>API-Key</span><input id="s-key" type="password" autocomplete="new-password" placeholder="${s.opnsense_key_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("opnsense_key")}</label>
-        <label class="field"><span>API-Secret</span><input id="s-secret" type="password" autocomplete="new-password" placeholder="${s.opnsense_secret_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("opnsense_secret")}</label></div>
+        <div class="grid2">${secretField("s-key", "API-Key", "opnsense_key", s.opnsense_key_set)}
+        ${secretField("s-secret", "API-Secret", "opnsense_secret", s.opnsense_secret_set)}</div>
         <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
         <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten" eines Switches eingetragen</span></label>
-        <label class="field"><span>Shared Secret der Switches</span><input id="s-rk" type="password" autocomplete="new-password" placeholder="${s.radius_key_set ? "gesetzt – leer lassen = unverändert" : ""}"><span class="hint">wie in PacketFence beim Switch hinterlegt</span>${unreadNote("radius_key")}</label></div>
+        ${secretField("s-rk", "Shared Secret der Switches", "radius_key", s.radius_key_set, "wie in PacketFence beim Switch hinterlegt")}</div>
         ${destNote("s-rs")}
         <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
         ${destNote("s-pfu")}
         <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"></label>
-        <label class="field"><span>API-Kennwort</span><input id="s-pfpass" type="password" autocomplete="new-password" placeholder="${s.pf_pass_set ? "gesetzt – leer lassen = unverändert" : ""}">${unreadNote("pf_pass")}</label></div>
+        ${secretField("s-pfpass", "API-Kennwort", "pf_pass", s.pf_pass_set)}</div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-pftls")}
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
@@ -450,5 +467,5 @@
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });
-    $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${r.entries} Einträge aus der ARP-Tabelle` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
+    $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${r.entries} Einträge aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
   }

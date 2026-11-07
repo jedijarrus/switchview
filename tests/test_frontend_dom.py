@@ -396,3 +396,111 @@ def test_escape_closes_the_list_before_the_field_loses_its_text():
     js = ('(async () => { ' + SEARCH + 'const q = $("#q"), a = q.fire("keydown", {key: "Escape"}), b = q.fire("keydown", {key: "Escape"}); '
           'return [a.defaultPrevented, b.defaultPrevented, $("#results").hidden]; })()')
     assert in_dom(js) == [True, False, True]
+
+
+# Phase 5 Task 6: the reasons stand in the page, not only in a title (touch and keyboard users see no tooltip), and the hints of a
+# partial poll have their tests
+UNCONF = 'MAP = {switches: [{id: 1, k: "A", sys: "A", ports: []}, {id: 2, k: "core", sys: "core", ports: []}], links: [], vlans: {}}; '
+TAIL = "Eine Verbindung ist nicht erkannt. Ein Gerät am Port kann LLDP und MAC-Adressen fälschen – vor Ort prüfen."
+PEER, BM = "Ein LLDP-Nachbar an diesem Port heißt wie ein verwalteter Switch.", "An diesem Port wird die Basis-MAC eines verwalteten Switches gelernt."
+
+
+@pytest.mark.parametrize("port, want", [
+    ({"up": True, "uc": False, "l": [], "tr": ""},
+     "Liegt auf einer Verbindung zu einem anderen Switch, die nicht beide Switches bestätigen. Vor Ort prüfen, ob dort wirklich ein Switch steckt."),
+    ({"l": [["core", "5"]], "tr": ""}, f"{PEER} {TAIL}"),
+    ({"l": [], "bm": True, "tr": ""}, f"{BM} {TAIL}"),
+    ({"l": [["core", "5"]], "bm": True, "tr": ""}, f"{PEER} {BM} {TAIL}"),
+    ({"up": True, "uc": True, "l": [], "tr": ""}, ""),
+    ({"l": [], "tr": "Trk1", "bm": True}, "")])
+def test_an_unconfirmed_uplink_says_why(port, want):
+    why, pill = in_dom(UNCONF + f"const p = {json.dumps(port)}; [unconfirmedWhy(p), uplinkPill(p)]")
+    assert why == want and ((f'title="{want}">Uplink (unbestätigt)' in pill) if want else "unbestätigt" not in pill)
+
+
+def test_the_port_panel_shows_why_a_port_is_an_unconfirmed_uplink():
+    js = (UNCONF + 'const p = {n: "3", l: [], bm: true, tr: "", u: ["1"], t: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "1", st: "", '
+          'mb: []}; portIdx = {"3": p}; openPort({id: 1, k: "A", model: "x", caps: [], ports: [p]}, "3"); $("#dr-body").innerHTML')
+    html = in_dom(js)
+    assert '<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ' + BM in html
+
+
+LINK = {"a": 1, "b": 2, "an": "A", "bn": "core", "A": {"ports": ["3"], "trunk": "", "speed": 1000}, "B": {"ports": ["5"], "trunk": "", "speed": 1000},
+        "onlyA": [], "onlyB": [], "native": []}
+
+
+@pytest.mark.parametrize("src, confirmed, text", [("mac", True, "<td>MAC-Tabellen</td>"), ("lldp", True, "<td>LLDP (beide Seiten)</td>"),
+                                                  ("mac", False, "<td>MAC-Tabellen (unbestätigt)<span class=\"cellnote\">"),
+                                                  ("lldp", False, "<td>LLDP (unbestätigt)<span class=\"cellnote\">")])
+def test_the_links_table_says_how_a_link_was_found(src, confirmed, text):
+    html = in_dom(UNCONF + f"linksTable([{json.dumps({**LINK, 'src': src, 'confirmed': confirmed})}])")
+    assert text in html and ("Nicht von beiden Switches bestätigt: A 3, core 5" in html) is (not confirmed)
+
+
+@pytest.mark.parametrize("ok, error, want", [
+    (True, "Teilweise gelesen: fdb fehlgeschlagen", '<div class="banner warn">Abfrage unvollständig: Teilweise gelesen: fdb fehlgeschlagen</div>'),
+    (False, "Timeout", '<div class="error">Letzte Abfrage fehlgeschlagen: Timeout</div>'),
+    (True, "", None)])
+def test_the_switch_view_names_a_partial_or_failed_poll(ok, error, want):              # Phase 3 T10-RR1
+    html = in_dom(f"switchBanners({{ok: {json.dumps(ok)}, error: {json.dumps(error)}, caps: ['cli'], ssh: true, cfgAt: '2026-11-06', credWarnings: []}})")
+    assert (want in html) if want else ("Abfrage" not in html)
+
+
+def test_the_overview_groups_a_partial_poll():                                         # Phase 3 T10-RR1
+    js = ('MAP = {switches: [{id: 1, k: "A", ok: true, error: "Teilweise gelesen: lldpSys", ports: []}, {id: 2, k: "B", ok: false, error: "x", ports: []}], '
+          'links: [], vlans: {}}; issueGroups().map(g => [g.sev, g.t, g.sum, g.items.map(i => i.d)])')
+    assert in_dom(js) == [["crit", "Abfrage fehlgeschlagen", "B", ["x"]], ["warn", "Abfrage unvollständig", "A", ["Teilweise gelesen: lldpSys"]]]
+
+
+def test_an_unread_state_is_named_for_screen_readers():
+    assert in_dom('stPill("")') == ('<span class="muted" title="Konfiguration noch nicht gelesen">–<span class="sr-only"> Konfiguration noch nicht '
+                                    'gelesen</span></span>')
+
+
+def test_unknown_device_flags_read_as_text():
+    assert in_dom('[Object.keys(UNKNOWN_FLAG_TEXT), UNKNOWN_FLAG_TEXT.uplink_lldp({}), UNKNOWN_FLAG_TEXT.uplink_bm({})]') == [
+        ["uplink_lldp", "uplink_bm", "lldp", "many"], "Port gilt als Uplink (unbestätigt)",
+        "Port gilt als Uplink (unbestätigt): dort wird die Basis-MAC eines Switches gelernt"]
+
+
+def test_the_packetfence_reason_is_shown_inline():
+    assert in_dom('[pfNote({pf_state: "fehler", pf_error: "HTTP 500 <x>"}), pfNote({pf_state: "ok", pf_error: ""}), '
+                  'pfNote({pf_state: "aus", pf_error: "y"})]') == ['<span class="cellnote">HTTP 500 &lt;x&gt;</span>', "", ""]
+    js = ('(async () => { ROLES = {configured: true, roles: []}; let cap = null; modal = (t, b) => { cap = b; }; '
+          'await editDevice({mac: "aa:bb:cc:00:00:01", name: "Drucker", kind: "drucker", pf_state: "fehler", pf_error: "HTTP 500"}, false); return cap; })()')
+    assert '<div class="banner warn"><span><b>PacketFence:</b> HTTP 500</span></div>' in in_dom(js)
+
+
+SETTINGS = ('ME = {name: "x"}; api = async (m, u) => u === "/api/settings" ? {poll_minutes: 15, opnsense_url: "", opnsense_verify_tls: true, '
+            'radius_server: "", pf_url: "", pf_user: "", pf_verify_tls: true, unreadable: ["opnsense_key", "radius_key", "pf_pass"]} : '
+            '{ok: true, entries: 5, skipped: 2}; await renderSettings(); ')
+
+
+def test_unreadable_secrets_are_noted_outside_any_label():
+    html = in_dom('(async () => { ' + SETTINGS + 'return $("#view").innerHTML; })()')
+    assert html.count('<span class="note warn" id="s-') == 3 and 'aria-describedby="s-key-unread"' in html and 'id="s-key-unread"' in html
+    assert 'aria-describedby="s-secret-unread"' not in html and 'id="s-pfpass-unread"' in html
+    assert not re.search(r"<label\b(?:(?!</label>).)*<p\b", html, re.S)
+
+
+def test_names_refresh_names_skipped_entries():
+    js = ('(async () => { ' + SETTINGS + '$("#s-names").fire("click", {target: $("#s-names")}); await new Promise(r => setTimeout(r, 20)); '
+          'return $("#toasts").children.map(t => t.textContent); })()')
+    assert in_dom(js) == ["5 Einträge aus der ARP-Tabelle, 2 übersprungen"]
+
+
+def test_the_shared_secret_keeps_its_hint_as_description():
+    """The hint of s-rk left the label with the note (it was part of the field's name): the input names it in aria-describedby, next
+    to the note when that is there."""
+    html = in_dom('(async () => { ' + SETTINGS + 'return $("#view").innerHTML; })()')
+    assert 'aria-describedby="s-rk-hint s-rk-unread"' in html and '<span class="hint" id="s-rk-hint">wie in PacketFence beim Switch hinterlegt</span>' in html
+
+
+def test_the_device_lists_show_the_packetfence_error_and_the_flags_as_text():
+    js = ('(async () => { api = async (m, u) => u === "/api/devices" ? [{mac: "aa:bb:cc:00:00:01", name: "Drucker", kind: "drucker", allowed: 0, '
+          'pf_state: "fehler", pf_error: "HTTP 500"}] : u === "/api/pf/roles" ? {configured: true, roles: []} : [{mac: "aa:bb:cc:00:00:02", sw: "A", '
+          'sid: 1, port: "3", vlan: "1", st: "", flags: ["uplink_bm"], lldp: "", mc: 2}]; await renderDevices(); '
+          'return [$("#dbody").innerHTML, $("#ulist").innerHTML]; })()')
+    devices, unknown = in_dom(js)
+    assert '<span class="pill crit" title="HTTP 500">Fehler</span><span class="cellnote">HTTP 500</span>' in devices
+    assert '<div class="muted">Port gilt als Uplink (unbestätigt): dort wird die Basis-MAC eines Switches gelernt</div>' in unknown

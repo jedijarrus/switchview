@@ -221,3 +221,14 @@ async def test_a_port_the_uplink_backstop_protects_is_flagged_as_an_unconfirmed_
     out = await unknown()
     assert (entry(out, MAC1)["port"], entry(out, MAC1)["flags"]) == ("Gi1/0/2", ["uplink_lldp", "lldp"])
     assert (entry(out, MAC2)["port"], entry(out, MAC2)["flags"]) == ("Gi1/0/1", ["lldp"])
+
+
+# ── Phase 5 Task 6 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+async def test_a_device_behind_a_base_mac_only_uplink_is_flagged_and_listed_last(net):    # Phase 3 T9-g
+    """SW-A learns SW-B's base MAC on port 3, SW-B never SW-A's: no link, but port 3 is an uplink by the base MAC alone ("bm", the port
+    table shows "Uplink (unbestätigt)"). The device behind it is flagged "uplink_bm" and listed after the unflagged one on port 2."""
+    await add(net, "SW-A", "10.0.0.3", "procurve", W_SAMPLE, fdb(bp("3"), B_BASE), fdb(bp("3"), MAC1), fdb(bp("2"), MAC2), base_mac=A_BASE)
+    await add(net, "SW-B", "10.0.0.4", "procurve", W_SAMPLE, base_mac=B_BASE)
+    m = await main.build_map()
+    assert m["links"] == [] and port(m, "SW-A", "3")["bm"] and not port(m, "SW-A", "3").get("up")
+    assert [(e["mac"], e["port"], e["flags"]) for e in await unknown()] == [(MAC2, "2", []), (MAC1, "3", ["uplink_bm"])]

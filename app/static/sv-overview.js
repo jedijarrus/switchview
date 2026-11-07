@@ -38,6 +38,10 @@
     renderTopo($("#topo"));
   }
 
+  // How a link was found ("Erkannt über"); an unconfirmed one names its unconfirmed ports below, in the cell (a title reaches no touch
+  // or keyboard user). Since Phase 3 Task 9 a MAC link can be unconfirmed too (its base MACs learned on more than one port).
+  const linkVia = l => l.confirmed ? (l.src === "mac" ? "MAC-Tabellen" : "LLDP (beide Seiten)")
+    : `${l.src === "mac" ? "MAC-Tabellen" : "LLDP"} (unbestätigt)<span class="cellnote">${esc(unconfTitle(l))}</span>`;
   // focusId: the switch whose detail shows the table (its name first)
   function linksTable(links, focusId) {
     if (!links.length) return `<div class="empty">Keine Verbindungen erkannt.</div>`;
@@ -47,7 +51,7 @@
       const det = issue ? `<details class="lk"><summary><span class="pill warn">${issue} Abweichung${issue > 1 ? "en" : ""}</span> <span class="linkbtn">Details</span></summary><div style="display:grid;gap:4px;margin-top:6px">
         ${l.onlyA.length ? `<div>nur ${esc(l.an)}: ${chips(l.onlyA)}</div>` : ""}${l.onlyB.length ? `<div>nur ${esc(l.bn)}: ${chips(l.onlyB)}</div>` : ""}${l.native.length ? `<div>ungetaggt verschieden: ${chips(l.native)}</div>` : ""}</div></details>` : `<span class="pill ok">gleich</span>`;
       const side = (name, x) => `${esc(name)} <span class="mono muted">${esc(x.trunk || x.ports.join(","))}</span>`, flip = focusId != null && l.b === focusId;
-      return `<tr><td><b>${esc(flip ? l.bn : l.an)}</b> ⇄ <b>${esc(flip ? l.an : l.bn)}</b></td><td>${side(l.an, l.A)}<br>${side(l.bn, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td${l.confirmed ? "" : ` title="${esc(unconfTitle(l))}"`}>${l.src === "mac" ? "MAC-Tabellen" : l.confirmed ? "LLDP (beide Seiten)" : "LLDP (nur eine Seite, unbestätigt)"}</td><td>${det}</td></tr>`;
+      return `<tr><td><b>${esc(flip ? l.bn : l.an)}</b> ⇄ <b>${esc(flip ? l.an : l.bn)}</b></td><td>${side(l.an, l.A)}<br>${side(l.bn, l.B)}</td><td class="num">${n > 1 ? n + " × " : ""}${speedTxt(per)}</td><td>${linkVia(l)}</td><td>${det}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
   }
 
