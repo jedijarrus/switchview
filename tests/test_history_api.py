@@ -5,6 +5,11 @@ The CSV (app/csvout.py) is UTF-8 with a BOM, ";" and CRLF, and a cell that start
 
 A fresh database per test (apifix.fresh_db), the rows of sightings written directly through dbfix.
 """
+import contextlib
+import pathlib
+import re
+from datetime import datetime, timezone
+
 import pytest
 
 import apifix
@@ -90,14 +95,14 @@ def test_a_cell_that_starts_like_a_formula_is_quoted(value, cell):              
 
 
 def test_the_csv_has_a_bom_semicolons_and_quotes_where_needed():
-    assert csvout.render(["A", "B"], [["x;y", 'sag "hi"'], ["zwei\nZeilen", "=1"]]) == '﻿A;B\r\n"x;y";"sag ""hi"""\r\n"zwei\nZeilen";\'=1\r\n'
+    assert csvout.render(["A", "B"], [["x;y", 'sag "hi"'], ["zwei\nZeilen", "=1"]]) == '\ufeffA;B\r\n"x;y";"sag ""hi"""\r\n"zwei\nZeilen";\'=1\r\n'
 
 
 def test_the_history_csv_exports_the_search(api):
     sight(name="=HYPERLINK(\"http://x\")")
     r = api.get("/api/history.csv", params={"q": MAC})
     assert r.headers["content-type"].startswith("text/csv") and r.headers["content-disposition"].startswith('attachment; filename="switchview-verlauf-')
-    head, row = r.text.lstrip("﻿").splitlines()[:2]
+    head, row = r.text.lstrip("\ufeff").splitlines()[:2]
     assert head.startswith("MAC;Hersteller;IP;Name;Switch;Port;VLAN;") and "'=HYPERLINK" in row
 
 
@@ -105,7 +110,7 @@ def test_the_export_stops_at_its_maximum(api, monkeypatch):
     for i in range(3):
         sight(port=str(i))
     monkeypatch.setattr(history, "EXPORT_MAX", 2)
-    assert len(api.get("/api/history.csv", params={"q": MAC}).text.lstrip("﻿").splitlines()) == 3
+    assert len(api.get("/api/history.csv", params={"q": MAC}).text.lstrip("\ufeff").splitlines()) == 3
 
 
 # Beyond the plan's block: the cases the interface names that its tests leave open
@@ -166,3 +171,97 @@ def test_the_csv_refuses_a_bad_question_and_marks_a_possible_uplink(api):
     assert api.get("/api/history.csv", params={"q": "a"}).json()["detail"] == history.QUERY_HELP
     row = api.get("/api/history.csv", params={"q": MAC}).text.splitlines()[1]
     assert row == "aa:bb:cc:00:00:01;;;;A;1;20;2026-11-01 10:00:00;2026-11-01 10:00:00;ja"
+
+
+# Review round 1 of Task 3: a guard for the BOM, and pins of behaviour no test above fails without
+
+TEXT_FILES = {".py", ".js", ".html", ".css", ".md", ".json", ".txt", ".svg"}    # the fonts are binary and may hold any bytes
+
+
+def test_no_file_carries_an_invisible_bom():
+    """The BOM of the CSV is written as its escape (backslash, u, feff), never as the invisible character U+FEFF itself: an editor or
+    a tool that strips a stray BOM would take it from csvout and from the expected text of the tests at once, the tests would still
+    agree, and Excel would show broken umlauts."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    bom = "\ufeff".encode()
+    found = [str(p.relative_to(root)) for top in ("app", "tests", "docs") for p in sorted((root / top).rglob("*"))
+             if p.suffix in TEXT_FILES and bom in p.read_bytes()]
+    assert found == []
+
+
+def test_a_percent_sign_an_underscore_and_a_backslash_are_found_as_themselves(api):
+    """Pin: the text of a search is text, not a LIKE pattern (history._question escapes the backslash first, then "%" and "_").
+    Unescaped, "50%" found "pc-50x" as well, "a_b" every row (the MAC holds "a:b"), and "a\\b" found "ab" instead of "a\\b"."""
+    for name in ("50% Rabatt", "pc-50x", "a_b", "axb", "a\\b", "ab"):
+        sight(name=name)
+    for q, want in (("50%", ["50% Rabatt"]), ("a_b", ["a_b"]), ("a\\b", ["a\\b"])):
+        assert [r["name"] for r in api.get("/api/history", params={"q": q}).json()["rows"]] == want, q
+
+
+def test_a_search_by_name_pages_to_its_end(api):
+    """Pin: the two LIKE terms of a text search stand in parentheses before the cursor's condition. Without them a name hit ignored
+    the cursor (name LIKE x OR (mac LIKE x AND cursor)): every page began again with the newest rows and "next" never ran out, so a
+    pager in the UI would loop for ever."""
+    ids = [sight(mac=f"aa:bb:cc:00:02:{i:02x}", name=f"pc-{i}") for i in range(5)]
+    seen, cursor = [], None
+    for _ in ids:                                              # at most one page per row: a pager that never ends fails here
+        page = api.get("/api/history", params={"q": "pc-", "limit": 2, **({"cursor": cursor} if cursor else {})}).json()
+        seen += [r["id"] for r in page["rows"]]
+        cursor = page["next"]
+        if not cursor:
+            break
+    assert (seen, cursor) == (ids[::-1], None)
+
+
+@pytest.fixture
+def ran_sql(monkeypatch):
+    """Every statement history runs on its connections, as (text, arguments), recorded on its way to the real database."""
+    ran = []
+    real = history.db
+
+    @contextlib.asynccontextmanager
+    async def recording():
+        async with real() as conn:
+            execute = conn.execute
+
+            def logged(sql, args=()):
+                ran.append((sql, tuple(args)))
+                return execute(sql, args)
+
+            conn.execute = logged
+            yield conn
+
+    monkeypatch.setattr(history, "db", recording)
+    return ran
+
+
+@pytest.mark.parametrize("ask, index", [({"q": MAC}, "idx_sightings_mac"), ({"q": "10.0.0.5"}, "idx_sightings_ip"),
+                                        ({"switch_id": 1, "port": "7"}, "idx_sightings_port"), ({"q": "drucker"}, "idx_sightings_seen")])
+@pytest.mark.parametrize("cursor", [None, "2026-11-01 10:00:00|5"])
+def test_each_search_runs_on_its_index_and_sorts_nothing(api, ran_sql, ask, index, cursor):
+    """Pin of the plans under "Kosten der Erfassung", with and without a cursor: a MAC, an IP and a port each search their own index,
+    a part of a name walks idx_sightings_seen from the newest row, and none sorts on its own (one line of the plan, no temp b-tree).
+    The partial index idx_sightings_ip serves only a query that names its condition: with "ip = ?" alone SQLite walks
+    idx_sightings_seen over the whole history, about half a second at 500 000 rows."""
+    assert api.get("/api/history", params={**ask, **({"cursor": cursor} if cursor else {})}).status_code == 200
+    (sql, args), = ran_sql
+    plan = [row[3] for row in dbfix.query("EXPLAIN QUERY PLAN " + sql, args)]
+    assert len(plan) == 1 and re.search(rf" USING (COVERING )?INDEX {index}\b", plan[0]), plan
+
+
+class LateEvening(datetime):
+    """23:30 UTC on 2026-11-07, already 00:30 on the 8th in Berlin: now() without a zone answers the local time."""
+
+    @classmethod
+    def now(cls, tz=None):
+        utc = datetime(2026, 11, 7, 23, 30, tzinfo=timezone.utc)
+        return utc.astimezone(tz) if tz else datetime(2026, 11, 8, 0, 30)
+
+
+def test_the_download_is_named_by_the_date_in_utc(api, monkeypatch):
+    """Pin of csvout.response: the whole name, <stem>-<YYYY-MM-DD>.csv with today's date in UTC (the times in the file are UTC too)."""
+    sight()
+    monkeypatch.setattr(csvout, "datetime", LateEvening)
+    r = api.get("/api/history.csv", params={"q": MAC})
+    assert (r.headers["content-type"], r.headers["content-disposition"]) == (
+        "text/csv; charset=utf-8", 'attachment; filename="switchview-verlauf-2026-11-07.csv"')

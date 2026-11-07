@@ -29,7 +29,7 @@ def render(header: list[str], rows: Iterable[Iterable]) -> str:
     writer = csv.writer(buf, delimiter=";", lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
     writer.writerow([cell(v) for v in header])
     writer.writerows([cell(v) for v in row] for row in rows)
-    return "﻿" + buf.getvalue()
+    return "\ufeff" + buf.getvalue()
 
 
 def response(text: str, stem: str) -> Response:
