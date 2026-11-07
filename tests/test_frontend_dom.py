@@ -496,6 +496,15 @@ def test_unreadable_secrets_are_noted_outside_any_label():
     assert not re.search(r"<label\b(?:(?!</label>).)*<p\b", html, re.S)
 
 
+# Task 10 (browser check): the note of an unreadable secret asks an Admin to type it again; below Admin, where every field is locked,
+# it names the role that can (the T8-e rule: no sentence asks for what the reader cannot do)
+@pytest.mark.parametrize("role, tail", [("admin", "bitte neu eingeben"), ("freigeben", "neu eingeben braucht die Rolle „Admin“")])
+def test_the_unreadable_note_asks_only_an_admin_to_type_it_again(role, tail):
+    prefix = SETTINGS.replace('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; ', role_me(role))
+    html = in_dom('(async () => { ' + prefix + 'return $("#view").innerHTML; })()')
+    assert html.count(f'">lässt sich nicht entschlüsseln – {tail}</span>') == 3
+
+
 def test_names_refresh_names_skipped_entries():
     js = ('(async () => { ' + SETTINGS + '$("#s-names").fire("click", {target: $("#s-names")}); await new Promise(r => setTimeout(r, 20)); '
           'return $("#toasts").children.map(t => t.textContent); })()')
@@ -1176,18 +1185,39 @@ def test_a_second_401_keeps_the_reason_the_login_page_shows(answers, between, wa
 
 
 # Review round 1: a stored zone list the field cannot hold as it is (SVLogic.lossyScopes) is named above the field, which names the
-# note in aria-describedby; a list it holds has no note
+# note in aria-describedby; a list it holds has no note. Task 10: only an Admin, who has „Zonen speichern“, reads that saving would
+# change them (the T8-e rule: no sentence points at a button the reader lacks)
 LOSSY = ("Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: „A=B“, „Z.H“. Eine Zone mit Komma oder mit dem Namen "
-         "„Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben; „Zonen speichern“ würde sie ändern.")
+         "„Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben")
 
 
+@pytest.mark.parametrize("role", ["admin", "freigeben"])
 @pytest.mark.parametrize("entries, noted", [([{"principal": "Z.EK", "zones": ["EK"]}], False),
                                             ([{"principal": "A=B", "zones": ["EK"]}, {"principal": "Z.H", "zones": ["Haus 1, Nord"]}], True)])
-def test_the_zones_card_names_entries_the_field_cannot_hold(entries, noted):
-    js = '(async () => { ' + SETTINGS.replace("{entries: []}", json.dumps({"entries": entries})) + 'return $("#view").innerHTML; })()'
+def test_the_zones_card_names_entries_the_field_cannot_hold(entries, noted, role):
+    prefix = SETTINGS.replace('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; ', role_me(role))
+    js = '(async () => { ' + prefix.replace("{entries: []}", json.dumps({"entries": entries})) + 'return $("#view").innerHTML; })()'
     html = in_dom(js)
-    assert (f'<p class="note warn" id="s-scopes-lossy" style="margin:0">{LOSSY}</p>' in html) == noted
+    end = "; „Zonen speichern“ würde sie ändern." if role == "admin" else "."
+    assert (f'<p class="note warn" id="s-scopes-lossy" style="margin:0">{LOSSY}{end}</p>' in html) == noted
+    assert "würde sie ändern" not in html or role == "admin"
     assert ('aria-describedby="s-scopes-hint s-scopes-lossy"' in html) == noted and ('aria-describedby="s-scopes-hint"' in html) == (not noted)
+
+
+# Task 10 (browser check): after "Zonen speichern" the field holds what the server stored; a warning about stored entries it could not
+# hold goes with them (hidden, no longer the field's description), and stays when the answer still has such an entry
+@pytest.mark.parametrize("answer, kept", [([{"principal": "Z.EK", "zones": ["EK"]}], False), ([{"principal": "A=B", "zones": ["EK"]}], True)])
+def test_saving_the_zones_drops_a_warning_that_no_longer_holds(answer, kept):
+    js = ('(async () => { ME = {name: "x", role: "admin", zones: null, four_eyes: false}; '
+          'api = async (m, u, b) => m === "PUT" ? %s : u === "/api/settings" ? ' + SETTINGS_ANSWER + ' : u === "/api/zone-scopes" ? %s : {}; '
+          'await renderSettings(); const before = [$("#s-scopes-lossy").hidden, $("#s-scopes").getAttribute("aria-describedby")]; '
+          '$("#s-scopes").value = "Z.EK = EK"; await $("#s-zones-save").handlers.click[0]({target: $("#s-zones-save")}); '
+          'return [before, $("#s-scopes-lossy").hidden, $("#s-scopes").getAttribute("aria-describedby"), '
+          '$("#view").innerHTML.includes(\'id="s-scopes-lossy"\')]; })()'
+          ) % (json.dumps({"entries": answer}), json.dumps({"entries": [{"principal": "Z.H", "zones": ["Haus 1, Nord"]}]}))
+    before, hidden, described, rendered = in_dom(js)
+    assert rendered and before == [False, None]          # the stub keeps the markup's attribute in innerHTML, not in getAttribute
+    assert (hidden, described) == ((False, None) if kept else (True, "s-scopes-hint"))
 
 
 # Phase 4a Task 9: the four-eyes principle in the UI - the preview requests an expert-mode change that needs an approval, the tab
@@ -1218,8 +1248,8 @@ REQUEST = ('(async () => { const calls = []; let n = 0, drawn = 0; refreshApprov
            'const labels = $("#m-foot").children.map(b => b.textContent), body = $("#m-body").innerHTML, b = $("#m-foot").children[labels.length - 1]; '
            'if (labels.includes("Freigabe anfordern")) await b.handlers.click[0](); '
            'return [labels, body, b.disabled, $("#modal").hidden, $("#toasts").children.map(t => t.textContent), n, drawn, calls.map(c => c[1])]; })()')
-FOUR_EYES_BANNER = ('<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus führt erst aus, wenn eine zweite '
-                    'Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>')
+FOUR_EYES_BANNER = ('<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus wird erst ausgeführt, wenn eine '
+                    'zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>')
 
 
 @pytest.mark.parametrize("where, drawn", [('current = "switches";', 0), ('current = "approvals";', 1)], ids=["switch-view", "approvals-view"])
@@ -1316,8 +1346,8 @@ def test_an_own_request_is_offered_again_after_it_ended_without_running(own, sta
 # Beyond the brief: the card says whether the principle is on, why a role below Freigeben does not review, and each row names the
 # requester with the role, the change with its kind and the status with the expiry of an open one (escaped)
 @pytest.mark.parametrize("role, four, sentence, gate", [
-    ("aendern", True, "Vier-Augen-Prinzip an: Änderungen im Expertenmodus führen erst nach der Freigabe durch eine zweite Person mit der Rolle "
-                      "„Freigeben“ aus.", True),
+    ("aendern", True, "Vier-Augen-Prinzip an: Änderungen im Expertenmodus werden erst nach der Freigabe durch eine zweite Person mit der "
+                      "Rolle „Freigeben“ ausgeführt.", True),
     ("freigeben", False, "Vier-Augen-Prinzip aus: offene Anfragen lassen sich weiter prüfen, ablehnen oder zurückziehen.", False)])
 def test_the_view_says_whether_four_eyes_are_on_and_names_each_request(role, four, sentence, gate):
     rows = [{**A, "own": True},
@@ -1476,10 +1506,29 @@ def test_the_emergency_login_is_not_offered_to_approve(method, approve):
     assert (labels, note in body) == ((["Abbrechen", "Ablehnen", "Freigeben und ausführen"], False) if approve else (["Abbrechen", "Ablehnen"], True))
 
 
-def test_a_failed_review_says_why():
-    act = 'await reviewApproval(4); return [$("#m-title").textContent, $("#m-body").innerHTML, $("#m-foot").children.map(b => b.textContent)];'
-    assert review(answers(preview='throw new Error("Switch ist deaktiviert");'), act) == [
-        "Anfrage #4 prüfen", '<div class="error">Switch ist deaktiviert</div>', ["Schließen"]]
+COMMENT_FIELD = '<label class="field"><span>Kommentar (optional)</span><textarea id="ap-comment" rows="2" maxlength="500"></textarea></label>'
+
+
+# Task 10 (browser check): a fresh preview that fails (the switch not readable, disabled, a write way that does not go) says why; an
+# open request can still be rejected there - rejecting needs no preview, and the request would otherwise wait for its expiry. A
+# request that could not be read, or one that is no longer open, only closes
+@pytest.mark.parametrize("answer, reject", [
+    (answers(preview='throw new Error("Switch ist deaktiviert");'), True),
+    ('if (u === "/api/approvals/4") throw new Error("Switch ist deaktiviert"); return {};', False),
+    ('if (u.endsWith("/preview")) throw new Error("Switch ist deaktiviert"); return %s;' % json.dumps({**REVIEW_A, "status": "approved"}), False)],
+    ids=["open", "unread", "decided"])
+def test_a_failed_review_says_why(answer, reject):
+    title, body, labels = review(answer, 'await reviewApproval(4); return ' + DIALOG + ';')
+    assert (title, body, labels) == ("Anfrage #4 prüfen", '<div class="error">Switch ist deaktiviert</div>' + (COMMENT_FIELD if reject else ""),
+                                     ["Schließen"] + (["Ablehnen"] if reject else []))
+
+
+def test_a_failed_review_rejects_with_the_comment_and_counts_again():
+    act = ('current = "approvals"; await reviewApproval(4); $("#ap-comment").value = "Switch weg"; '
+           'await $("#m-foot").children.find(b => b.textContent === "Ablehnen").handlers.click[0](); '
+           'return [calls.slice(-1)[0], $("#modal").hidden, $("#toasts").children.map(t => t.textContent), n, drawn];')
+    assert review(answers(preview='throw new Error("Switch ist deaktiviert");', decide="return {ok: true};"), act) == [
+        ["POST", "/api/approvals/4/reject", {"comment": "Switch weg"}], True, ["Abgelehnt"], 1, 1]
 
 
 @pytest.mark.parametrize("preview", ["closeModal(); return %s;" % json.dumps({**SNMP_PLAN, "matches": True}), 'closeModal(); throw new Error("weg");'],

@@ -50,7 +50,7 @@
       + `<td>${esc(a.summary)}<span class="cellnote">${esc(a.kind_label)}</span></td><td>${apprPill(a)}${a.status === "open" ? `<span class="cellnote">läuft ab ${esc(fmtTime(a.expires_at))}</span>` : ""}</td>`
       + `<td><div class="actions">${btns(a)}</div></td></tr>`).join("") + `</tbody></table></div>` : `<div class="empty">Keine Anfragen.</div>`;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Freigaben</h2><span class="sub">neueste zuerst · die letzten 100</span></div><div class="card-b" style="display:grid;gap:10px">
-      <p class="note" style="margin:0">${ME && ME.four_eyes ? "Vier-Augen-Prinzip an: Änderungen im Expertenmodus führen erst nach der Freigabe durch eine zweite Person mit der Rolle „Freigeben“ aus."
+      <p class="note" style="margin:0">${ME && ME.four_eyes ? "Vier-Augen-Prinzip an: Änderungen im Expertenmodus werden erst nach der Freigabe durch eine zweite Person mit der Rolle „Freigeben“ ausgeführt."
         : "Vier-Augen-Prinzip aus: offene Anfragen lassen sich weiter prüfen, ablehnen oder zurückziehen."}</p>
       ${reviewer ? "" : `<p class="note gate">Anfragen prüfen und freigeben braucht die Rolle „Freigeben“.</p>`}</div>${list}</section>`;
     v.onclick = async e => {
@@ -91,13 +91,28 @@
   // The review of request id: the switch read and the change planned now (POST …/preview, the code of /plan), shown like a preview
   // (previewBody) with who asked. "Freigeben und ausführen" only when the fresh preview is the requester's (matches: the same
   // commands, nothing blocked) and not for the emergency login, else the dialog says why (a different preview: with the requester's
-  // preview); "Ablehnen" always, both with the optional comment. After a decision the count, and the list when it is shown, are read
+  // preview); "Ablehnen" always, both with the optional comment. A fresh preview that fails says why and still offers "Ablehnen" for
+  // an open request (rejecting needs no preview; Task 10). After a decision the count, and the list when it is shown, are read
   // again. A dialog closed or replaced while the switch is read opens nothing (modalShown).
   async function reviewApproval(id) {
     const title = `Anfrage #${id} prüfen`, wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration …</div>`, []);
+    const comment = `<label class="field"><span>Kommentar (optional)</span><textarea id="ap-comment" rows="2" maxlength="500"></textarea></label>`;
+    const after = () => { refreshApprovals(); if (current === "approvals") renderApprovals(); };
+    let shown = null;
+    const reject = { label: "Ablehnen", cls: "danger", onClick: async b => {
+      b.disabled = true;
+      try { await api("POST", `/api/approvals/${id}/reject`, { comment: $("#ap-comment").value }); if (modalShown(shown)) closeModal(); toast("Abgelehnt"); }
+      catch (e) { toast(e.message); b.disabled = false; }
+      after();
+    } };
     let a, s, r;
     try { a = await api("GET", `/api/approvals/${id}`); s = await apprSwitch(a); r = await api("POST", `/api/approvals/${id}/preview`); }
-    catch (e) { if (modalShown(wait)) modal(title, `<div class="error">${esc(e.message)}</div>`, [{ label: "Schließen", onClick: closeModal }]); return; }
+    catch (e) {
+      if (!modalShown(wait)) return;
+      const open = !!a && a.status === "open";
+      shown = modal(title, `<div class="error">${esc(e.message)}</div>` + (open ? comment : ""), [{ label: "Schließen", onClick: closeModal }, ...(open ? [reject] : [])]);
+      return;
+    }
     if (!modalShown(wait)) return;
     // The emergency login may reject but never approves (a shared account, not a person: api_approvals.EMERGENCY, T7-e)
     const approve = r.matches && !(ME && ME.method === "local");
@@ -106,20 +121,13 @@
       + (r.matches ? "" : `<div class="error"><b>Freigeben geht nicht:</b> Der Switch hat sich seit der Anfrage geändert, diese Vorschau weicht von der des Antragstellers ab. Ablehnen oder neu anfordern lassen.</div>`
         + `<details class="adv"><summary>Vorschau des Antragstellers</summary><pre class="code">${esc(((a.preview && a.preview.commands) || []).join("\n") || "–")}</pre></details>`)
       + (r.matches && !approve ? `<p class="note gate">Der Notfall-Login gibt keine Anfrage frei: er ist kein persönliches Konto.</p>` : "")
-      + `<label class="field"><span>Kommentar (optional)</span><textarea id="ap-comment" rows="2" maxlength="500"></textarea></label>`;
-    const after = () => { refreshApprovals(); if (current === "approvals") renderApprovals(); };
-    const btns = [{ label: "Abbrechen", onClick: closeModal },
-      { label: "Ablehnen", cls: "danger", onClick: async b => {
-        b.disabled = true;
-        try { await api("POST", `/api/approvals/${id}/reject`, { comment: $("#ap-comment").value }); if (modalShown(shown)) closeModal(); toast("Abgelehnt"); }
-        catch (e) { toast(e.message); b.disabled = false; }
-        after();
-      } }];
+      + comment;
+    const btns = [{ label: "Abbrechen", onClick: closeModal }, reject];
     if (approve) btns.push({ label: "Freigeben und ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
       try { const res = await api("POST", `/api/approvals/${id}/approve`, { token: r.token, comment: $("#ap-comment").value }); runProgress(s, res.id); }
       catch (e) { toast(e.message); b.disabled = false; }
       after();
     } });
-    const shown = modal(title, body, btns);
+    shown = modal(title, body, btns);
   }

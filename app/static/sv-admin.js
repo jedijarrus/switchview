@@ -442,8 +442,10 @@
   /* ── Einstellungen ── */
   // A stored secret that does not decrypt (s = GET /api/settings, k its key in s.unreadable; SECRET_KEY changed?): it has to be
   // entered anew. id is the note's own id (<field id>-unread), which its field names in aria-describedby; the note stands beside the
-  // field, not in its label (no block in a label, and a click on the note does not focus the field)
-  const unreadNote = (s, k, id) => (s.unreadable || []).includes(k) ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – bitte neu eingeben</span>` : "";
+  // field, not in its label (no block in a label, and a click on the note does not focus the field). Below Admin the field is locked:
+  // the note names the role that can enter it
+  const unreadNote = (s, k, id) => (s.unreadable || []).includes(k)
+    ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – ${roleOk("admin") ? "bitte neu eingeben" : "neu eingeben braucht die Rolle „Admin“"}</span>` : "";
   // The settings and the zone list (GET /api/zone-scopes, kept in a textarea: SVLogic.formatScopes / parseScopes). Changing them is
   // Admin: below it every field is locked and the save buttons are gone, the card says why; what only reads (names, PacketFence test)
   // and ending the own sessions stay
@@ -453,7 +455,8 @@
       .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!got) return;
     const [s, scopes] = got, admin = roleOk("admin"), dis = admin ? "" : " disabled";
-    // Stored entries the field cannot hold as they are (SVLogic.lossyScopes): named above it, so a save does not change them unseen
+    // Stored entries the field cannot hold as they are (SVLogic.lossyScopes): named above it, so a save does not change them unseen;
+    // that saving would change them is said to an Admin only, who has the button
     const lossy = SVLogic.lossyScopes(scopes.entries);
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
@@ -489,7 +492,7 @@
       ${admin ? `<div><button class="btn primary" type="button" id="s-save">Speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Zonen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Benutzer mit „Ändern“ oder „Freigeben“ und einer dieser Entra-App-Rollen ändern nur Switches dieser Zonen. Wer keine trägt, ist nicht beschränkt.</p>
-        ${lossy.length ? `<p class="note warn" id="s-scopes-lossy" style="margin:0">Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: ${lossy.map(x => `„${esc(x)}“`).join(", ")}. Eine Zone mit Komma oder mit dem Namen „Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben; „Zonen speichern“ würde sie ändern.</p>` : ""}
+        ${lossy.length ? `<p class="note warn" id="s-scopes-lossy" style="margin:0">Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: ${lossy.map(x => `„${esc(x)}“`).join(", ")}. Eine Zone mit Komma oder mit dem Namen „Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben${admin ? "; „Zonen speichern“ würde sie ändern" : ""}.</p>` : ""}
         <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint${lossy.length ? " s-scopes-lossy" : ""}"${dis}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label>
         ${admin ? `<div><button class="btn small" type="button" id="s-zones-save">Zonen speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Vier-Augen-Prinzip</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
@@ -517,7 +520,13 @@
       const r = SVLogic.parseScopes($("#s-scopes").value);
       if (r.errors.length) { toast(r.errors[0]); return; }
       e.target.disabled = true;
-      try { const saved = await api("PUT", "/api/zone-scopes", { entries: r.entries }); $("#s-scopes").value = SVLogic.formatScopes(saved.entries); toast("Gespeichert"); }
+      try {
+        const saved = await api("PUT", "/api/zone-scopes", { entries: r.entries });
+        $("#s-scopes").value = SVLogic.formatScopes(saved.entries);
+        // The warning about stored entries the field cannot hold goes once the stored list has none (it said what no longer holds)
+        if (lossy.length && !SVLogic.lossyScopes(saved.entries).length) { $("#s-scopes-lossy").hidden = true; $("#s-scopes").setAttribute("aria-describedby", "s-scopes-hint"); }
+        toast("Gespeichert");
+      }
       catch (err) { toast(err.message); }
       e.target.disabled = false;
     });

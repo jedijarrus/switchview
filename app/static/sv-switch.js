@@ -339,7 +339,7 @@
     // stores exactly this payload and this preview, on its write way and with its token, for a second person to approve
     // (sv-approvals.js); /apply would refuse it
     const can = runnable(r), ask = can && !!r.approval;
-    const body = (ask ? `<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus führt erst aus, wenn eine zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>` : "")
+    const body = (ask ? `<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus wird erst ausgeführt, wenn eine zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>` : "")
       + previewBody(s, r, payload);
     const btns = [];
     if (back) btns.push({ label: "Zurück", onClick: back });
