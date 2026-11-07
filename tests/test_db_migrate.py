@@ -54,6 +54,13 @@ PHASE3_COLUMNS = {
     ("switch_cfg", "stale"): (("INTEGER", 1, "0"), 0),
     ("config_backups", "raw_mac"): (("TEXT", 0, None), None),
 }
+# The columns Phase 4a adds, in the same form. Sessions of before keep NULL in all three: no stored roles, the subject of their
+# method and user name, and their first request counts as activity (auth.current_user).
+PHASE4A_COLUMNS = {
+    ("sessions", "claims"): (("TEXT", 0, None), None),
+    ("sessions", "subject"): (("TEXT", 0, None), None),
+    ("sessions", "last_seen"): (("TEXT", 0, None), None),
+}
 
 
 async def _table_info(conn, table: str) -> list[tuple]:
@@ -232,10 +239,10 @@ async def _first_row_plain(conn, table: str) -> dict:
         return dict(zip(names, await cur.fetchone()))
 
 
-async def _phase3_state(conn) -> dict:
-    """(definition, value in the one row) of each Phase 3 column; a missing column is (None, None)."""
+async def _added_state(conn, columns: dict) -> dict:
+    """(definition, value in the one row) of each (table, column) of columns; a missing column is (None, None)."""
     out = {}
-    for table, column in PHASE3_COLUMNS:
+    for table, column in columns:
         have = {r[0]: r[1:] for r in await _table_info(conn, table)}
         if column not in have:
             out[(table, column)] = (None, None)
@@ -262,13 +269,13 @@ async def test_migration_adds_the_phase3_columns(data_dir):
         await conn.execute("INSERT INTO switch_cfg (switch_id, taken_at, parsed) VALUES (1, '2026-11-01 10:00:00', '{}')")
         await conn.execute("INSERT INTO config_backups (switch_id, taken_at, sha, content) VALUES (1, '2026-11-01 10:00:00', 'abc', 'x')")
         await conn.commit()
-        assert set((await _phase3_state(conn)).values()) == {(None, None)}    # the premise: none of the three columns is there yet
+        assert set((await _added_state(conn, PHASE3_COLUMNS)).values()) == {(None, None)}    # the premise: none of the three columns is there yet
         before = {t: await _first_row_plain(conn, t) for t in ("changes", "switch_cfg", "config_backups")}
 
     await db.init_db()
 
     async with aiosqlite.connect(path) as conn:
-        assert await _phase3_state(conn) == PHASE3_COLUMNS
+        assert await _added_state(conn, PHASE3_COLUMNS) == PHASE3_COLUMNS
         for table, row in before.items():
             assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row
         version, rows = await _schema_version(conn), {t: await _first_row_plain(conn, t) for t in before}
@@ -279,3 +286,35 @@ async def test_migration_adds_the_phase3_columns(data_dir):
         assert await _schema_version(conn) == version
         assert {t: await _first_row_plain(conn, t) for t in before} == rows
 
+
+
+async def test_migration_adds_the_phase4a_columns(data_dir):
+    """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA, every column added before Phase 4a, one session
+    of before) gets sessions.claims, sessions.subject and sessions.last_seen from init_db (the row: NULL in each), the row keeps what
+    it held; a second init_db changes nothing."""
+    path = data_dir / "switchview.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(db.SCHEMA)
+        for table, column, definition in db.ADDED_COLUMNS:
+            if (table, column) not in PHASE4A_COLUMNS:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        await conn.execute("INSERT INTO sessions (token, username, display_name, method, created_at, expires_at) VALUES "
+                           "(?, 'anna@example.org', 'Anna', 'entra', '2026-11-07T08:00:00+00:00', '2026-11-07T20:00:00+00:00')",
+                           (db.token_hash("vorher"),))    # a hashed token: init_db's rehashing leaves the row as it is
+        await conn.commit()
+        assert set((await _added_state(conn, PHASE4A_COLUMNS)).values()) == {(None, None)}    # the premise: none of them is there yet
+        before = {t: await _first_row_plain(conn, t) for t in sorted({table for table, _ in PHASE4A_COLUMNS})}
+
+    await db.init_db()
+
+    async with aiosqlite.connect(path) as conn:
+        assert await _added_state(conn, PHASE4A_COLUMNS) == PHASE4A_COLUMNS
+        for table, row in before.items():
+            assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row
+        version, rows = await _schema_version(conn), {t: await _first_row_plain(conn, t) for t in before}
+
+    await db.init_db()    # every restart of the app runs it once more
+
+    async with aiosqlite.connect(path) as conn:
+        assert await _schema_version(conn) == version
+        assert {t: await _first_row_plain(conn, t) for t in before} == rows

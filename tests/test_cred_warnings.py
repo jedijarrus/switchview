@@ -262,9 +262,12 @@ def test_a_put_with_another_switchs_host_is_409(api):
 
 
 def test_empty_entra_allowlists_warn_at_start():
-    s = config.Settings(secret_key=secrets.token_hex(32), entra_tenant_id="t", entra_client_id="c", entra_allowed_roles=[], entra_allowed_groups=[])
-    assert "ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und alles ändern." in (
-        main.check_startup_config(s))
+    s = config.Settings(secret_key=secrets.token_hex(32), entra_tenant_id="t", entra_client_id="c", entra_allowed_roles=[], entra_allowed_groups=[],
+                        entra_role_mapping="on")
+    assert main.OPEN_TENANT_READ in main.check_startup_config(s)
+    assert main.OPEN_TENANT in main.check_startup_config(dataclasses.replace(s, entra_role_mapping="off"))
+    # Pin: without the mapping the warning is the text of before the roles, word for word
+    assert main.OPEN_TENANT == "ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und alles ändern."
     assert main.check_startup_config(dataclasses.replace(s, entra_allowed_roles=["SwitchView.Admin"])) == []
     assert main.check_startup_config(dataclasses.replace(s, entra_allowed_groups=["g-1"])) == []
     assert main.check_startup_config(dataclasses.replace(s, entra_tenant_id="")) == []

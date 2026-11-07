@@ -113,3 +113,9 @@ def test_the_roles_note_is_linked_and_has_its_sections():
     for heading in ("## Was gebaut wurde", "## Rechte je Route", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz",
                     "## Was beim Update zu tun ist", "## Später", "## Entscheidungen"):
         assert f"\n{heading}\n" in note, heading
+
+
+def test_the_readme_names_the_role_settings():
+    """Phase 4a, Task 3: the README names the role mapping, the role values and the idle logout."""
+    for text in ("ENTRA_ROLE_MAPPING", "ENTRA_ROLE_AENDERN", "SwitchView.Freigeben", "IDLE_MINUTES"):
+        assert text in README, text

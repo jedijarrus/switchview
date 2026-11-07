@@ -1,5 +1,5 @@
-"""Shared helpers of the API tests: the test user, the scheduler trap, a fresh database, a TestClient signed in through the user
-override, and a fake httpx for the code that talks to PacketFence and OPNsense (pf, names).
+"""Shared helpers of the API tests: the test user (USER, and user() for one of any role), the scheduler trap, a fresh database, a
+TestClient signed in through the user override, and a fake httpx for the code that talks to PacketFence and OPNsense (pf, names).
 
 The fixtures stay in their test files, each with its name and parameters (they hang on different things: a world, a database, a
 fake switch, tmp_path); only their common body lives here: the scheduler trap, the override, the CSRF header and the cleanup.
@@ -20,7 +20,14 @@ import db
 import loginfix
 import main
 
-USER: dict = {"username": "tester", "name": "Tester", "method": "local"}
+
+def user(role: str, name: str = "tester", *, method: str = "entra", subject: str | None = None, zones: list[str] | None = None) -> dict:
+    """A signed-in user as auth.current_user returns it: role one of roles.ORDER, subject <method>:<name> unless given, zones None
+    (no zone scope) unless given."""
+    return {"username": name, "name": name.title(), "method": method, "role": role, "subject": subject or f"{method}:{name}", "zones": zones}
+
+
+USER: dict = user("admin", method="local")      # the test user of every API fixture: the emergency login, Admin
 
 
 def never(*args, **kwargs) -> NoReturn:

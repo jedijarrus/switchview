@@ -101,6 +101,15 @@ limits, checks before production use, what to do on an update, decisions).
 - Sessions are stored hashed (SHA-256 of the session token), so a copy of the database holds no usable session cookie; sessions
   from before this change are rehashed at start, nobody is logged out; expired sessions are removed at start and every hour
 - Log out everywhere: Settings → "Sitzungen" ends every session of your account on every device, the current one included
+- Four roles, each with the rights of the one before: Lesen, Ändern, Freigeben, Admin. With `ENTRA_ROLE_MAPPING=on` an SSO user's
+  role comes from the Entra app roles in the `roles` claim of the ID token (`SwitchView.Lesen`, `SwitchView.Aendern`,
+  `SwitchView.Freigeben`, `SwitchView.Admin` unless `ENTRA_ROLE_LESEN` … `ENTRA_ROLE_ADMIN` name others; the highest one counts, a
+  user without a mapped app role who passes the login gate gets Lesen). The role is worked out on every request from the claim the
+  session stored at the login against the mapping of now: a changed mapping takes effect with the restart that reads it, a role
+  withdrawn in Entra when the session ends. With the mapping off (the default) every SSO user is Admin, as before, and the start
+  logs a warning; the emergency login is Admin always
+- Idle logout: a session without a request for `IDLE_MINUTES` minutes (default 120, `0` = never) ends; every signed-in request
+  counts as activity; the page asks nothing on a timer, except for the progress of a running change
 
 ## Quick start
 
@@ -131,6 +140,9 @@ The settings that matter, in `.env` unless noted:
 | `COOKIE_SECURE` | `auto` | `auto` or `always`: when the session and device cookies carry the `Secure` flag |
 | `SECRET_KEY` | none (required) | key of the stored credentials; under 16 characters stops the start, a weak one gets a warning |
 | `SESSION_HOURS` | `12` | lifetime of a session |
+| `ENTRA_ROLE_MAPPING` | `off` | `on`: the role of an SSO user comes from the Entra app roles; `off`: every SSO user is Admin; any other value stops the start |
+| `ENTRA_ROLE_LESEN`, `ENTRA_ROLE_AENDERN`, `ENTRA_ROLE_FREIGEBEN`, `ENTRA_ROLE_ADMIN` | `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben`, `SwitchView.Admin` | the app role values of each role, comma-separated |
+| `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off; a negative value stops the start |
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |

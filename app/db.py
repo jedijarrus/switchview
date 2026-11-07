@@ -195,6 +195,14 @@ ADDED_COLUMNS = (
     # gone out (changes.mark_cfg_stale), 0 again with the next read (changes.store_cfg). taken_at stays the time of the read. fresh_cfg
     # reads anew for a stale entry, and the map takes a port's on / off from the poll then. Existing rows have 0.
     ("switch_cfg", "stale", "INTEGER NOT NULL DEFAULT 0"),
+    # Phase 4a, written by auth.create_session at the login: the roles claim of the id_token as JSON ({"roles": [...]}, from which
+    # auth.current_user works out the role on every request), the stable identity of the person (entra:<oid>, without an oid
+    # entra:<sub>; local:<user name>) and the time of the last request (ISO-UTC like created_at, written at most once a minute, for
+    # the idle logout). Sessions of before have NULL: no stored roles, the subject <method>:<user name>, and their first request
+    # counts as activity.
+    ("sessions", "claims", "TEXT"),
+    ("sessions", "subject", "TEXT"),
+    ("sessions", "last_seen", "TEXT"),
 )
 
 

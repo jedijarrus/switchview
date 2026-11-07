@@ -53,24 +53,41 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 # The used SSO nonces are in-process as well (auth._used_nonces): another worker would accept a nonce this one has seen.
 
 
+# The start warnings about SSO (check_startup_config): an open login gate, without and with the role mapping, and SSO without it
+OPEN_TENANT = ("ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und "
+               "alles ändern.")
+OPEN_TENANT_READ = ("ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden, "
+                    "ohne zugeordnete App-Rolle mit der Rolle „Lesen“.")
+NO_ROLE_MAPPING = ("ENTRA_ROLE_MAPPING ist aus: jeder SSO-Benutzer hat volle Rechte (Rolle „Admin“), wie vor den Rollen. Rollen aus "
+                   "Entra: die App-Rollen aus ENTRA_ROLE_LESEN, ENTRA_ROLE_AENDERN, ENTRA_ROLE_FREIGEBEN und ENTRA_ROLE_ADMIN anlegen und "
+                   "zuweisen, dann ENTRA_ROLE_MAPPING=on.")
+
+
 def check_startup_config(s: Settings) -> list[str]:
     """Stops a start that cannot run safely (RuntimeError): a SECRET_KEY under 16 characters, a COOKIE_SECURE other than auto or
-    always. Returns the warnings for the log: a SECRET_KEY under 32 characters or with fewer than 8 different characters is weak but
-    only warned about (E16: changing it means entering every stored credential anew, a stop would shut out running installations).
-    Likewise SSO with neither ENTRA_ALLOWED_ROLES nor ENTRA_ALLOWED_GROUPS: documented behaviour (every user of the tenant may sign
-    in, auth.verify_id_token), so a warning, not a stop. No message contains the key."""
+    always, an ENTRA_ROLE_MAPPING other than on or off, a negative IDLE_MINUTES. Returns the warnings for the log: a SECRET_KEY under
+    32 characters or with fewer than 8 different characters is weak but only warned about (E16: changing it means entering every
+    stored credential anew, a stop would shut out running installations). Likewise SSO with neither ENTRA_ALLOWED_ROLES nor
+    ENTRA_ALLOWED_GROUPS: documented behaviour (every user of the tenant may sign in, auth.verify_id_token), so a warning, not a stop
+    (OPEN_TENANT, with the role mapping OPEN_TENANT_READ); and SSO without the role mapping, where every SSO user is Admin as before
+    the roles (NO_ROLE_MAPPING). No message contains the key."""
     if len(s.secret_key) < 16:
         raise RuntimeError("SECRET_KEY fehlt oder ist zu kurz")
     if s.cookie_secure not in ("auto", "always"):
         raise RuntimeError("COOKIE_SECURE muss auto oder always sein")
+    if s.entra_role_mapping not in ("on", "off"):
+        raise RuntimeError("ENTRA_ROLE_MAPPING muss on oder off sein")
+    if s.idle_minutes < 0:
+        raise RuntimeError("IDLE_MINUTES muss 0 oder größer sein")
     messages = []
     if len(s.secret_key) < 32 or len(set(s.secret_key)) < 8:
         messages.append("SECRET_KEY ist schwach (kürzer als 32 Zeichen oder weniger als 8 verschiedene Zeichen). Ein neuer Schlüssel "
                         "(z. B. openssl rand -hex 32) macht die gespeicherten Zugangsdaten unlesbar: danach alle Zugangsdaten der Switches, "
                         "von PacketFence, OPNsense und RADIUS neu eingeben.")
     if s.sso_active and not s.entra_allowed_roles and not s.entra_allowed_groups:
-        messages.append("ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und "
-                        "alles ändern.")
+        messages.append(OPEN_TENANT_READ if s.role_mapping_on else OPEN_TENANT)
+    if s.sso_active and not s.role_mapping_on:
+        messages.append(NO_ROLE_MAPPING)
     return messages
 
 
@@ -194,7 +211,7 @@ async def login_local(body: LocalLogin, request: Request, response: Response):
         _LOGIN.fail(keys)
         await audit(body.username, "login_failed", "local")
         raise HTTPException(401, "Benutzername oder Kennwort falsch")
-    token = await auth.create_session(body.username, body.username, "local")
+    token = await auth.create_session(body.username, body.username, "local", subject=f"local:{body.username}")
     _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
     _set_cookie(response, request, auth.DEVICE_COOKIE, auth.device_token(body.username), auth.DEVICE_DAYS * 86400)
     await audit(body.username, "login", "local")
@@ -244,7 +261,10 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
         log.warning("Anmeldung über Microsoft abgelehnt: %s", e)
         raise HTTPException(401, NONCE_FAILED)
     user = claims.get("preferred_username") or claims.get("upn") or claims.get("email") or claims["sub"]
-    token = await auth.create_session(user, claims.get("name") or user, "entra")
+    # The roles claim for the role of every request of this session; the object id (stable across apps of the tenant; without it the
+    # sub, stable per app) for the person, whatever the user name
+    token = await auth.create_session(user, claims.get("name") or user, "entra", roles=auth.claim_roles(claims),
+                                      subject="entra:" + str(claims.get("oid") or claims["sub"]))
     _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
     response.delete_cookie(auth.LOGIN_COOKIE, path="/")
     await audit(user, "login", "entra")
@@ -253,7 +273,9 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
 
 @app.get("/api/auth/me")
 async def me(user=Depends(auth.current_user)):
-    return user
+    """The signed-in user for the page: name, role, zones and the idle limit; not the subject (it is for the server's comparisons)."""
+    return {"username": user["username"], "name": user["name"], "method": user["method"], "role": user["role"], "zones": user["zones"],
+            "idle_minutes": settings.idle_minutes}
 
 
 @app.post("/api/auth/logout")

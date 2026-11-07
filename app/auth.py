@@ -1,6 +1,7 @@
 """Anmeldung: Entra-SSO (MSAL-Popup, id_token per JWKS geprueft) und optionaler Notfall-Login."""
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import threading
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import HTTPException, Request
 
+import roles
 from config import settings
 from crypto import keyed_digest
 from db import db, token_hash
@@ -44,6 +46,10 @@ NONCE_SKEW_S = 60                           # a nonce of up to this many seconds
 NONCE_BAD = "Anmeldeversuch unbekannt, abgelaufen oder schon benutzt"
 _NONCE = re.compile(r"([0-9]{1,12})\.([0-9a-f]{32})")
 _used_nonces: dict[str, float] = {}         # nonce -> the time from which it may be forgotten (its ts + NONCE_TTL_S)
+# The idle logout (Phase 4a, Sicherheit Phase 2 A3): a session without a request for settings.idle_minutes ends (current_user). Every
+# signed-in request counts as activity; its time (sessions.last_seen) is written at most once per TOUCH_S, not on every request.
+IDLE = "Abgemeldet nach {minutes} Minuten ohne Aktivität – bitte neu anmelden"
+TOUCH_S = 60
 
 
 def _jwks_client(tenant: str):
@@ -201,15 +207,29 @@ async def prune_sessions() -> int:
     return pruned
 
 
-async def create_session(username: str, display: str, method: str) -> str:
-    """Starts a session and returns its token for the cookie; the database keeps only token_hash(token)."""
+def claim_roles(claims: dict) -> list[str]:
+    """The app roles of an id_token as the session stores them: the text entries of its roles claim of at most 256 characters, in
+    their order, the first 200. A roles claim that is no list (missing, None, a text, an object, ...) is no roles: [] (iterating a
+    text or an object would take its characters or keys for roles)."""
+    value = claims.get("roles")
+    if not isinstance(value, list):
+        return []
+    return [r for r in value if isinstance(r, str) and len(r) <= 256][:200]
+
+
+async def create_session(username: str, display: str, method: str, *, roles: list[str] | None = None, subject: str | None = None) -> str:
+    """Starts a session and returns its token for the cookie; the database keeps only token_hash(token). It stores the app roles of
+    the login (claims, from which current_user works out the role on every request), the person's stable identity (subject, by
+    default <method>:<username>) and the login as its first activity (last_seen)."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     async with db() as conn:
         await _delete_expired(conn)
-        await conn.execute("INSERT INTO sessions(token, username, display_name, method, created_at, expires_at) VALUES (?,?,?,?,?,?)",
+        await conn.execute("INSERT INTO sessions(token, username, display_name, method, created_at, expires_at, claims, subject, last_seen) "
+                           "VALUES (?,?,?,?,?,?,?,?,?)",
                            (token_hash(token), username, display, method, now.isoformat(),
-                            (now + timedelta(hours=settings.session_hours)).isoformat()))
+                            (now + timedelta(hours=settings.session_hours)).isoformat(), json.dumps({"roles": roles or []}),
+                            subject or f"{method}:{username}", now.isoformat()))
         await conn.commit()
     return token
 
@@ -232,18 +252,37 @@ async def drop_user_sessions(username: str) -> int:
 
 
 async def current_user(request: Request) -> dict:
+    """The signed-in user of request: username, name, method, role (roles.role_of from the roles the session stored at its login,
+    against the mapping of now: a changed mapping counts from the restart that reads it, without a new login), subject (the stable
+    identity; a session of before the update has none and gets <method>:<username>) and zones (None: no zone scope). 401 without a
+    session, for an expired one, and for one idle longer than settings.idle_minutes (then deleted, IDLE; a session that never
+    recorded a request, from before the update, is not idle); 403 for a write without the CSRF header. Every request that passes
+    counts as activity: last_seen is written when it is unset or at least TOUCH_S old."""
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "Nicht angemeldet")
+    hashed, now = token_hash(token), datetime.now(timezone.utc)
     async with db() as conn:
-        async with conn.execute("SELECT username, display_name, method, expires_at FROM sessions WHERE token = ?",
-                                (token_hash(token),)) as cur:
+        async with conn.execute("SELECT username, display_name, method, expires_at, claims, subject, last_seen FROM sessions WHERE token = ?",
+                                (hashed,)) as cur:
             row = await cur.fetchone()
-    if not row or row["expires_at"] < datetime.now(timezone.utc).isoformat():
-        raise HTTPException(401, "Sitzung abgelaufen")
-    if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("X-Requested-With") != "SwitchView":
-        raise HTTPException(403, "Ungültige Anfrage")
-    return {"username": row["username"], "name": row["display_name"] or row["username"], "method": row["method"]}
+        if not row or row["expires_at"] < now.isoformat():
+            raise HTTPException(401, "Sitzung abgelaufen")
+        last_seen = row["last_seen"]
+        if settings.idle_minutes and last_seen and last_seen < (now - timedelta(minutes=settings.idle_minutes)).isoformat():
+            await conn.execute("DELETE FROM sessions WHERE token = ?", (hashed,))
+            await conn.commit()
+            raise HTTPException(401, IDLE.format(minutes=settings.idle_minutes))
+        if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("X-Requested-With") != "SwitchView":
+            raise HTTPException(403, "Ungültige Anfrage")
+        if not last_seen or last_seen <= (now - timedelta(seconds=TOUCH_S)).isoformat():
+            await conn.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now.isoformat(), hashed))
+            await conn.commit()
+    username, method = row["username"], row["method"]
+    stored = json.loads(row["claims"]) if row["claims"] else {}
+    return {"username": username, "name": row["display_name"] or username, "method": method,
+            "role": roles.role_of(method, stored.get("roles") or [], settings), "subject": row["subject"] or f"{method}:{username}",
+            "zones": None}
 
 
 def cookie_secure(request: Request) -> bool:
