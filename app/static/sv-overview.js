@@ -1,8 +1,11 @@
 "use strict";
 
   /* ── Übersicht ── */
+  // "Auffälligkeiten" takes the groups of the switch data (issueGroups) and, after them, those the server counts (extraIssueGroups,
+  // sv-history.js: security findings, changes outside SwitchView), asked for while the netmap loads; "Zu prüfen" counts all of them
   async function renderOverview() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
+    const extra = extraIssueGroups();
     try { await loadMap(true); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     if (!MAP.switches.length) {
       // Adding a switch is Admin (POST /api/switches): below Admin the empty overview says so instead of the instruction and the button
@@ -11,7 +14,7 @@
       return;
     }
     const sw = MAP.switches, phys = sw.flatMap(physOf), up = phys.filter(p => p.o).length, bad = sw.filter(s => !s.ok).length;
-    const groups = issueGroups(), items = groups.flatMap(x => x.items), nWarn = groups.filter(x => x.sev !== "info").reduce((a, x) => a + x.items.length, 0), nInfo = items.length - nWarn;
+    const groups = [...issueGroups(), ...await extra], items = groups.flatMap(x => x.items), nWarn = groups.filter(x => x.sev !== "info").reduce((a, x) => a + x.items.length, 0), nInfo = items.length - nWarn;
     const sevPill = { crit: `<span class="pill crit">Fehler</span>`, warn: `<span class="pill warn">Prüfen</span>`, info: `<span class="pill neutral">Hinweis</span>` };
     v.innerHTML = `
       <div class="kpis">

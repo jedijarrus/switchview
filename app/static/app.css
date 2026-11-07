@@ -375,3 +375,15 @@ details.adv[open] summary { margin-bottom: 4px; }
 .cellnote { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; }
 /* The note beside a field is a span: it takes the normal weight back from .field > span (the label's) */
 .field > .note { margin: 0; font-weight: 400; }
+/* Phase 4b: the history entry at the end of the search's list (a line above it, its action in the accent), the port history of the panel */
+.results .hist { border-top: 1px solid var(--border-strong); margin-top: -1px; border-bottom: 0; }
+.results .hist .r1 { color: var(--accent); }
+#dr-hist .dev .when { grid-column: 1 / -1; }
+#dr-hist .more-row { padding: 8px 0 0; border-top: 0; }
+/* The panel's history keeps the gap of the list above it (dl.kv) to "Gelernte Geräte" below it, as list, button or sentence */
+#dr-hist { margin-bottom: 14px; }
+#dr-body .note + .eyebrow { margin-top: 14px; }
+/* A time in a table of the history or the events stays on one line (the switch view's events table is narrow) */
+td.time { white-space: nowrap; }
+/* A link that looks like a button ("Als CSV"): the button's colour, no underline */
+a.btn { color: var(--fg); text-decoration: none; }

@@ -123,6 +123,17 @@ const SVLogic = {
     if (c.sent === 0) return { reload: "list", delay: 0 };
     return { reload: "map", delay: c.kind === "save" ? 200 : 4500 };
   },
+  // The query string of params for GET /api/history, /api/events and the audit: "?" and k=v (both encoded) for every value but "",
+  // null and undefined (no filter), joined with "&" in the order of params; "" when none is left
+  query(params) {
+    const parts = Object.entries(params || {}).filter(([, v]) => v !== "" && v != null)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+    return parts.length ? "?" + parts.join("&") : "";
+  },
+  // A count with its noun in the singular for 1, else in the plural ("1 Befund", "2 Befunde", "0 Befunde")
+  plural(n, one, many) {
+    return `${n} ${n === 1 ? one : many}`;
+  },
   // The audit rows (GET /api/audit) that show action (""/null: every action) and hold text (lower or upper case alike; "" holds
   // every row) in their user, action label (labels, else the action key), target or details
   filterAudit(rows, text, action, labels) {

@@ -229,7 +229,8 @@ def test_a_preview_closed_while_the_switch_is_read_stays_closed(meanwhile, answe
 
 
 # Phase 5 Task 5: the global search is a combobox (WAI-ARIA 1.2): focus stays in #q with aria-activedescendant, the arrows wrap,
-# Enter opens, Escape closes; one search runs SEARCH_DELAY after the last keystroke
+# Enter opens, Escape closes; one search runs SEARCH_DELAY after the last keystroke. Since Phase 4b Task 9 the last option of every
+# list is the history entry ({hist: true}, tests/test_frontend_history.py): one option more, a port None in a list of ports
 SEARCH = ('MAP = {switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
           '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}; '
           '$("#q").focus(); $("#q").value = "drucker"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); ')
@@ -238,14 +239,15 @@ SEARCH = ('MAP = {switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "druck
 def test_the_search_is_a_combobox():
     js = ('(async () => { ' + SEARCH + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), '
           '($("#results").innerHTML.match(/role="option"/g) || []).length, /id="hit-1"/.test($("#results").innerHTML)]; })()')
-    assert in_dom(js) == [False, "true", 2, True]
+    assert in_dom(js) == [False, "true", 3, True]
 
 
 def test_arrow_keys_move_the_active_option_and_enter_opens_it():
     js = ('(async () => { ' + SEARCH + NO_VIEWS + 'let opened = null; openPort = (s, n) => { opened = [s.id, n]; }; const q = $("#q"); '
           'q.fire("keydown", {key: "ArrowDown"}); q.fire("keydown", {key: "ArrowDown"}); '
           'const a = [q.getAttribute("aria-activedescendant"), $("#hit-1").getAttribute("aria-selected"), $("#hit-0").getAttribute("aria-selected")]; '
-          'q.fire("keydown", {key: "ArrowDown"}); a.push(q.getAttribute("aria-activedescendant")); q.fire("keydown", {key: "Enter"}); '
+          'q.fire("keydown", {key: "ArrowDown"}); q.fire("keydown", {key: "ArrowDown"}); a.push(q.getAttribute("aria-activedescendant")); '
+          'q.fire("keydown", {key: "Enter"}); '
           'await new Promise(r => setTimeout(r, 50)); return [...a, opened, current, $("#results").hidden, q.getAttribute("aria-expanded")]; })()')
     assert in_dom(js) == ["hit-1", "true", "false", "hit-0", [1, "1"], "switches", True, "false"]
 
@@ -307,7 +309,7 @@ def test_the_search_skips_the_devices_behind_a_switch():                        
           '{id: 2, k: "B", sys: "", ports: []}], links: [], vlans: {}}; '
           '$("#q").focus(); $("#q").value = "hinter"; $("#q").fire("input"); await new Promise(r => setTimeout(r, 400)); '
           'return searchFound.map(h => h.port); })()')
-    assert in_dom(js) == ["2"]
+    assert in_dom(js) == ["2", None]
 
 
 def test_the_search_field_and_its_list_carry_the_combobox_roles():
@@ -332,7 +334,7 @@ def test_a_new_list_has_no_active_hit():
           'q.fire("keydown", {key: "ArrowDown"}); q.value = "ucker"; q.fire("input"); await new Promise(r => setTimeout(r, 400)); '
           'const a = [q.getAttribute("aria-activedescendant"), searchActive, searchFound.length]; q.fire("keydown", {key: "Enter"}); '
           'await new Promise(r => setTimeout(r, 50)); return [...a, opened]; })()')
-    assert in_dom(js) == [None, -1, 2, None]
+    assert in_dom(js) == [None, -1, 3, None]
 
 
 def test_the_arrows_keep_the_cursor_of_the_field():
@@ -368,7 +370,7 @@ def test_keys_while_the_search_waits_for_the_netmap_wait_with_it():
           'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
           '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); await new Promise(r => setTimeout(r, 50)); '
           'return [...a, opened, searchFound.map(h => h.port)]; })()')
-    assert in_dom(js) == [None, 1, [1, "2"], ["2"]]
+    assert in_dom(js) == [None, 1, [1, "2"], ["2", None]]
 
 
 def test_keys_that_waited_for_an_outrun_search_open_nothing():
@@ -380,7 +382,7 @@ def test_keys_that_waited_for_an_outrun_search_open_nothing():
           'answer({switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
           '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}); await new Promise(r => setTimeout(r, 400)); '
           'return [opened, q.getAttribute("aria-activedescendant"), searchFound.length, $("#results").hidden]; })()')
-    assert in_dom(js) == [None, None, 0, False]
+    assert in_dom(js) == [None, None, 1, False]
 
 
 @pytest.mark.parametrize("to, want", [('$("#btn-logout")', [True, "false"]), ("null", [True, "false"]), ('$("#hit-1")', [False, "true"])],
@@ -401,7 +403,7 @@ def test_a_search_that_ends_after_the_focus_left_keeps_the_list_closed():
     wait = 'await new Promise(r => setTimeout(r, 400)); '
     js = ('(async () => { ' + SEARCH.replace(wait, '$("#btn-logout").focus(); ' + wait)
           + 'return [$("#results").hidden, $("#q").getAttribute("aria-expanded"), searchFound.length]; })()')
-    assert in_dom(js) == [True, "false", 2]
+    assert in_dom(js) == [True, "false", 3]
 
 
 def test_escape_closes_the_list_before_the_field_loses_its_text():
@@ -867,14 +869,14 @@ def test_escape_while_the_search_waits_for_the_netmap_keeps_the_list_closed():
           f'answer({NETMAP_VK}); await new Promise(r => setTimeout(r, 50)); const a = [$("#results").hidden, searchFound.map(h => h.port)]; '
           'q.fire("keydown", {key: "ArrowDown"}); await new Promise(r => setTimeout(r, 0)); '
           'return [...a, $("#results").hidden, q.getAttribute("aria-activedescendant")]; })()')
-    assert in_dom(js) == [True, ["2"], False, "hit-0"]
+    assert in_dom(js) == [True, ["2", None], False, "hit-0"]
 
 
 def test_an_arrow_after_escape_runs_the_search_of_the_field():
     js = ('(async () => { ' + SEARCH + 'const q = $("#q"); q.value = "vk"; q.fire("input"); q.fire("keydown", {key: "Escape"}); '
           'q.fire("keydown", {key: "ArrowDown"}); await new Promise(r => setTimeout(r, 50)); '
           'return [$("#results").hidden, q.getAttribute("aria-activedescendant"), searchFound.map(h => h.port)]; })()')
-    assert in_dom(js) == [False, "hit-0", ["2"]]
+    assert in_dom(js) == [False, "hit-0", ["2", None]]
 
 
 # Phase 5 final review: a preview whose ports are all blocked (every LAG trunk on a driver that cannot write its VLANs by SNMP) says

@@ -70,6 +70,7 @@
         <div class="tbl-wrap"><table><thead><tr><th class="ck">${may ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
       ${radiusCard(s)}
       ${canW ? `<section class="card"><div class="card-h"><h2>Änderungen</h2><span class="sub">an diesem Switch, neueste zuerst</span></div><div id="sw-changes"><div class="empty">Lade …</div></div></section>` : ""}
+      ${switchHistoryCards(s)}
       <section class="card"><div class="card-h"><h2>Verbindungen</h2><span class="sub">${links.length} zu anderen Switches</span></div>${linksTable(links, s.id)}</section>
     </div></div>`;
     bindSide();
@@ -89,10 +90,13 @@
     v.onclick = e => {
       if (e.target.closest("input[data-pick], label.pick")) return;
       const a = e.target.closest("[data-a]"); if (a && !a.closest(".dhead")) return switchAction(e, s);
+      // "Vergleich" of an event "Konfiguration außerhalb von SwitchView geändert" in the card "Ereignisse" (sv-history.js)
+      const bd = e.target.closest("[data-bdiff]"); if (bd) return openBackupDiff(+bd.dataset.bdiff);
       const t = e.target.closest("[data-p]"); if (t && !t.closest(".side")) openPort(s, t.dataset.p, t);
     };
     $(".dhead .actions").addEventListener("click", e => switchAction(e, s));
     if (canW) renderChangesInto($("#sw-changes"), s.id, 10);
+    loadSwitchHistory(s);
   }
   function syncPicked() {
     const bar = $("#selbar"); if (!bar) return;
@@ -483,8 +487,10 @@
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
-      <dt>Trunk</dt><dd>${trunk ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
+      <dt>Trunk</dt><dd>${trunk ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${portHistoryHtml(s, p)}${devs}`;
     if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); if (trunk) editTrunk(s, p.n); else editPorts(s, [p.n]); });
+    // "Bisher an diesem Port" asks the server only on this click (sv-history.js); a trunk or a confirmed uplink has no button
+    const hb = $("#dr-hist-btn"); if (hb) hb.addEventListener("click", () => loadPortHistory(s, p));
     $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
     $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();
   }

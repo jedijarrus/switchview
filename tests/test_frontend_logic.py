@@ -257,3 +257,13 @@ def test_approval_count_follows_the_zones_of_a_reviewer(me, want):
     rows = [{"status": "open", "own": False, "switch_zone": "EK"}, {"status": "open", "own": False, "switch_zone": "VK"},
             {"status": "open", "own": False, "switch_zone": None}, {"status": "open", "own": True, "switch_zone": "VK"}]
     assert run(f"L.approvalCount({json.dumps(rows)}, {json.dumps(me)})") == want
+
+
+# Phase 4b Task 9: the query string of the history, the events and the audit (empty values are no filter), and the number with its noun
+def test_query_skips_empty_values_and_encodes_the_rest():
+    assert run('L.query({q: "a b&c", limit: 50, port: "", switch_id: null, x: undefined})') == "?q=a%20b%26c&limit=50" and run("L.query({})") == ""
+
+
+@pytest.mark.parametrize("n, want", [(0, "0 Befunde"), (1, "1 Befund"), (2, "2 Befunde")])
+def test_plural(n, want):
+    assert run(f'L.plural({n}, "Befund", "Befunde")') == want

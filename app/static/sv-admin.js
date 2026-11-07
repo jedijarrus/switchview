@@ -20,8 +20,10 @@
      A search runs SEARCH_DELAY ms after the last keystroke, over an index built once per netmap. ── */
   const q = $("#q"), res = $("#results");
   const SEARCH_DELAY = 150;
-  // searchFound: the hits shown (SVLogic.searchIndex entries), searchActive: the index of the active one, -1 for none; searchTerm: the
-  // term searchFound belongs to; searchRun: the promise of the last search started; searchEscapes: the Escapes pressed in the field
+  // searchFound: the hits shown (SVLogic.searchIndex entries) and last the history entry {hist: true, text} (Phase 4b: the field's
+  // text, at most the 100 characters of GET /api/history, for the view "Verlauf"; also under "Nichts gefunden"); searchActive: the
+  // index of the active one, -1 for none; searchTerm: the term searchFound belongs to; searchRun: the promise of the last search
+  // started; searchEscapes: the Escapes pressed in the field
   let searchFound = [], searchActive = -1, searchTimer = null, searchTerm = "", searchRun = null, searchEscapes = 0;
   const termOf = () => q.value.trim().toLowerCase().replace(/-/g, ":");
   // The search index of each MAP (MAP is only ever replaced: an old MAP's index goes with it)
@@ -41,20 +43,25 @@
     try { await loadMap(false); } catch (e) { return; }
     // A search that waited for the netmap while the field changed leaves the list to the search of the new text
     if (termOf() !== term) return;
-    searchFound = SVLogic.searchHits(searchIdx(), term, 30); searchTerm = term;
+    const hits = SVLogic.searchHits(searchIdx(), term, 30), n = hits.length, hist = { hist: true, text: q.value.trim().slice(0, 100) };
+    searchFound = [...hits, hist]; searchTerm = term;
     searchActive = -1; q.removeAttribute("aria-activedescendant");
-    res.innerHTML = searchFound.length ? searchFound.map((h, i) => `<button type="button" role="option" id="hit-${i}" aria-selected="false" tabindex="-1" data-i="${i}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.k)} · Port ${esc(h.port)}</span><span class="r2">${esc(h.x)}</span></button>`).join("")
-      : `<div class="none" role="option" aria-disabled="true">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`;
+    res.innerHTML = (n ? hits.map((h, i) => `<button type="button" role="option" id="hit-${i}" aria-selected="false" tabindex="-1" data-i="${i}"><span class="r1">${esc(h.t)}</span><span class="r3">${esc(h.k)} · Port ${esc(h.port)}</span><span class="r2">${esc(h.x)}</span></button>`).join("")
+      : `<div class="none" role="option" aria-disabled="true">Nichts gefunden. Uplinks mit vielen Geräten werden nicht durchsucht.</div>`)
+      + `<button type="button" role="option" id="hit-${n}" aria-selected="false" tabindex="-1" data-i="${n}" class="hist"><span class="r1">Im Verlauf suchen</span><span class="r2">„${esc(hist.text)}“</span></button>`;
     // A search that ends after the focus left the field (the pause, a slow netmap) does not open the list over the page, nor one
     // that ends after an Escape closed it (its hits are there for the next arrow key)
     showResults(document.activeElement === q && searchEscapes === escapes);
   }
   function startSearch() { clearTimeout(searchTimer); searchTimer = null; return (searchRun = runSearch()); }
-  async function openHit(h) {
+  // A hit opens its switch and the port panel (from: where the focus goes back when the panel closes, the search field unless the
+  // caller names another: a port of the view "Verlauf" passes null); the history entry searches its text in the view "Verlauf"
+  async function openHit(h, from = q) {
     showResults(false);
+    if (h.hist) { histTerm = h.text; go("verlauf"); return; }
     swVlan = null; swPortFilter = "all"; swText = ""; go("switches", h.sid);
     for (let i = 0; i < 20 && !$("#plate"); i++) await new Promise(r => setTimeout(r, 100));
-    const s = swById(h.sid); if (s) openPort(s, h.port, q);
+    const s = swById(h.sid); if (s) openPort(s, h.port, from);
   }
   q.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(startSearch, SEARCH_DELAY); });
   q.addEventListener("keydown", async e => {
@@ -387,12 +394,14 @@
     // Sichern geht nur über die SSH-CLI (Treiber mit backup, ProCurve): sonst ist „Jetzt sichern“ gesperrt, mit dem Grund daneben
     const gate = () => { const sw = selected(), ok = has(sw, "backup"); $("#b-now").disabled = !ok; $("#b-why").hidden = ok;
       $("#b-why").textContent = ok ? "" : `Treiber ${sw ? sw.driver : ""} sichert keine Konfiguration: das geht nur über die SSH-CLI (ProCurve).`; };
+    // A backup that differs from the one before it without a SwitchView change between them (outside 1, monitor.backup_outside) is
+    // marked in its cell "Anlass"; "Änderungen" shows the comparison (openBackupDiff, sv-history.js)
     const load = async () => {
       gate();
       const id = $("#b-sw").value, rows = await api("GET", `/api/switches/${id}/backups`);
       const sw = list.find(x => String(x.id) === id);
       $("#b-list").innerHTML = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeitpunkt</th><th>Anlass</th><th>Größe</th><th></th></tr></thead><tbody>` +
-        rows.map(r => `<tr><td>${esc(fmtTime(r.taken_at))}</td><td>${r.trigger === "manual" ? "von Hand" : r.trigger === "nightly" ? "nächtlich" : r.trigger === "lesen" ? "gelesen" : esc(r.trigger)}</td><td class="num">${(r.size / 1024).toFixed(1).replace(".", ",")} KB</td>
+        rows.map(r => `<tr><td>${esc(fmtTime(r.taken_at))}</td><td>${r.trigger === "manual" ? "von Hand" : r.trigger === "nightly" ? "nächtlich" : r.trigger === "lesen" ? "gelesen" : esc(r.trigger)}${r.outside === 1 ? ` <span class="pill warn">außerhalb von SwitchView</span>` : ""}</td><td class="num">${(r.size / 1024).toFixed(1).replace(".", ",")} KB</td>
           <td><div class="actions"><button class="btn small" type="button" data-show="${r.id}">Anzeigen</button><button class="btn small" type="button" data-diff="${r.id}">Änderungen</button></div></td></tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">${!has(sw, "backup") ? "Keine Sicherungen: dieser Treiber sichert nicht." : sw && !sw.ssh_pass_set ? "Für diesen Switch ist noch kein SSH-Zugang hinterlegt (Switches → Zugang bearbeiten)." : "Noch keine Sicherung. „Jetzt sichern“ klicken."}</div>`;
     };
@@ -401,8 +410,7 @@
     $("#b-list").addEventListener("click", async e => {
       const s = e.target.closest("[data-show]"), d = e.target.closest("[data-diff]");
       if (s) { const t = await api("GET", `/api/backups/${s.dataset.show}`); modal("Konfiguration", `<pre class="code">${esc(t)}</pre>`, [{ label: "Schließen", onClick: closeModal }]); }
-      if (d) { const t = await api("GET", `/api/backups/${d.dataset.diff}/diff`); const html = esc(t).split("\n").map(l => l.startsWith("+") && !l.startsWith("+++") ? `<span class="add">${l}</span>` : l.startsWith("-") && !l.startsWith("---") ? `<span class="del">${l}</span>` : l).join("\n");
-        modal("Änderungen zur vorigen Sicherung", `<pre class="code">${html || "Keine Unterschiede."}</pre>`, [{ label: "Schließen", onClick: closeModal }]); }
+      if (d) await openBackupDiff(+d.dataset.diff);
     });
     load();
   }
