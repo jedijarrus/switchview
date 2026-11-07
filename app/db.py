@@ -203,6 +203,12 @@ ADDED_COLUMNS = (
     ("sessions", "claims", "TEXT"),
     ("sessions", "subject", "TEXT"),
     ("sessions", "last_seen", "TEXT"),
+    # Phase 4a: the role of whoever made an audit entry (audit() requires it; NULL for a failed login, which has no session), the role
+    # of whoever started a change (changes.create_change; its change_* entry names it, whenever the change ends) and who approved it
+    # (Task 7; NULL until then and for every change without a four-eyes request). Rows of before have NULL.
+    ("audit", "role", "TEXT"),
+    ("changes", "role", "TEXT"),
+    ("changes", "approved_by", "TEXT"),
 )
 
 
@@ -324,10 +330,13 @@ async def write_settings(conn, items: dict[str, str | None]) -> None:
                            list(items.items()))
 
 
-async def audit(username: str | None, action: str, target: str = "", detail: str = ""):
+async def audit(username: str | None, action: str, target: str = "", detail: str = "", *, role: str | None):
+    """One audit entry. role is required as a keyword, so no call can forget it (tests/test_permissions.py checks every call): the
+    role of the request (user["role"]), of the new session for a login, of whoever started a change for its change_* entry, None
+    for a failed login."""
     async with db() as conn:
         await conn.execute(
-            "INSERT INTO audit(username, action, target, detail) VALUES(?, ?, ?, ?)",
-            (username, action, target, detail),
+            "INSERT INTO audit(username, action, target, detail, role) VALUES(?, ?, ?, ?, ?)",
+            (username, action, target, detail, role),
         )
         await conn.commit()

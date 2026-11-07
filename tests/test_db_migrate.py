@@ -45,6 +45,8 @@ NEW_COLUMNS = {
     "changes": {
         "mechanism": ("TEXT", 0, None),
         "sent": ("INTEGER", 0, None),    # Phase 3 appends sent
+        "role": ("TEXT", 0, None),       # Phase 4a appends role and approved_by
+        "approved_by": ("TEXT", 0, None),
     },
 }
 # config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by test_migration_adds_the_phase3_columns.
@@ -55,11 +57,15 @@ PHASE3_COLUMNS = {
     ("config_backups", "raw_mac"): (("TEXT", 0, None), None),
 }
 # The columns Phase 4a adds, in the same form. Sessions of before keep NULL in all three: no stored roles, the subject of their
-# method and user name, and their first request counts as activity (auth.current_user).
+# method and user name, and their first request counts as activity (auth.current_user). Audit entries and changes of before have no
+# role (NULL), and no change of before was approved by anyone (approved_by NULL).
 PHASE4A_COLUMNS = {
     ("sessions", "claims"): (("TEXT", 0, None), None),
     ("sessions", "subject"): (("TEXT", 0, None), None),
     ("sessions", "last_seen"): (("TEXT", 0, None), None),
+    ("audit", "role"): (("TEXT", 0, None), None),
+    ("changes", "role"): (("TEXT", 0, None), None),
+    ("changes", "approved_by"): (("TEXT", 0, None), None),
 }
 
 
@@ -289,9 +295,9 @@ async def test_migration_adds_the_phase3_columns(data_dir):
 
 
 async def test_migration_adds_the_phase4a_columns(data_dir):
-    """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA, every column added before Phase 4a, one session
-    of before) gets sessions.claims, sessions.subject and sessions.last_seen from init_db (the row: NULL in each), the row keeps what
-    it held; a second init_db changes nothing."""
+    """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA, every column added before Phase 4a, one session,
+    one audit entry and one change of before) gets sessions.claims, sessions.subject, sessions.last_seen, audit.role, changes.role and
+    changes.approved_by from init_db (the rows: NULL in each), the rows keep what they held; a second init_db changes nothing."""
     path = data_dir / "switchview.db"
     async with aiosqlite.connect(path) as conn:
         await conn.executescript(db.SCHEMA)
@@ -301,6 +307,10 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
         await conn.execute("INSERT INTO sessions (token, username, display_name, method, created_at, expires_at) VALUES "
                            "(?, 'anna@example.org', 'Anna', 'entra', '2026-11-07T08:00:00+00:00', '2026-11-07T20:00:00+00:00')",
                            (db.token_hash("vorher"),))    # a hashed token: init_db's rehashing leaves the row as it is
+        await conn.execute("INSERT INTO audit (username, action, target, detail) VALUES ('anna@example.org', 'login', 'entra', '')")
+        await conn.execute("INSERT INTO switches (name, host) VALUES ('SW-EK-01', '203.0.113.21')")
+        await conn.execute("INSERT INTO changes (switch_id, username, kind, summary, status, mechanism, sent) VALUES "
+                           "(1, 'anna@example.org', 'ports', 'Port 2: VLAN 20', 'ok', 'ssh', 1)")
         await conn.commit()
         assert set((await _added_state(conn, PHASE4A_COLUMNS)).values()) == {(None, None)}    # the premise: none of them is there yet
         before = {t: await _first_row_plain(conn, t) for t in sorted({table for table, _ in PHASE4A_COLUMNS})}

@@ -1,5 +1,6 @@
 """Shared helpers of the API tests: the test user (USER, and user() for one of any role), the scheduler trap, a fresh database, a
-TestClient signed in through the user override, and a fake httpx for the code that talks to PacketFence and OPNsense (pf, names).
+TestClient signed in through the user override (become() and by_header() sign it in as someone else), and a fake httpx for the code
+that talks to PacketFence and OPNsense (pf, names).
 
 The fixtures stay in their test files, each with its name and parameters (they hang on different things: a world, a database, a
 fake switch, tmp_path); only their common body lives here: the scheduler trap, the override, the CSRF header and the cleanup.
@@ -12,6 +13,7 @@ import contextlib
 import types
 from typing import NoReturn
 
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 import auth
@@ -52,6 +54,21 @@ def signed_in(monkeypatch, user: dict | None = None):
         yield TestClient(main.app, headers=loginfix.CSRF)
     finally:
         main.app.dependency_overrides.pop(auth.current_user, None)
+
+
+def become(user: dict) -> None:
+    """Inside a signed_in block: every request from now on is signed in as user (the end of the block removes the override)."""
+    main.app.dependency_overrides[auth.current_user] = lambda: user
+
+
+def by_header(users: dict[str, dict]) -> None:
+    """Inside a signed_in block: every request from now on is signed in as users[<its X-Test-User header>]. users is looked up on
+    each request, so an entry added later counts at once. The parameter is annotated: FastAPI would take an unannotated `request`
+    for a query parameter."""
+    def current(request: Request) -> dict:
+        return users[request.headers["X-Test-User"]]
+
+    main.app.dependency_overrides[auth.current_user] = current
 
 
 class Remote:

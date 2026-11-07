@@ -15,6 +15,7 @@ import auth
 import cfgparse
 import drivers
 import poller
+import roles
 import snmp
 import sshcli
 from crypto import encrypt
@@ -195,13 +196,13 @@ def _public(row) -> dict:
 
 
 @router.get("/api/drivers")
-async def list_drivers(user=Depends(auth.current_user)):
+async def list_drivers(user=Depends(auth.require(roles.LESEN))):
     """Die Treiber fuer die Auswahl im Switch-Formular, in der Reihenfolge von drivers.DRIVERS: Name, Faehigkeiten (sortiert), Hinweise."""
     return [{"name": d.name, "caps": sorted(d.caps), "notes": d.notes} for d in drivers.DRIVERS.values()]
 
 
 @router.get("/api/switches")
-async def list_switches(user=Depends(auth.current_user)):
+async def list_switches(user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT * FROM switches ORDER BY zone, sort, name") as cur:
             rows = await cur.fetchall()
@@ -209,7 +210,7 @@ async def list_switches(user=Depends(auth.current_user)):
 
 
 @router.post("/api/switches")
-async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
+async def create_switch(body: SwitchIn, user=Depends(auth.require(roles.ADMIN))):
     _validate(body)
     fields = _columns(body, update=False) | {k: encrypt(getattr(body, k)) for k in SECRET_FIELDS}
     async with db() as conn:
@@ -222,7 +223,8 @@ async def create_switch(body: SwitchIn, user=Depends(auth.current_user)):
             raise
         await conn.commit()
         sid = cur.lastrowid
-    await audit(user["username"], "switch_create", body.host, f"{body.name}, driver: {body.driver}, snmp_write: {_on_off(body.snmp_write)}")
+    await audit(user["username"], "switch_create", body.host, f"{body.name}, driver: {body.driver}, snmp_write: {_on_off(body.snmp_write)}",
+                role=user["role"])
     return {"id": sid}
 
 
@@ -237,7 +239,7 @@ def same_destination(old: str | None, new: str | None) -> bool:
 
 
 @router.put("/api/switches/{sid}")
-async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user)):
+async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.require(roles.ADMIN))):
     """A secret (SECRET_FIELDS) changes only when the PUT carries a value for it ("" deletes it), except that it is bound to the host
     it was entered for (F2): a new host (same_destination) deletes every stored secret the PUT does not carry anew, so none of them
     ever reaches the new host; "cleared" names them, in SECRET_FIELDS order. Reading the old row and writing the new one is one write
@@ -267,25 +269,26 @@ async def update_switch(sid: int, body: SwitchIn, user=Depends(auth.current_user
                 raise HTTPException(409, "Ein Switch mit dieser Adresse existiert bereits")    # rolled back like the 404 above
             raise
         await conn.commit()
-    await audit(user["username"], "switch_update", body.host, _update_detail(fields, old))
+    await audit(user["username"], "switch_update", body.host, _update_detail(fields, old), role=user["role"])
     return {"ok": True, "cleared": cleared}
 
 
 @router.delete("/api/switches/{sid}")
-async def delete_switch(sid: int, user=Depends(auth.current_user)):
+async def delete_switch(sid: int, user=Depends(auth.require(roles.ADMIN))):
     async with db() as conn:
         cur = await conn.execute("DELETE FROM switches WHERE id = ?", (sid,))
         await conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(404, "Switch nicht gefunden")
-    await audit(user["username"], "switch_delete", str(sid))
+    await audit(user["username"], "switch_delete", str(sid), role=user["role"])
     return {"ok": True}
 
 
 @router.delete("/api/switches/{sid}/ssh-host-key")
-async def forget_ssh_host_key(sid: int, user=Depends(auth.current_user)):
+async def forget_ssh_host_key(sid: int, user=Depends(auth.require(roles.ADMIN))):
     """Forgets the pinned SSH host key of the switch: its next SSH contact pins the key it is then offered (E30). Only for a key that
-    changed as expected (replacement, new firmware); the audit keeps the old SHA256."""
+    changed as expected (replacement, new firmware); the audit keeps the old SHA256. Admin only (Sicherheit Phase 2 T2-R1): whoever
+    forgets the key decides which key the next contact trusts."""
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
         async with conn.execute("SELECT host, ssh_host_key FROM switches WHERE id = ?", (sid,)) as cur:
@@ -295,7 +298,7 @@ async def forget_ssh_host_key(sid: int, user=Depends(auth.current_user)):
         await conn.execute("UPDATE switches SET ssh_host_key = NULL, ssh_host_key_at = NULL WHERE id = ?", (sid,))
         await conn.commit()
     fp = sshcli.fingerprints(old["ssh_host_key"])
-    await audit(user["username"], "switch_hostkey_reset", old["host"], fp["sha256"] if fp else "–")
+    await audit(user["username"], "switch_hostkey_reset", old["host"], fp["sha256"] if fp else "–", role=user["role"])
     return {"ok": True}
 
 
@@ -317,7 +320,7 @@ def _cli_way(row, cap: str, what: str):
 
 
 @router.post("/api/switches/{sid}/test")
-async def test_switch(sid: int, user=Depends(auth.current_user)):
+async def test_switch(sid: int, user=Depends(auth.require(roles.LESEN))):
     row = await _row(sid)
     res = {}
     try:
@@ -331,19 +334,19 @@ async def test_switch(sid: int, user=Depends(auth.current_user)):
 
 
 @router.post("/api/switches/{sid}/poll")
-async def poll_now(sid: int, user=Depends(auth.current_user)):
+async def poll_now(sid: int, user=Depends(auth.require(roles.LESEN))):
     await _row(sid)
     return await poller.poll_switch(sid)
 
 
 @router.post("/api/poll")
-async def poll_everything(user=Depends(auth.current_user)):
+async def poll_everything(user=Depends(auth.require(roles.LESEN))):
     await poller.poll_all()
     return {"ok": True}
 
 
 @router.post("/api/switches/{sid}/config/refresh")
-async def refresh_config(sid: int, user=Depends(auth.current_user)):
+async def refresh_config(sid: int, user=Depends(auth.require(roles.LESEN))):
     _cli_way(await _row(sid), "cli", "Konfiguration lesen")
     res = await sshcli.backup_config(sid, "lesen")
     if not res.get("ok"):
@@ -352,7 +355,7 @@ async def refresh_config(sid: int, user=Depends(auth.current_user)):
 
 
 @router.post("/api/switches/{sid}/port-access")
-async def port_access(sid: int, user=Depends(auth.current_user)):
+async def port_access(sid: int, user=Depends(auth.require(roles.LESEN))):
     row = await _row(sid)
     _cli_way(row, "cli", "Anmeldungen anzeigen")
     if not row["ssh_user"] or not row["ssh_pass"]:
@@ -367,15 +370,15 @@ async def port_access(sid: int, user=Depends(auth.current_user)):
 
 # ── Sicherungen ───────────────────────────────────────────────────────────────
 @router.post("/api/switches/{sid}/backup")
-async def backup_now(sid: int, user=Depends(auth.current_user)):
+async def backup_now(sid: int, user=Depends(auth.require(roles.LESEN))):
     _cli_way(await _row(sid), "backup", "Konfiguration sichern")
     res = await sshcli.backup_config(sid, "manual")
-    await audit(user["username"], "backup", str(sid), json.dumps(res))
+    await audit(user["username"], "backup", str(sid), json.dumps(res), role=user["role"])
     return res
 
 
 @router.get("/api/switches/{sid}/backups")
-async def list_backups(sid: int, user=Depends(auth.current_user)):
+async def list_backups(sid: int, user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT id, taken_at, sha, trigger, length(content) AS size FROM config_backups WHERE switch_id = ? "
                                 "ORDER BY id DESC LIMIT 200", (sid,)) as cur:
@@ -384,7 +387,7 @@ async def list_backups(sid: int, user=Depends(auth.current_user)):
 
 # A backup is served masked with today's patterns, also one stored before them; the stored rows stay as they are (E26)
 @router.get("/api/backups/{bid}", response_class=PlainTextResponse)
-async def get_backup(bid: int, user=Depends(auth.current_user)):
+async def get_backup(bid: int, user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT content FROM config_backups WHERE id = ?", (bid,)) as cur:
             row = await cur.fetchone()
@@ -399,7 +402,7 @@ SECRET_ONLY_DIFF = "Nur maskierte Geheimnisse haben sich geändert – der Vergl
 
 
 @router.get("/api/backups/{bid}/diff", response_class=PlainTextResponse)
-async def diff_backup(bid: int, user=Depends(auth.current_user)):
+async def diff_backup(bid: int, user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT id, switch_id, taken_at, content FROM config_backups WHERE id = ?", (bid,)) as cur:
             cur_row = await cur.fetchone()

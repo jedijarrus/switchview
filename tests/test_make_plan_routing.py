@@ -200,9 +200,9 @@ def fake(monkeypatch) -> FakeSwitch:
         sw.calls.append(("plan", kwargs.get("mechanism", "ssh")))
         return real_plan(*args, **kwargs)
 
-    async def create_spy(sid, user, kind, summary, req, plan, revert_of=None):
+    async def create_spy(sid, user, kind, summary, req, plan, revert_of=None, **kw):
         sw.created.append(plan)
-        return await real_create(sid, user, kind, summary, req, plan, revert_of=revert_of)
+        return await real_create(sid, user, kind, summary, req, plan, revert_of=revert_of, **kw)    # role= and what comes later
 
     def run_fake(cid):
         sw.ran.append(cid)          # recorded on the call itself: the task it would become never has to run
@@ -846,6 +846,19 @@ def test_apply_over_ssh_is_unchanged(api, fake, tmp_path):
     finally:
         conn.close()
     assert row == ("ports", "Port 2: VLAN 20", '["2"]', '{"2": {"u": "20"}}', '{"2": {"u": "99"}}', '["vlan 20 untagged 2"]', "queued")
+
+
+def test_apply_records_who_started_the_change_with_the_role(api, fake, tmp_path):
+    """Phase 4a: /apply hands the role of its request to create_change; the row keeps it (its change_* audit entry names it)."""
+    sid = switch(api, "procurve")
+    apifix.become(apifix.user("aendern", "anna"))
+    p = preview(api, sid, PC_PROBE)
+    assert apply(api, sid, PC_PROBE, p["token"], mechanism="ssh").status_code == 200
+    conn = sqlite3.connect(tmp_path / "switchview.db")
+    try:
+        assert conn.execute("SELECT username, role, approved_by FROM changes").fetchall() == [("anna", "aendern", None)]
+    finally:
+        conn.close()
 
 
 def test_apply_still_refuses_a_blocked_plan(api, fake):

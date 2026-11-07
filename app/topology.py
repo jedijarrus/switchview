@@ -13,6 +13,7 @@ import changes
 import drivers
 import names as names_mod
 import poller
+import roles
 from db import db, get_setting
 
 router = APIRouter()
@@ -20,7 +21,7 @@ router = APIRouter()
 
 # ── Netzplan ──────────────────────────────────────────────────────────────────
 @router.get("/api/netmap")
-async def netmap(user=Depends(auth.current_user)):
+async def netmap(user=Depends(auth.require(roles.LESEN))):
     return await build_map()
 
 

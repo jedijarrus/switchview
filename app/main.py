@@ -20,6 +20,7 @@ import api_switches
 import auth
 import bodylimit
 import changes
+import roles
 import throttle
 import topology
 from api_changes import DISABLED, PlanIn, PortChange, _change_out, _inventory, _make_plan, _plan_revert, _snmp_unwritable, _summary, needed_ops
@@ -209,12 +210,12 @@ async def login_local(body: LocalLogin, request: Request, response: Response):
         raise HTTPException(429, "Zu viele Anmeldeversuche, bitte eine Minute warten")
     if not auth.check_local(body.username, body.password):
         _LOGIN.fail(keys)
-        await audit(body.username, "login_failed", "local")
+        await audit(body.username, "login_failed", "local", role=None)    # no session, no role
         raise HTTPException(401, "Benutzername oder Kennwort falsch")
     token = await auth.create_session(body.username, body.username, "local", subject=f"local:{body.username}")
     _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
     _set_cookie(response, request, auth.DEVICE_COOKIE, auth.device_token(body.username), auth.DEVICE_DAYS * 86400)
-    await audit(body.username, "login", "local")
+    await audit(body.username, "login", "local", role=roles.role_of("local", [], settings))
     return {"ok": True}
 
 
@@ -263,16 +264,17 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
     user = claims.get("preferred_username") or claims.get("upn") or claims.get("email") or claims["sub"]
     # The roles claim for the role of every request of this session; the object id (stable across apps of the tenant; without it the
     # sub, stable per app) for the person, whatever the user name
-    token = await auth.create_session(user, claims.get("name") or user, "entra", roles=auth.claim_roles(claims),
+    app_roles = auth.claim_roles(claims)
+    token = await auth.create_session(user, claims.get("name") or user, "entra", roles=app_roles,
                                       subject="entra:" + str(claims.get("oid") or claims["sub"]))
     _set_cookie(response, request, auth.COOKIE, token, settings.session_hours * 3600)
     response.delete_cookie(auth.LOGIN_COOKIE, path="/")
-    await audit(user, "login", "entra")
+    await audit(user, "login", "entra", role=roles.role_of("entra", app_roles, settings))    # the role of the new session
     return {"ok": True}
 
 
 @app.get("/api/auth/me")
-async def me(user=Depends(auth.current_user)):
+async def me(user=Depends(auth.require(roles.LESEN))):
     """The signed-in user for the page: name, role, zones and the idle limit; not the subject (it is for the server's comparisons)."""
     return {"username": user["username"], "name": user["name"], "method": user["method"], "role": user["role"], "zones": user["zones"],
             "idle_minutes": settings.idle_minutes}
@@ -288,12 +290,12 @@ async def logout(request: Request, response: Response):
 
 
 @app.post("/api/auth/logout-all")
-async def logout_all(response: Response, user=Depends(auth.current_user)):
+async def logout_all(response: Response, user=Depends(auth.require(roles.LESEN))):
     """Ends every session of the signed-in user on every device, this one too: the lever when a session must end now (A3). Through
-    current_user, so it needs the CSRF header like every other write."""
+    current_user, so it needs the CSRF header like every other write; any role, and only the user's own sessions."""
     ended = await auth.drop_user_sessions(user["username"])
     response.delete_cookie(auth.COOKIE, path="/")
-    await audit(user["username"], "logout_all", "", f"Sitzungen beendet: {ended}")
+    await audit(user["username"], "logout_all", "", f"Sitzungen beendet: {ended}", role=user["role"])
     return {"ok": True, "ended": ended}
 
 

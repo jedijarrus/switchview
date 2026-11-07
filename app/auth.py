@@ -1,4 +1,5 @@
 """Anmeldung: Entra-SSO (MSAL-Popup, id_token per JWKS geprueft) und optionaler Notfall-Login."""
+import functools
 import hashlib
 import hmac
 import json
@@ -6,10 +7,11 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 import roles
 from config import settings
@@ -50,6 +52,11 @@ _used_nonces: dict[str, float] = {}         # nonce -> the time from which it ma
 # signed-in request counts as activity; its time (sessions.last_seen) is written at most once per TOUCH_S, not on every request.
 IDLE = "Abgemeldet nach {minutes} Minuten ohne Aktivität – bitte neu anmelden"
 TOUCH_S = 60
+# The routes anyone may call without a session (Phase 4a): the page, its static files and the login steps. Every other route declares
+# its minimum role through require() (tests/test_permissions.py walks the routes against both and against the matrix of the plan).
+PUBLIC_ROUTES = frozenset({("GET", "/"), ("GET", "/static/{name}"), ("GET", "/static/fonts/{name}"), ("GET", "/api/auth/config"),
+                           ("POST", "/api/auth/nonce"), ("POST", "/api/auth/local"), ("POST", "/api/auth/azure"),
+                           ("POST", "/api/auth/logout")})
 
 
 def _jwks_client(tenant: str):
@@ -283,6 +290,24 @@ async def current_user(request: Request) -> dict:
     return {"username": username, "name": row["display_name"] or username, "method": method,
             "role": roles.role_of(method, stored.get("roles") or [], settings), "subject": row["subject"] or f"{method}:{username}",
             "zones": None}
+
+
+@functools.cache
+def require(minimum: str) -> Callable:
+    """The dependency of a route that needs at least the role minimum (one of roles.ORDER), one per role: the signed-in user
+    (current_user, so 401 without a session and 403 for a write without the CSRF header, as before), 403 with roles.denial when
+    their role is below minimum. It carries min_role, by which the route walk of the tests finds it. A role that is none of the four
+    raises ValueError when the route is defined, not at its first request."""
+    if minimum not in roles.ORDER:
+        raise ValueError(f"unknown role {minimum!r}")
+
+    async def dependency(user: dict = Depends(current_user)) -> dict:
+        if not roles.at_least(user["role"], minimum):
+            raise HTTPException(403, roles.denial(minimum, user["role"]))
+        return user
+
+    dependency.min_role = minimum
+    return dependency
 
 
 def cookie_secure(request: Request) -> bool:

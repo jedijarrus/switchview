@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import auth
 import names as names_mod
 import pf
+import roles
 from db import audit, db
 from topology import build_map, switch_keys
 
@@ -54,7 +55,7 @@ def _valid_until(body: DeviceIn) -> str | None:
 
 
 @router.get("/api/devices")
-async def list_devices(user=Depends(auth.current_user)):
+async def list_devices(user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT * FROM devices ORDER BY name COLLATE NOCASE") as cur:
             devs = [dict(r) for r in await cur.fetchall()]
@@ -77,7 +78,7 @@ UNKNOWN_PER_PORT = 12  # unknown devices listed per port: a flood shows its port
 
 
 @router.get("/api/devices/unknown")
-async def unknown_devices(user=Depends(auth.current_user)):
+async def unknown_devices(user=Depends(auth.require(roles.LESEN))):
     m = await build_map()
     async with db() as conn:
         # Every unregistered device each port has learned, not build_map's display list "d": that one holds twelve devices per port,
@@ -118,7 +119,8 @@ async def unknown_devices(user=Depends(auth.current_user)):
     return out[:500]
 
 
-async def _save_device(body: DeviceIn, user: str, mac: str, create: bool):
+async def _save_device(body: DeviceIn, user: dict, mac: str, create: bool):
+    """Creates (create) or updates the device mac from body for the signed-in user, syncs it to PacketFence and audits it."""
     vu = _valid_until(body)
     async with db() as conn:
         if create:
@@ -126,7 +128,7 @@ async def _save_device(body: DeviceIn, user: str, mac: str, create: bool):
                 await conn.execute("INSERT INTO devices(mac, name, kind, location, owner, notes, role, allowed, valid_until, created_by, updated_at) "
                                    "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
                                    (mac, body.name.strip(), body.kind, body.location.strip(), body.owner.strip(), body.notes.strip(),
-                                    body.role.strip(), int(body.allowed), vu, user))
+                                    body.role.strip(), int(body.allowed), vu, user["username"]))
             except Exception as e:  # noqa: BLE001
                 if "UNIQUE" in str(e):
                     raise HTTPException(409, "Dieses Gerät ist schon in der Datenbank")
@@ -140,25 +142,26 @@ async def _save_device(body: DeviceIn, user: str, mac: str, create: bool):
                 raise HTTPException(404, "Gerät nicht gefunden")
         await conn.commit()
     res = await pf.sync([mac])
-    await audit(user, "device_create" if create else "device_update", mac, f"{body.name} freigegeben={int(body.allowed)}")
+    await audit(user["username"], "device_create" if create else "device_update", mac, f"{body.name} freigegeben={int(body.allowed)}",
+                role=user["role"])
     return {"ok": True, "pf": res}
 
 
 @router.post("/api/devices")
-async def create_device(body: DeviceIn, user=Depends(auth.current_user)):
-    return await _save_device(body, user["username"], norm_mac(body.mac), True)
+async def create_device(body: DeviceIn, user=Depends(auth.require(roles.AENDERN))):
+    return await _save_device(body, user, norm_mac(body.mac), True)
 
 
 @router.put("/api/devices/{mac}")
-async def update_device(mac: str, body: DeviceIn, user=Depends(auth.current_user)):
+async def update_device(mac: str, body: DeviceIn, user=Depends(auth.require(roles.AENDERN))):
     mac = norm_mac(mac)
     if norm_mac(body.mac) != mac:    # the form never sends another one; saving it under the path's MAC would hide the mismatch
         raise HTTPException(422, "MAC-Adresse im Formular passt nicht zum Gerät")
-    return await _save_device(body, user["username"], mac, False)
+    return await _save_device(body, user, mac, False)
 
 
 @router.delete("/api/devices/{mac}")
-async def delete_device(mac: str, user=Depends(auth.current_user)):
+async def delete_device(mac: str, user=Depends(auth.require(roles.AENDERN))):
     mac = norm_mac(mac)
     try:    # PacketFence has to confirm reading and unregistering the node, else the device stays; a failed CoA is only a warning
         warning = await pf.unregister(mac)
@@ -169,19 +172,19 @@ async def delete_device(mac: str, user=Depends(auth.current_user)):
         await conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(404, "Gerät nicht gefunden")
-    await audit(user["username"], "device_delete", mac, warning or "")
+    await audit(user["username"], "device_delete", mac, warning or "", role=user["role"])
     return {"ok": True, "warning": warning}
 
 
 @router.post("/api/devices/sync")
-async def sync_devices(user=Depends(auth.current_user)):
+async def sync_devices(user=Depends(auth.require(roles.AENDERN))):
     res = await pf.sync()
-    await audit(user["username"], "device_sync", "", json.dumps(res))
+    await audit(user["username"], "device_sync", "", json.dumps(res), role=user["role"])
     return res
 
 
 @router.get("/api/pf/roles")
-async def pf_roles(user=Depends(auth.current_user)):
+async def pf_roles(user=Depends(auth.require(roles.LESEN))):
     if not await pf.configured():
         return {"configured": False, "roles": []}
     try:
@@ -191,5 +194,5 @@ async def pf_roles(user=Depends(auth.current_user)):
 
 
 @router.post("/api/pf/test")
-async def pf_test(user=Depends(auth.current_user)):
+async def pf_test(user=Depends(auth.require(roles.LESEN))):
     return await pf.test()

@@ -525,10 +525,12 @@ class Busy(RuntimeError):
     """create_change: the switch already has a change that is queued or running (BUSY)."""
 
 
-async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None) -> int:
+async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None, *,
+                        role: str | None = None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
     ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
-    and _run_snmp set it to 1 right before anything does).
+    and _run_snmp set it to 1 right before anything does). role is the role of whoever starts it (Phase 4a): its change_* audit entry
+    names it, whenever the change ends (run_change, _close).
 
     One change at a time per switch (Phase 1, review §2): the check for a queued or running change of the switch and the INSERT are one
     write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed api_changes.apply_change's early check the second
@@ -540,10 +542,10 @@ async def create_change(sid: int, user: str, kind: str, summary: str, req: dict,
                 raise Busy(BUSY)    # closing the connection rolls the transaction back
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
-            "mechanism, sent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+            "mechanism, sent, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
-             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism")))
+             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role))
         await conn.commit()
         return cur.lastrowid
 
@@ -711,7 +713,7 @@ async def run_change(cid: int):
         # "Speichern" (also "Trotzdem speichern") writes the whole running configuration, not only what change "of" sent: the audit
         # names the state it read before, the start of the sha of its backup "vor #cid" (or of the equal one before it)
         stand = f", Stand {sshcli.backup_sha(pre)[:12]}" if kind == "save" and pre else ""
-        await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}")
+        await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}", role=ch["role"])
         if _repolls_after(status, kind, sent):
             asyncio.create_task(_repoll(sid))
 
@@ -956,7 +958,7 @@ async def _close(cid: int, ch, status: str, error: str | None, saved: int, outpu
     sid = ch["switch_id"]
     await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
     await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))    # as in run_change: audit and re-poll still run
-    await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}")
+    await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}", role=ch["role"])
     if _repolls_after(status, ch["kind"], sent):
         asyncio.create_task(_repoll(sid))
 

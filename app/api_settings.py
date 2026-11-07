@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 import auth
 import changes
 import names as names_mod
+import roles
 from api_switches import same_destination
 from crypto import encrypt, unreadable
 from db import audit, db, load_settings, read_settings, write_settings
@@ -43,7 +44,7 @@ SETTINGS_SECRETS = ("opnsense_key", "opnsense_secret", "pf_pass", "radius_key")
 
 
 @router.get("/api/settings")
-async def get_settings(user=Depends(auth.current_user)):
+async def get_settings(user=Depends(auth.require(roles.LESEN))):
     """The settings without a secret: of each secret only *_set, and in "unreadable" those stored that do not decrypt (SECRET_KEY
     changed?), so the view asks for them anew. One SELECT (db.load_settings)."""
     s = await load_settings(["poll_minutes", "opnsense_url", "opnsense_verify_tls", "radius_server", "pf_url", "pf_user", "pf_verify_tls",
@@ -63,7 +64,7 @@ async def get_settings(user=Depends(auth.current_user)):
 
 
 @router.put("/api/settings")
-async def put_settings(body: SettingsIn, user=Depends(auth.current_user)):
+async def put_settings(body: SettingsIn, user=Depends(auth.require(roles.ADMIN))):
     """A secret changes only when the PUT carries a value for it ("" deletes it), except that it is bound to its destination (F2,
     DESTINATION_SECRETS): a new destination (same_destination) deletes each of its stored secrets the PUT does not carry anew;
     "cleared" names them. One write transaction as in update_switch. The RADIUS server is stored canonical and without a zone id
@@ -107,17 +108,18 @@ async def put_settings(body: SettingsIn, user=Depends(auth.current_user)):
         await write_settings(conn, new)
         await conn.commit()
     await _schedule()
-    await audit(user["username"], "settings_update", "", ", ".join(changed + ([f"gelöscht: {', '.join(cleared)}"] if cleared else [])))
+    await audit(user["username"], "settings_update", "", ", ".join(changed + ([f"gelöscht: {', '.join(cleared)}"] if cleared else [])),
+                role=user["role"])
     return {"ok": True, "cleared": cleared}
 
 
 @router.post("/api/names/refresh")
-async def names_refresh(user=Depends(auth.current_user)):
+async def names_refresh(user=Depends(auth.require(roles.LESEN))):
     return await names_mod.refresh_names()
 
 
 @router.get("/api/audit")
-async def audit_log(user=Depends(auth.current_user)):
+async def audit_log(user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
-        async with conn.execute("SELECT ts, username, action, target, detail FROM audit ORDER BY id DESC LIMIT 200") as cur:
+        async with conn.execute("SELECT ts, username, action, target, detail, role FROM audit ORDER BY id DESC LIMIT 200") as cur:
             return [dict(r) for r in await cur.fetchall()]

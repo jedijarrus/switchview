@@ -12,6 +12,7 @@ import cfgparse
 import changes
 import drivers
 import poller
+import roles
 import snmp
 import snmpwrite
 import sshcli
@@ -424,9 +425,28 @@ async def _enabled_row(sid: int):
     return row
 
 
+async def _mode_rights(user: dict, row, body: PlanIn) -> None:
+    """The rights of the mode of a /plan or /apply request beyond the route's minimum (Ändern), right after _enabled_row: preparing
+    RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben, and so is
+    taking back a change made in it, which goes over the same uplinks. Saving and every other revert stay Ändern. A revert of a change
+    that is not at this switch is left to _make_plan (404 as before)."""
+    role = user["role"]
+    if body.mode == "prepare" and not roles.at_least(role, roles.ADMIN):
+        raise HTTPException(403, roles.denial(roles.ADMIN, role, "„RADIUS vorbereiten“"))
+    if body.mode == "ports" and body.expert and not roles.at_least(role, roles.FREIGEBEN):
+        raise HTTPException(403, roles.denial(roles.FREIGEBEN, role, "Der Expertenmodus"))
+    if body.mode == "revert" and not roles.at_least(role, roles.FREIGEBEN):
+        async with db() as conn:
+            async with conn.execute("SELECT expert FROM changes WHERE id = ? AND switch_id = ?", (body.of, row["id"])) as cur:
+                ch = await cur.fetchone()
+        if ch and ch["expert"]:
+            raise HTTPException(403, roles.denial(roles.FREIGEBEN, role, "Eine Änderung im Expertenmodus zurückzunehmen"))
+
+
 @router.post("/api/switches/{sid}/plan")
-async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
+async def plan_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
     row = await _enabled_row(sid)
+    await _mode_rights(user, row, body)
     # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
     plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
     # What the preview says about the SNMP way, as the server sees it at plan time (Phase 5): whether the driver saves an SNMP change
@@ -438,10 +458,11 @@ async def plan_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
 
 
 @router.post("/api/switches/{sid}/apply")
-async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
+async def apply_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
     """The early check for a queued or running change spares the read and the plan; the binding one is changes.create_change's, in one
     transaction with the INSERT (two requests can both pass this one while they plan): either way 409 changes.BUSY."""
     row = await _enabled_row(sid)
+    await _mode_rights(user, row, body)
     async with db() as conn:
         async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND status IN ('queued', 'running')", (sid,)) as cur:
             if await cur.fetchone():
@@ -456,7 +477,7 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.current_user)):
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     try:
         cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,
-                                          revert_of=body.of if body.mode == "revert" else None)
+                                          revert_of=body.of if body.mode == "revert" else None, role=user["role"])
     except changes.Busy:
         raise HTTPException(409, changes.BUSY)
     t = asyncio.create_task(changes.run_change(cid))
@@ -494,7 +515,7 @@ async def _changes_out(conn, rows) -> list[dict]:
 
 
 @router.get("/api/changes")
-async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depends(auth.current_user)):
+async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depends(auth.require(roles.LESEN))):
     q, args = "SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id", []
     if switch_id:
         q += " WHERE c.switch_id = ?"
@@ -508,7 +529,7 @@ async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depe
 
 
 @router.get("/api/changes/{cid}")
-async def get_change(cid: int, user=Depends(auth.current_user)):
+async def get_change(cid: int, user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id WHERE c.id = ?", (cid,)) as cur:
             r = await cur.fetchone()
