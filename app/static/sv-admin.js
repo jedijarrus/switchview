@@ -386,7 +386,7 @@
       $("#b-list").innerHTML = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeitpunkt</th><th>Anlass</th><th>Größe</th><th></th></tr></thead><tbody>` +
         rows.map(r => `<tr><td>${esc(fmtTime(r.taken_at))}</td><td>${r.trigger === "manual" ? "von Hand" : r.trigger === "nightly" ? "nächtlich" : r.trigger === "lesen" ? "gelesen" : esc(r.trigger)}</td><td class="num">${(r.size / 1024).toFixed(1).replace(".", ",")} KB</td>
           <td><div class="actions"><button class="btn small" type="button" data-show="${r.id}">Anzeigen</button><button class="btn small" type="button" data-diff="${r.id}">Änderungen</button></div></td></tr>`).join("") + `</tbody></table></div>`
-        : `<div class="empty">${!has(sw, "backup") ? "Keine Sicherungen: dieser Treiber sichert nicht." : sw && !sw.ssh_pass_set ? "Für diesen Switch ist noch kein SSH-Zugang hinterlegt (Switches → Zugang bearbeiten)." : "Noch keine Sicherung. „Jetzt sichern\" klicken."}</div>`;
+        : `<div class="empty">${!has(sw, "backup") ? "Keine Sicherungen: dieser Treiber sichert nicht." : sw && !sw.ssh_pass_set ? "Für diesen Switch ist noch kein SSH-Zugang hinterlegt (Switches → Zugang bearbeiten)." : "Noch keine Sicherung. „Jetzt sichern“ klicken."}</div>`;
     };
     $("#b-sw").addEventListener("change", load);
     $("#b-now").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", `/api/switches/${$("#b-sw").value}/backup`); toast(r.ok ? (r.changed ? "Gesichert" : "Unverändert") : r.error); await load(); } catch (err) { toast(err.message); } gate(); });
@@ -444,7 +444,7 @@
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
-        <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table"</span></label>
+        <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table“</span></label>
         ${destNote("s-url")}
         <div class="grid2">${secretField("s-key", "API-Key", "opnsense_key", s.opnsense_key_set)}
         ${secretField("s-secret", "API-Secret", "opnsense_secret", s.opnsense_secret_set)}</div>
@@ -452,7 +452,7 @@
         ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
-        <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten" eines Switches eingetragen</span></label>
+        <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten“ eines Switches eingetragen</span></label>
         ${secretField("s-rk", "Shared Secret der Switches", "radius_key", s.radius_key_set, "wie in PacketFence beim Switch hinterlegt")}</div>
         ${destNote("s-rs")}
         <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>

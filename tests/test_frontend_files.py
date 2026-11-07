@@ -105,3 +105,12 @@ def test_no_selector_is_built_from_unescaped_text():                            
             assert all(v.startswith("CSS.escape(") for v in re.findall(r"\$\{([^}]*)\}", sel)), (n, sel)
         for v in re.findall(r"(?:querySelector(?:All)?|\$)\(\s*[\"'][^\"']*[\"']\s*\+\s*([\w.]+)", text):
             assert v in CODE_IDS, (n, v)
+
+
+def test_a_german_quote_closes_with_its_own_mark():
+    """Phase 5 Task 11 (browser check): a UI text opened with „ closes with “, not with the ASCII double quote (six texts did,
+    among them the hint at „Vorbereiten“)."""
+    for n in [*SCRIPTS[2:], "index.html"]:
+        text = (STATIC / n).read_text(encoding="utf-8")
+        assert not re.findall(r'„[^“"\n]*\\?"', text), n
+        assert text.count("„") == text.count("“"), n

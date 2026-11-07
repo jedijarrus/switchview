@@ -5,7 +5,7 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(true); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     if (!MAP.switches.length) {
-      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Lege unter „Switches" den ersten Switch mit seinen Zugangsdaten an.</span><button class="btn primary" type="button" id="go-add">Switch hinzufügen</button></div></div>`;
+      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an.</span><button class="btn primary" type="button" id="go-add">Switch hinzufügen</button></div></div>`;
       $("#go-add").addEventListener("click", () => editSwitch(null)); return;
     }
     const sw = MAP.switches, phys = sw.flatMap(physOf), up = phys.filter(p => p.o).length, bad = sw.filter(s => !s.ok).length;
@@ -22,8 +22,8 @@
       <div class="two">
         <section class="card"><div class="card-h"><h2>Switches</h2><div class="right"><span class="muted" style="font-size:12px">Stand ${esc(fmtTime(sw.map(s => s.lastPoll).sort().slice(-1)[0]))}</span><button class="btn small" type="button" id="btn-refresh">Alle abfragen</button></div></div>
           <div class="card-b" style="display:grid;gap:10px">${zones().map(z => `<div class="zonehead">${esc(z)}</div><div class="swgrid">${sw.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
-            const ph = physOf(s), u = ph.filter(p => p.o).length;
-            return `<button type="button" class="swcard" data-sw="${s.id}"><span class="n">${stDot(s)}${esc(s.k)}</span><span class="m">${esc(s.model)} · <span class="mono">${esc(s.fw)}</span></span>
+            const ph = physOf(s), u = ph.filter(p => p.o).length, m = modelFw(s);
+            return `<button type="button" class="swcard" data-sw="${s.id}"><span class="n">${stDot(s)}${esc(s.k)}</span>${m ? `<span class="m">${m}</span>` : ""}
               <div class="bar2" aria-hidden="true"><i style="width:${Math.round(u / Math.max(1, ph.length) * 100)}%"></i></div><span class="row"><span>${u} / ${ph.length} Ports aktiv</span><span class="mono">${esc(s.host)}</span></span></button>`; }).join("")}</div>`).join("")}</div></section>
         <section class="card"><div class="card-h"><h2>Auffälligkeiten</h2><span class="sub">aus den Switch-Daten</span></div>
           ${groups.length ? `<div class="issues">${groups.map((x, gi) => `<details class="ig ${x.sev}" ${x.open ? "open" : ""}><summary>${sevPill[x.sev]}<span class="t">${esc(x.t)}</span><span class="cnt">${x.items.length}</span><svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="d">${esc(x.sum)}</span></summary>

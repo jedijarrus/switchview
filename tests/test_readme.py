@@ -81,6 +81,25 @@ def test_the_ux_note_is_linked_and_has_its_sections():
         assert f"\n{heading}\n" in note, heading
 
 
+def test_the_ux_note_has_a_row_per_decision_of_the_plan():
+    """Phase 5 wrap-up: one table row per "Entscheidung:" of the plan, counted from the plan itself: A1.. for its exclusions, Tn-a.. per task."""
+    note = (ROOT / "docs" / "ux-phase5.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "superpowers" / "plans" / "2026-11-06-phase5-ux.md").read_text(encoding="utf-8")
+    counts, section = {}, None
+    for line in plan.splitlines():
+        task = re.match(r"### Task (\d+):", line)
+        if task:
+            section = f"T{task[1]}"
+        elif line.startswith("## "):
+            section = "A" if line == "## Ausschlüsse" else None
+        elif line.startswith("- Entscheidung:") and section:
+            counts[section] = counts.get(section, 0) + 1
+    assert set(counts) == {"A"} | {f"T{n}" for n in range(1, 12)}, counts
+    for section, n in counts.items():
+        for rid in ([f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]):
+            assert f"\n| {rid} |" in note, rid
+
+
 def test_ruff_is_pinned_and_no_file_is_exempt():
     """A new ruff release brings new rules and would break CI without a code change; every file is held to the full rule set."""
     assert "ruff==0.17.3" in (ROOT / "requirements-dev.txt").read_text() and "per-file-ignores" not in (ROOT / "ruff.toml").read_text()

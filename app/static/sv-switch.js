@@ -13,6 +13,9 @@
   const warnList = ws => (ws || []).length ? `<div class="banner warn"><ul class="blist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "";
   // The button of the switch view's actions and write banners (its click: data-a="edit")
   const EDIT_ACCESS = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
+  // The line under a switch's name: zone, model and firmware only where known (modelFw), address, driver, time of the last poll
+  const switchMeta = s => [esc(s.zone), modelFw(s, "Firmware "), `<span class="mono">${esc(s.host)}</span>`,
+    `Treiber <span class="mono">${esc(s.driver || "procurve")}</span>`, `Stand ${esc(fmtTime(s.lastPoll))}`].filter(Boolean).join(" · ");
   // The banners above a switch's facts: the last poll failed or went through with gaps (poller.partial_note keeps its note in error),
   // the credential warnings, and how SwitchView writes here.
   // Schreibwege: SSH-CLI nur bei einem Treiber mit cli und SSH-Zugang, sonst SNMP (wenn SNMP-Schreiben an ist). Was nur über die CLI
@@ -36,7 +39,7 @@
     const side = `<nav class="side" aria-label="Switches">${zones().map(z => `<div class="zonehead">${esc(z)}</div>` + MAP.switches.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
       const ph = physOf(s); return `<button type="button" class="si" data-sw="${s.id}" aria-current="${s.id === selSwitch}">${stDot(s)}<span>${esc(s.k)}</span><span class="c">${ph.filter(p => p.o).length}/${ph.length}</span></button>`; }).join("")).join("")}
       <button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button></nav>`;
-    if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Links „Switch hinzufügen".</span></div></div></div>`; bindSide(); return; }
+    if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Links „Switch hinzufügen“.</span></div></div></div>`; bindSide(); return; }
     const s = swById(selSwitch), ph = physOf(s), trunks = s.ports.filter(p => p.n.startsWith("Trk"));
     const vset = [...new Set(ph.flatMap(p => [...p.u, ...p.t]))].sort((a, b) => a - b);
     if (swVlan && !vset.includes(swVlan)) swVlan = null;
@@ -45,7 +48,7 @@
     const stFacts = (has(s, "nac") ? [["radius", "RADIUS"], ["known", "Bekannte Geräte"], ["protected", "Protected"]] : [["on", "An"]]).concat([["off", "Aus"]]);
     const canW = writable(s);
     v.innerHTML = `<div class="md">${side}<div style="display:grid;gap:16px;min-width:0">
-      <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${esc(s.zone)}${s.zone ? " · " : ""}${esc(s.model)} · Firmware <span class="mono">${esc(s.fw)}</span> · <span class="mono">${esc(s.host)}</span> · Treiber <span class="mono">${esc(s.driver || "procurve")}</span> · Stand ${esc(fmtTime(s.lastPoll))}</div></div>
+      <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${switchMeta(s)}</div></div>
         <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${EDIT_ACCESS}</div></div>
       ${switchBanners(s)}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
@@ -100,7 +103,7 @@
       <div class="right"><button class="btn small" type="button" data-a="readcfg">Neu lesen</button><button class="btn small" type="button" data-a="pa">Anmeldungen anzeigen</button>${miss ? `<button class="btn small primary" type="button" data-a="prepare">Vorbereiten</button>` : ""}</div></div>
       <div class="card-b">${r ? `<ul class="checks">${li(r.host, "RADIUS-Server (PacketFence) eingetragen")}${li(r.coa, "CoA erlaubt (dyn-authorization), damit PacketFence umschalten kann")}${li(r.tw, "CoA ohne Zeitstempel erlaubt (time-window 0), PacketFence schickt keinen")}${li(r.eap, "802.1X-Methode eap-radius")}${li(r.active, "802.1X am Switch aktiv")}${li(r.park, "Park-VLAN 3999 angelegt (für Unbekannte)")}</ul>
         ${r.login_radius ? `<p class="note">Die Anmeldung am Switch selbst nutzt RADIUS.</p>` : ""}${r.others && r.others.length ? `<p class="note">Weitere RADIUS-Server: ${esc(r.others.join(", "))}</p>` : ""}
-        ${miss ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten" fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}`
+        ${miss ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}`
         : `<p class="note" style="margin:0">Konfiguration noch nicht gelesen.</p>`}</div></section>`;
   }
   function bindSide() {
@@ -414,7 +417,7 @@
     drLast = trigger || document.activeElement;
     if (selEl) selEl.classList.remove("sel");
     selEl = document.querySelector(`#plate .port[data-p="${CSS.escape(n)}"]`); if (selEl) selEl.classList.add("sel");
-    $("#dr-title").textContent = (p.n.startsWith("Trk") ? "" : "Port ") + p.n; $("#dr-sub").textContent = s.k + " · " + s.model;
+    $("#dr-title").textContent = (p.n.startsWith("Trk") ? "" : "Port ") + p.n; $("#dr-sub").textContent = [s.k, s.model].filter(Boolean).join(" · ");
     const lldp = p.l.length ? p.l.map(x => `<div><b>${esc(x[0])}</b> <span class="mono muted">Port ${esc(x[1])}</span></div>`).join("") : "–";
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
@@ -430,5 +433,10 @@
     $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
     $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();
   }
-  function closeDrawer(silent) { $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true"); $("#scrim").hidden = true; if (selEl) selEl.classList.remove("sel"); syncLayers(); if (!silent) restoreFocus(drLast); }
+  // The focus leaves the panel before it is hidden: a browser refuses aria-hidden on an ancestor of the focused element, and after a
+  // silent close the next dialog may take the focus only later ("Als Gerät anlegen" waits for /api/pf/roles)
+  function closeDrawer(silent) {
+    const f = document.activeElement; if (f && f !== document.body && $("#drawer").contains(f)) f.blur();
+    $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true"); $("#scrim").hidden = true; if (selEl) selEl.classList.remove("sel"); syncLayers(); if (!silent) restoreFocus(drLast);
+  }
   $("#dr-x").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer());

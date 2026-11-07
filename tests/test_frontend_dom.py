@@ -732,3 +732,37 @@ def test_vlan_chip_buttons_keep_the_markup_of_the_port_form():
                                           "<b>Abgebrochen:</b> durch Neustart von SwitchView, nichts gesendet")])
 def test_an_aborted_change_reads_once_as_aborted(error, want):
     assert want in in_dom(f'resultHead({{status: "aborted", error: {json.dumps(error)}, steps: []}})')
+
+
+# Phase 5 Task 11: what the browser check found. A switch whose poll read no firmware (every sysDescr but a ProCurve's, poller.
+# parse_descr) or no model (a switch that never answered) showed empty parts in its meta line ("Firmware  ·", "SW-HP ·"); and a
+# focused button stayed inside the panel while closeDrawer hid it, which Chrome refuses ("Blocked aria-hidden on an element because
+# its descendant retained focus", "Als Gerät anlegen": the device form opens only after /api/pf/roles answers).
+@pytest.mark.parametrize("sw, meta, card", [
+    ({"zone": "Büro", "model": "J9729A 2920-48G-POE+", "fw": "WB.16.99.0001"},
+     'Büro · J9729A 2920-48G-POE+ · Firmware <span class="mono">WB.16.99.0001</span> · ', 'J9729A 2920-48G-POE+ · <span class="mono">WB.16.99.0001</span>'),
+    ({"zone": "", "model": "Cisco IOS Software, C2960X Software (C29", "fw": ""}, "Cisco IOS Software, C2960X Software (C29 · ",
+     "Cisco IOS Software, C2960X Software (C29"),
+    ({"zone": "Büro", "model": "", "fw": ""}, "Büro · ", ""),
+    ({"zone": "", "model": "", "fw": ""}, "", ""),
+    ({"zone": "<z>", "model": "<m>", "fw": "<f>"}, '&lt;z&gt; · &lt;m&gt; · Firmware <span class="mono">&lt;f&gt;</span> · ',
+     '&lt;m&gt; · <span class="mono">&lt;f&gt;</span>')],
+    ids=["procurve", "no-firmware", "no-model", "nothing", "escaped"])
+def test_the_meta_line_names_only_what_the_poll_read(sw, meta, card):
+    s = {**sw, "host": "192.0.2.11", "driver": "procurve", "lastPoll": None}
+    got_meta, got_card = in_dom(f"const s = {json.dumps(s)}; [switchMeta(s), modelFw(s)]")
+    assert got_meta == meta + '<span class="mono">192.0.2.11</span> · Treiber <span class="mono">procurve</span> · Stand –' and got_card == card
+
+
+@pytest.mark.parametrize("model, sub", [("x", "A · x"), ("", "A")])
+def test_the_panel_subtitle_names_the_model_only_when_known(model, sub):
+    assert in_dom(PANEL + 'openPort({id: 1, k: "A", model: %s, caps: [], ports: []}, "1"); $("#dr-sub").textContent' % json.dumps(model)) == sub
+
+
+@pytest.mark.parametrize("focused, want", [("#dr-x", ["false", "body"]), ("#q", [None, "#q"])])
+def test_closing_the_panel_takes_the_focus_out_of_it_first(focused, want):
+    """The focus leaves the panel before aria-hidden="true" is set on it; a focus outside the panel stays where it is."""
+    js = (PANEL + OPEN_PANEL + '$("#drawer").contains = n => n === $("#dr-x"); %s.focus(); let hid = null; '
+          '$("#dr-x").blur = () => { hid = $("#drawer").getAttribute("aria-hidden"); document.activeElement = document.body; }; '
+          'closeDrawer(true); [hid, document.activeElement.sel]') % f'$("{focused}")'
+    assert in_dom(js) == want

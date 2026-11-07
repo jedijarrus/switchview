@@ -18,6 +18,9 @@
   const poeTxt = q => [onTxt(q.on), POE_ST[q.status] && !(q.status === 1 && q.on === false) ? POE_ST[q.status] : "",
     typeof q.mw === "number" && (q.mw > 0 || q.status === 3) ? (q.mw / 1000).toLocaleString("de-DE", { maximumFractionDigits: 1 }) + " W" : ""].filter(Boolean).join(" · ");
   const sentence = t => t && !/[.!?]$/.test(t) ? t + "." : t;
+  // Model and firmware of a switch as HTML for a meta line, each part only if the poll read it: poller.parse_descr finds a firmware
+  // only in a ProCurve sysDescr, and a switch that never answered has neither (fwLabel: "Firmware " in the switch view, none on a card)
+  const modelFw = (s, fwLabel = "") => [esc(s.model), s.fw ? `${fwLabel}<span class="mono">${esc(s.fw)}</span>` : ""].filter(Boolean).join(" · ");
 
   /* ── API, Toast, Modal ── */
   async function api(method, url, body) {
