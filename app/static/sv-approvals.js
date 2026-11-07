@@ -33,17 +33,19 @@
   }
 
   // The view: the last 100 requests, newest first. "Prüfen" for an open one of someone else at a switch of the reviewer's zones,
-  // "Zurückziehen" for an open one of one's own, "Neu anfordern" for one's own that went stale, expired or was rejected (the preview
-  // of its stored change), "Details" for every one
+  // "Zurückziehen" for an open one of one's own (with Ändern, the withdraw route's minimum), "Neu anfordern" for one's own that went
+  // stale, expired or was rejected (the preview of its stored change; with what its /plan needs), "Details" for every one
   async function renderApprovals() {
     const v = $("#view");
     let rows;
     try { rows = await api("GET", "/api/approvals?status=all&limit=100"); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     const reviewer = roleOk("freigeben");
+    // Asking again plans the stored change (/plan): Ändern, the switch's zone and expert mode (expertOk), else the button would end in a 403
+    const again = a => roleOk("aendern") && expertOk() && inZone({ zone: a.switch_zone });
     const btns = a => [
       a.status === "open" && !a.own && reviewer && inZone({ zone: a.switch_zone }) ? `<button class="btn small primary" type="button" data-ar="${a.id}">Prüfen</button>` : "",
-      a.status === "open" && a.own ? `<button class="btn small" type="button" data-aw="${a.id}">Zurückziehen</button>` : "",
-      a.own && ["stale", "expired", "rejected"].includes(a.status) ? `<button class="btn small" type="button" data-an="${a.id}">Neu anfordern</button>` : "",
+      a.status === "open" && a.own && roleOk("aendern") ? `<button class="btn small" type="button" data-aw="${a.id}">Zurückziehen</button>` : "",
+      a.own && ["stale", "expired", "rejected"].includes(a.status) && again(a) ? `<button class="btn small" type="button" data-an="${a.id}">Neu anfordern</button>` : "",
       `<button class="btn small" type="button" data-ad="${a.id}">Details</button>`].join("");
     const list = rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Angefordert</th><th>von</th><th>Switch</th><th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(a =>
       `<tr><td class="num">${a.id}</td><td class="num">${esc(fmtTime(a.requested_at))}</td><td>${apprWho(a)}<span class="cellnote">${esc(SVLogic.roleLabel(a.requester_role))}</span></td><td>${esc(a.switch_name || "–")}</td>`

@@ -1343,6 +1343,20 @@ def test_an_own_request_is_offered_again_after_it_ended_without_running(own, sta
     assert ('data-an="4">Neu anfordern</button>' in in_dom(js)) == again
 
 
+# Final review: "Zurückziehen" needs what the withdraw route needs (Ändern), "Neu anfordern" what the /plan of its change needs
+# (Ändern, the switch's zone, expert mode: Freigeben, or Ändern with four eyes on) - someone demoted, a zone no longer covering the
+# switch or four eyes switched off leave no button that ends in a 403 (T8-a)
+@pytest.mark.parametrize("role, zones, four, status, button, offered", [
+    ("lesen", None, True, "open", "data-aw", False), ("aendern", ["VK"], False, "open", "data-aw", True),
+    ("lesen", None, True, "stale", "data-an", False), ("aendern", ["VK"], True, "stale", "data-an", False),
+    ("aendern", ["EK"], True, "stale", "data-an", True), ("aendern", None, False, "stale", "data-an", False),
+    ("freigeben", None, False, "stale", "data-an", True)])
+def test_withdraw_and_ask_again_hold_the_role_and_the_zone(role, zones, four, status, button, offered):
+    js = ('(async () => { ME = {role: %s, zones: %s, four_eyes: %s}; api = async () => [%s]; ' + DRAW) % (
+        json.dumps(role), json.dumps(zones), json.dumps(four), json.dumps({**A, "own": True, "status": status, "switch_zone": "EK"}))
+    assert (f'{button}="4"' in in_dom(js)) == offered
+
+
 # Beyond the brief: the card says whether the principle is on, why a role below Freigeben does not review, and each row names the
 # requester with the role, the change with its kind and the status with the expiry of an open one (escaped)
 @pytest.mark.parametrize("role, four, sentence, gate", [
