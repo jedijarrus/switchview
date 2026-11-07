@@ -4,7 +4,8 @@ Web portal for access switches: HP/Aruba **ProCurve / ArubaOS-Switch** with the 
 over SNMP, with optional **PacketFence** NAC integration.
 See every port, VLAN and device at a glance, change ports safely, and manage which devices may enter the network without a certificate.
 
-The user interface is in German.
+The user interface is in German. It loads nothing from other hosts, fonts included (with Entra SSO only Microsoft's sign-in), the
+browser's Back and Forward walk its views, and dialogs, the port panel and the search work with the keyboard.
 
 ## Features
 
@@ -12,7 +13,11 @@ The user interface is in German.
 - Switch overview: ports, link/speed, untagged and tagged VLANs, trunks / LAGs, LLDP neighbours, learned MAC addresses, PoE state and power (ProCurve, Cisco)
 - Topology with automatic uplink detection (LLDP, base-MAC matching) and VLAN consistency check per link; switches are told apart by
   id, so two switches with the same name each keep their own links and uplinks (links to a switch view read `#sw=<id>`)
-- VLAN × switch matrix, global search (device, IP, MAC, port description)
+- VLAN × switch matrix, global search (device, IP, MAC, port description) with arrow keys, Enter and Escape
+- Navigation: every view change is an entry in the browser history, so Back and Forward walk the views; the address of a view is
+  its bookmark (`#sw=<id>`, `#vlans`, …; old `#switch=<name>` bookmarks still resolve). Back closes an open dialog, a running
+  change goes on at the server and stays in the change list. Dialogs and the port panel keep the keyboard focus, Escape closes the
+  top one, and the focus goes back to where it came from
 - Device names from the OPNsense ARP table (API) plus reverse DNS
 - Port descriptions and VLAN names with non-ASCII characters (umlauts) are shown as text, not as hex
 - A poll that misses a walk still counts: the switch view says "Abfrage unvollständig" and names the gap; when the MAC table, LLDP
@@ -78,7 +83,7 @@ Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md
 known limits, checks before production use, what to do on an update, decisions)
 
 UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md) (what was built, known limits, checks before production
-use, what to do on an update, decisions)
+use, what to do on an update, what is left for Phase 4, decisions)
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
@@ -153,7 +158,9 @@ in the log, without a traceback.
 
 **Content Security Policy.** Every answer (except the plain-text 500 of an unhandled exception) carries a strict
 Content-Security-Policy (only SwitchView itself; with SSO also connect-src https://login.microsoftonline.com for the MSAL popup). A
-reverse proxy should not set its own CSP for SwitchView: both would apply.
+reverse proxy should not set its own CSP for SwitchView: both would apply. The policy allows no inline script and no `<style>`
+element, only inline style attributes, so a proxy that injects scripts or styles into the pages (some WAF or portal features) is
+blocked. It applies from the first start of the new image, without a report-only phase; the emergency login works under it.
 
 **SECRET_KEY.** A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different
 characters gets a warning in the log at every start. Changing the key later means entering every stored credential anew.
@@ -203,6 +210,8 @@ answer nor stall the UI; a cancelled SNMP call ends its net-snmp process.
 - Network access from SwitchView to the switches: UDP 161 (SNMP), TCP 22 (SSH, ProCurve)
 - For changes on ProCurve: an SSH account with manager rights on the switch (SNMP write access as an optional fallback)
 - For changes on any other driver: SNMP write access (`snmp_write` on, plus write credentials, or a read identity that may write)
+- Browsers of the admins: Chrome/Edge 102, Firefox 112 or Safari 15.5 or later (`inert` and `style-src-attr`); older ones show
+  the UI without its inline styles (VLAN colours, bars) and let screen readers read the page behind a dialog
 - **paramiko 4.x** is pinned via `netmiko[par4]`. paramiko 5 removed the SHA-1 key exchange and `ssh-rsa` host keys, which older ProCurve firmware (e.g. J.15 on the 2520G) still requires. The switch host key must be RSA (paramiko 4 has no DSA).
 
 ## PacketFence integration
