@@ -86,7 +86,7 @@ UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md) (wha
 use, what to do on an update, what is left for Phase 4, decisions)
 
 Roles and approvals notes (German): [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (what was built, the rights per route, known
-limits, checks before production use, what to do on an update, decisions).
+limits, checks before production use, what to do on an update, what comes later, decisions).
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
@@ -110,6 +110,13 @@ limits, checks before production use, what to do on an update, decisions).
   logs a warning; the emergency login is Admin always
 - Idle logout: a session without a request for `IDLE_MINUTES` minutes (default 120, `0` = never) ends; every signed-in request
   counts as activity; the page asks nothing on a timer, except for the progress of a running change
+- Every route has a minimum role, checked by the server on every request; the UI shows the user's name and role, hides or locks
+  what the role does not allow and says why. An Admin can limit Ändern and Freigeben to the switches of some zones by Entra app
+  role (Settings → "Zonen")
+- Optional four-eyes principle for expert-mode changes (uplinks, trunks), off by default: the preview requests an approval, a
+  second person with Freigeben or Admin reviews a freshly planned preview under "Freigaben" and approves it, which runs the change
+  through the same guided loop; nobody approves their own request, the emergency login approves nothing
+- The Entra login binds the ID token to its login attempt (a single-use nonce, bound to a cookie of the browser)
 
 ## Quick start
 
@@ -168,6 +175,19 @@ Entra SSO is never throttled; an access token is refused where an id_token is ex
 (JWKS) waits at most 5 seconds; after a fetch that could not reach Microsoft, SSO logins are refused for 30 seconds without a new
 fetch (the emergency login still works), and the login page asks to try again in half a minute. A refused token is one warning line
 in the log, without a traceback.
+
+**Roles and approvals.** Four roles, each with the rights of the one before: Lesen (read, poll, test, back up), Ändern (port and
+device changes), Freigeben (expert mode, approvals) and Admin (switches, settings, preparing RADIUS, zones, four eyes). Every
+route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are
+the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md), and a test holds the app's routes against it. The
+roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO user is Admin, as before; the emergency login
+is Admin always). An Admin can limit Ändern and Freigeben to the switches of some zones, by app role (Settings → "Zonen", read on
+every request). The four-eyes principle for expert-mode changes is off by default (Settings → "Vier-Augen-Prinzip", Admin): with
+it on, an expert-mode change is requested, and a second person with Freigeben or Admin approves exactly the preview the requester
+saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
+cannot run until it is switched off again. The Entra login carries a single-use nonce bound to a cookie of the browser (a captured
+ID token cannot be replayed from another browser), and a session without a request for `IDLE_MINUTES` minutes ends. The audit
+log records the role of every entry.
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 

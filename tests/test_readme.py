@@ -3,10 +3,12 @@ writes (the per-switch snmp_write switch, the RW credentials, PoE), what stays S
 limitations and device checks. A driver added to drivers.DRIVERS without a README entry fails here. Phase 2: the README names the
 security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
 with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections.
-Phase 4a: likewise the roles note, with its rights per route."""
+Phase 4a: likewise the roles note, with its rights per route as tests/test_permissions.py pins them and a row per decision of
+its plan."""
 import pathlib
 import re
 
+import roles
 from drivers import DRIVERS
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -119,3 +121,44 @@ def test_the_readme_names_the_role_settings():
     """Phase 4a, Task 3: the README names the role mapping, the role values and the idle logout."""
     for text in ("ENTRA_ROLE_MAPPING", "ENTRA_ROLE_AENDERN", "SwitchView.Freigeben", "IDLE_MINUTES"):
         assert text in README, text
+
+
+def test_the_roles_note_has_a_row_per_decision_of_the_plan():
+    """Phase 4a wrap-up: one table row per "Entscheidung:" of the plan, counted from the plan itself: A1.. for its exclusions, Tn-a.. per task."""
+    note = (ROOT / "docs" / "rollen-phase4a.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "superpowers" / "plans" / "2026-11-07-phase4a-rollen.md").read_text(encoding="utf-8")
+    counts, section = {}, None
+    for line in plan.splitlines():
+        task = re.match(r"### Task (\d+):", line)
+        if task:
+            section = f"T{task[1]}"
+        elif line.startswith("## "):
+            section = "A" if line == "## Ausschlüsse" else None
+        elif line.startswith("- Entscheidung:") and section:
+            counts[section] = counts.get(section, 0) + 1
+    assert set(counts) == {"A"} | {f"T{n}" for n in range(1, 11)}, counts
+    for section, n in counts.items():
+        for rid in ([f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]):
+            assert f"\n| {rid} |" in note, rid
+
+
+def test_the_roles_note_repeats_the_permission_matrix():
+    """Phase 4a wrap-up: the note's table "Rechte je Route" has a row for every entry of MATRIX, the matrix the walk over the app's
+    routes holds (tests/test_permissions.py), with the German name of its minimum role - the note cannot go stale silently."""
+    from test_permissions import MATRIX
+    note = (ROOT / "docs" / "rollen-phase4a.md").read_text(encoding="utf-8")
+    label = {None: "öffentlich", **roles.LABELS}
+    for (method, path), role in MATRIX.items():
+        assert f"| {method} | `{path}` | {label[role]} |" in note, (method, path)
+
+
+def test_the_readme_describes_roles_and_approvals():
+    """Phase 4a wrap-up: the security section has a paragraph on the roles and approvals - four roles, the matrix in the note, zones,
+    four eyes off by default, the nonce, the idle logout - and the login list names zones and four eyes."""
+    security = README.split("\n## Security\n", 1)[1].split("\n## ", 1)[0]
+    login = README.split("\n**Login**\n", 1)[1].split("\n## ", 1)[0]
+    assert "**Roles and approvals.**" in security
+    for text in ("Lesen", "Admin", "docs/rollen-phase4a.md", "zone", "four-eyes", "off by default", "nonce", "IDLE_MINUTES"):
+        assert text in security.split("**Roles and approvals.**", 1)[1].split("\n\n", 1)[0], text
+    for text in ("zone", "four-eyes"):
+        assert text in login, text
