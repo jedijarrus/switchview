@@ -130,5 +130,37 @@ const SVLogic = {
     return rows.filter(r => (!action || r.action === action)
       && (!t || [r.username, labels[r.action] || r.action, r.target, r.detail].some(v => String(v || "").toLowerCase().includes(t))));
   },
+  // Whether role (of /api/auth/me) is min or above it, in the order of roles.ORDER on the server (lowest first); an unknown role
+  // (or min) is none, never more
+  atLeast(role, min) {
+    const order = ["lesen", "aendern", "freigeben", "admin"], i = order.indexOf(role), j = order.indexOf(min);
+    return i >= 0 && j >= 0 && i >= j;
+  },
+  // The name of a role as the UI shows it; an unknown one as it stands, none as "–" (an audit entry from before Phase 4a)
+  roleLabel(role) {
+    return { lesen: "Lesen", aendern: "Ändern", freigeben: "Freigeben", admin: "Admin" }[role] || (role ? String(role) : "–");
+  },
+  // The zone list of the settings (PUT /api/zone-scopes) from its text: a line "<App-Rolle> = <Zone>, <Zone>" per app role, empty
+  // lines and lines starting with "#" skipped, "Ohne Zone" for the switches without a zone (""). One app role on two lines is one
+  // entry, its zones once each in the order they first came; errors name the line (1 = the first)
+  parseScopes(text) {
+    const entries = [], errors = [];
+    String(text || "").split("\n").forEach((raw, i) => {
+      const line = raw.trim(), eq = line.indexOf("=");
+      if (!line || line.startsWith("#")) return;
+      const principal = eq < 0 ? "" : line.slice(0, eq).trim();
+      if (!principal) { errors.push(`Zeile ${i + 1}: „App-Rolle = Zone, Zone“ erwartet`); return; }
+      const zones = line.slice(eq + 1).split(",").map(z => z.trim()).filter(Boolean).map(z => (z === "Ohne Zone" ? "" : z));
+      if (!zones.length) { errors.push(`Zeile ${i + 1}: keine Zone`); return; }
+      let e = entries.find(x => x.principal === principal);
+      if (!e) entries.push(e = { principal, zones: [] });
+      zones.forEach(z => { if (!e.zones.includes(z)) e.zones.push(z); });
+    });
+    return { entries, errors };
+  },
+  // The text of a zone list (GET /api/zone-scopes entries), the inverse of parseScopes
+  formatScopes(entries) {
+    return (entries || []).map(e => `${e.principal} = ${e.zones.map(z => (z === "" ? "Ohne Zone" : z)).join(", ")}`).join("\n");
+  },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;

@@ -27,7 +27,13 @@
     const opt = { method, headers: { "X-Requested-With": "SwitchView" }, credentials: "same-origin" };
     if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
     const r = await fetch(url, opt);
-    if (r.status === 401 && !url.startsWith("/api/auth/")) { showLogin(); throw new Error("Bitte erneut anmelden"); }
+    // A session that ended: the login page names the server's reason (the idle logout, an expired session); "Nicht angemeldet" says
+    // nothing the login page does not
+    if (r.status === 401 && !url.startsWith("/api/auth/")) {
+      let why = "";
+      try { const d = (r.headers.get("content-type") || "").includes("json") ? await r.json() : null; if (d && typeof d.detail === "string") why = d.detail; } catch (e) { /* kein JSON */ }
+      showLogin(why === "Nicht angemeldet" ? "" : why); throw new Error("Bitte erneut anmelden");
+    }
     const data = (r.headers.get("content-type") || "").includes("json") ? await r.json() : await r.text();
     if (!r.ok) { let m = data && data.detail ? data.detail : (typeof data === "string" ? data : "Fehler " + r.status); if (Array.isArray(m)) m = m.map(x => x.msg).join(", "); throw new Error(m); }
     return data;
@@ -123,6 +129,22 @@
     try { await api("POST", "/api/auth/local", { username: $("#l-user").value, password: $("#l-pass").value }); $("#l-pass").value = ""; await start(); } catch (err) { showLogin(err.message); }
   });
   $("#btn-logout").addEventListener("click", async () => { try { await api("POST", "/api/auth/logout"); } catch (e) { /* egal */ } showLogin(); });
+
+  /* ── Rights: what the role (ME.role) and the zones (ME.zones: null = not limited) of the signed-in user allow, as /api/auth/me said
+     at the start of the page. The views hide or lock the rest and say why; the server checks every request (auth.require, roles). ── */
+  const roleOk = min => SVLogic.atLeast(ME && ME.role, min);
+  const inZone = s => !ME || ME.zones == null || ME.zones.includes((s && s.zone) || "");
+  const mayChange = s => writable(s) && roleOk("aendern") && inZone(s);
+  // Expert mode (uplinks, trunks): Freigeben, or with the four-eyes principle on a request for someone else to approve
+  const expertOk = () => roleOk("freigeben") || !!(ME && ME.four_eyes);
+  // Why the user may not change switch s, as one sentence ("" when they may): the role first, then the zone (roles.zone_denial's rule:
+  // the empty zone is "Ohne Zone", in the list too)
+  function rightsWhy(s) {
+    if (roleOk("aendern") && inZone(s)) return "";
+    if (!roleOk("aendern")) return `Deine Rolle „${SVLogic.roleLabel(ME && ME.role)}“ kann hier nur ansehen. Ändern braucht die Rolle „Ändern“.`;
+    const named = z => z || "Ohne Zone", zone = z => `„${named(z)}“`;
+    return `Dieser Switch liegt in der Zone ${zone(s && s.zone)}. Du darfst nur an Switches der Zonen ${ME.zones.map(zone).join(", ")} ändern.`;
+  }
 
   /* ── Daten ── */
   let MAP = null;

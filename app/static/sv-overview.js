@@ -5,8 +5,10 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(true); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     if (!MAP.switches.length) {
-      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an.</span><button class="btn primary" type="button" id="go-add">Switch hinzufügen</button></div></div>`;
-      $("#go-add").addEventListener("click", () => editSwitch(null)); return;
+      // Adding a switch is Admin (POST /api/switches): below Admin the empty overview says so instead of the button
+      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an.</span>${roleOk("admin") ? `<button class="btn primary" type="button" id="go-add">Switch hinzufügen</button>` : `<span>Switches anlegen braucht die Rolle „Admin“.</span>`}</div></div>`;
+      if (roleOk("admin")) $("#go-add").addEventListener("click", () => editSwitch(null));
+      return;
     }
     const sw = MAP.switches, phys = sw.flatMap(physOf), up = phys.filter(p => p.o).length, bad = sw.filter(s => !s.ok).length;
     const groups = issueGroups(), items = groups.flatMap(x => x.items), nWarn = groups.filter(x => x.sev !== "info").reduce((a, x) => a + x.items.length, 0), nInfo = items.length - nWarn;

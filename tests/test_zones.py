@@ -109,3 +109,13 @@ def test_admin_and_lesen_are_never_scoped_and_read_no_scopes(login_api, monkeypa
     dbfix.query("DROP TABLE zone_scopes")
     login_api.cookies.set(auth.COOKIE, asyncio.run(auth.create_session("anna", "Anna", method, roles=app_roles)))
     assert login_api.get("/api/auth/me").json()["zones"] is None
+
+
+# ── Phase 4a Task 8: the zone of a change's switch for the UI's gates ────────
+
+
+def test_the_change_list_names_the_zone_of_its_switch(api):
+    sid = dbfix.insert_switch(name="SW", host="10.0.0.1", zone="EK")
+    dbfix.query("INSERT INTO changes(switch_id, kind, summary, status) VALUES (?, 'ports', 'x', 'ok')", (sid,))
+    [c] = api.get("/api/changes").json()
+    assert c["switch_zone"] == "EK" and api.get(f"/api/changes/{c['id']}").json()["switch_zone"] == "EK"

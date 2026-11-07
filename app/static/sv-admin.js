@@ -296,36 +296,41 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     let list;
     try { [list, ROLES] = await Promise.all([api("GET", "/api/devices"), api("GET", "/api/pf/roles")]); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
+    // Creating, changing and allowing devices (and the PacketFence sync, which writes there) is Ändern: below it the list only reads
+    const may = roleOk("aendern");
     v.innerHTML = `
       ${!ROLES.configured ? `<div class="banner warn">Die PacketFence-API ist nicht eingerichtet (Einstellungen). Freigaben wirken erst, wenn sie in PacketFence stehen.</div>` : ROLES.error ? `<div class="error">PacketFence: ${esc(ROLES.error)}</div>` : ""}
       <section class="card"><div class="card-h"><h2>Geräte</h2><span class="sub">${list.length} bekannt · ${list.filter(d => d.allowed).length} ohne Zertifikat freigegeben</span>
         <div class="right toolrow"><div class="seg" role="group" aria-label="Geräte filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Nicht freigegeben"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
-          <button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button></div></div>
+          ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button>` : ""}</div></div>
+        ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
       <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>`;
     const rows = () => {
       const t = devText.toLowerCase();
       const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "err" && d.pf_state === "fehler"))
         && (!t || [d.name, d.mac, d.location, d.owner, d.role, d.notes, KINDS[d.kind]].some(x => String(x || "").toLowerCase().includes(t))));
-      $("#dbody").innerHTML = f.length ? f.map(d => `<tr class="clickrow" data-mac="${esc(d.mac)}"><td><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}</div></td>
+      $("#dbody").innerHTML = f.length ? f.map(d => `<tr${may ? ` class="clickrow" data-mac="${esc(d.mac)}"` : ""}><td><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}</div></td>
         <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td>
         <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}${pfNote(d)}</td></tr>`).join("")
-        : `<tr><td colspan="6" class="muted">${list.length ? "Kein Gerät passt zum Filter." : "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“."}</td></tr>`;
+        : `<tr><td colspan="6" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“." : "Noch keine Geräte."}</td></tr>`;
     };
     rows();
     $("#df").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (!b) return; devFilter = b.dataset.f; document.querySelectorAll("#df [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.f === devFilter))); rows(); });
     $("#dq").addEventListener("input", e => { devText = e.target.value.trim(); rows(); });
-    $("#dbody").addEventListener("click", e => { const r = e.target.closest("[data-mac]"); if (r) editDevice(list.find(d => d.mac === r.dataset.mac), false); });
-    $("#d-add").addEventListener("click", () => editDevice({ mac: "", name: "", kind: "drucker" }, true));
-    $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
+    if (may) {
+      $("#dbody").addEventListener("click", e => { const r = e.target.closest("[data-mac]"); if (r) editDevice(list.find(d => d.mac === r.dataset.mac), false); });
+      $("#d-add").addEventListener("click", () => editDevice({ mac: "", name: "", kind: "drucker" }, true));
+      $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
+    }
     try {
       const un = await api("GET", "/api/devices/unknown");
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
       if (!$("#ulist")) return;
-      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th></th></tr></thead><tbody>` + un.map((d, i) =>
+      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td><td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td></tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
@@ -406,9 +411,13 @@
   // The text of each audit action (api_*.audit / changes.audit); an action without one shows its key
   const AUDIT_LABELS = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", switch_hostkey_reset: "SSH-Hostschlüssel vergessen", backup: "Sicherung", settings_update: "Einstellungen geändert",
     change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
-    device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
+    device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich",
+    approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
+    approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
+    zone_scopes_update: "Zonen geändert" };
   // The audit log: the 200 entries of GET /api/audit, filtered in the browser by action and by text (SVLogic.filterAudit over user,
-  // action, target and details); each action shows its detail below it (it never names a secret, Phase 2). The filter outlives a
+  // action, target and details); each entry names the role of its user then (Phase 4a, "–" before it), each action shows its detail
+  // below it (it never names a secret, Phase 2). The filter outlives a
   // new render (auditText as typed, auditAction), like devText of the devices; an action the new entries no longer have is dropped
   let auditText = "", auditAction = "";
   async function renderAudit() {
@@ -417,13 +426,13 @@
     if (!actions.includes(auditAction)) auditAction = "";
     const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}"${a === auditAction ? " selected" : ""}>${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>
         <input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="${esc(auditText)}"></div>`;
-    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge · der Filter wirkt auf diese</span>${rows.length ? filter : ""}</div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody id="au-body"></tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
+    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge · der Filter wirkt auf diese</span>${rows.length ? filter : ""}</div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Rolle</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody id="au-body"></tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
     v.style.display = ""; renderChangesInto($("#all-changes"), null, 100);
     if (!rows.length) return;
     const draw = () => {
       const f = SVLogic.filterAudit(rows, auditText.trim(), auditAction, AUDIT_LABELS);
-      $("#au-body").innerHTML = f.length ? f.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("")
-        : `<tr><td colspan="4" class="muted">Keine Einträge für diesen Filter.</td></tr>`;
+      $("#au-body").innerHTML = f.length ? f.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(SVLogic.roleLabel(r.role))}</td><td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">Keine Einträge für diesen Filter.</td></tr>`;
     };
     draw();
     $("#au-q").addEventListener("input", e => { auditText = e.target.value; draw(); });
@@ -435,41 +444,51 @@
   // entered anew. id is the note's own id (<field id>-unread), which its field names in aria-describedby; the note stands beside the
   // field, not in its label (no block in a label, and a click on the note does not focus the field)
   const unreadNote = (s, k, id) => (s.unreadable || []).includes(k) ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – bitte neu eingeben</span>` : "";
+  // The settings and the zone list (GET /api/zone-scopes, kept in a textarea: SVLogic.formatScopes / parseScopes). Changing them is
+  // Admin: below it every field is locked and the save buttons are gone, the card says why; what only reads (names, PacketFence test)
+  // and ending the own sessions stay
   async function renderSettings() {
     const v = $("#view");
-    const s = await api("GET", "/api/settings").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
-    if (!s) return;
+    const got = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/zone-scopes")])
+      .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
+    if (!got) return;
+    const [s, scopes] = got, admin = roleOk("admin"), dis = admin ? "" : " disabled";
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
     // A secret field (k its key in s.unreadable, set: a value is stored): the input with its hint and its unread note as siblings,
     // both naming the input's description
     const secretField = (id, label, k, set, hint = "") => {
       const note = unreadNote(s, k, id + "-unread"), desc = [hint && id + "-hint", note && id + "-unread"].filter(Boolean).join(" ");
-      return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? "gesetzt – leer lassen = unverändert" : ""}"${desc ? ` aria-describedby="${desc}"` : ""}>`
+      return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? "gesetzt – leer lassen = unverändert" : ""}"${desc ? ` aria-describedby="${desc}"` : ""}${dis}>`
         + `${hint ? `<span class="hint" id="${id}-hint">${hint}</span>` : ""}${note}</div>`;
     };
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
-      <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"></label>
+      ${admin ? "" : `<p class="note gate">Einstellungen ändern braucht die Rolle „Admin“.</p>`}
+      <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"${dis}></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
-        <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table“</span></label>
+        <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"${dis}><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table“</span></label>
         ${destNote("s-url")}
         <div class="grid2">${secretField("s-key", "API-Key", "opnsense_key", s.opnsense_key_set)}
         ${secretField("s-secret", "API-Secret", "opnsense_secret", s.opnsense_secret_set)}</div>
-        <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
+        <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}${dis}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
-        <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"><span class="hint">wird beim „Vorbereiten“ eines Switches eingetragen</span></label>
+        <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"${dis}><span class="hint">wird beim „Vorbereiten“ eines Switches eingetragen</span></label>
         ${secretField("s-rk", "Shared Secret der Switches", "radius_key", s.radius_key_set, "wie in PacketFence beim Switch hinterlegt")}</div>
         ${destNote("s-rs")}
-        <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
+        <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"${dis}><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
         ${destNote("s-pfu")}
-        <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"></label>
+        <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"${dis}></label>
         ${secretField("s-pfpass", "API-Kennwort", "pf_pass", s.pf_pass_set)}</div>
-        <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}> TLS-Zertifikat prüfen</label>
+        <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}${dis}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-pftls")}
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
-      <div><button class="btn primary" type="button" id="s-save">Speichern</button></div></div></section>
+      ${admin ? `<div><button class="btn primary" type="button" id="s-save">Speichern</button></div>` : ""}</div></section>
+      <section class="card"><div class="card-h"><h2>Zonen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
+        <p class="note" style="margin:0">Benutzer mit „Ändern“ oder „Freigeben“ und einer dieser Entra-App-Rollen ändern nur Switches dieser Zonen. Wer keine trägt, ist nicht beschränkt.</p>
+        <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint"${dis}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label>
+        ${admin ? `<div><button class="btn small" type="button" id="s-zones-save">Zonen speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
         <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>`;
@@ -483,7 +502,18 @@
       const sync = () => syncNote(box, box + "-note", !$("#" + box).checked || /^http:\/\//i.test($("#" + url).value.trim()));
       $("#" + box).addEventListener("change", sync); $("#" + url).addEventListener("input", sync); sync();
     });
-    $("#s-save").addEventListener("click", async e => {
+    $("#s-scopes").value = SVLogic.formatScopes(scopes.entries);
+    // The zone list as typed: a line it cannot read is named and nothing is sent; saved, the field shows what the server stored
+    // (merged, zones sorted)
+    if (admin) $("#s-zones-save").addEventListener("click", async e => {
+      const r = SVLogic.parseScopes($("#s-scopes").value);
+      if (r.errors.length) { toast(r.errors[0]); return; }
+      e.target.disabled = true;
+      try { const saved = await api("PUT", "/api/zone-scopes", { entries: r.entries }); $("#s-scopes").value = SVLogic.formatScopes(saved.entries); toast("Gespeichert"); }
+      catch (err) { toast(err.message); }
+      e.target.disabled = false;
+    });
+    if (admin) $("#s-save").addEventListener("click", async e => {
       e.target.disabled = true; const pw = id => { const x = $("#" + id).value; return x === "" ? null : x; };
       try { const r = await api("PUT", "/api/settings", { poll_minutes: +$("#s-poll").value || 15, opnsense_url: $("#s-url").value.trim(), opnsense_key: pw("s-key"), opnsense_secret: pw("s-secret"), opnsense_verify_tls: $("#s-tls").checked,
         radius_server: $("#s-rs").value.trim(), radius_key: pw("s-rk"), pf_url: $("#s-pfu").value.trim(), pf_user: $("#s-pfuser").value.trim(), pf_pass: pw("s-pfpass"), pf_verify_tls: $("#s-pftls").checked }); toast(savedTxt(r.cleared)); renderSettings(); }

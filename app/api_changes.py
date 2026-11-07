@@ -565,7 +565,8 @@ async def _changes_out(conn, rows) -> list[dict]:
 
 @router.get("/api/changes")
 async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depends(auth.require(roles.LESEN))):
-    q, args = "SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id", []
+    # switch_zone: the UI offers "Rückgängig" / "Trotzdem speichern" only in the user's zones (Phase 4a Task 8; /plan checks it)
+    q, args = "SELECT c.*, s.name AS switch_name, s.zone AS switch_zone FROM changes c JOIN switches s ON s.id = c.switch_id", []
     if switch_id:
         q += " WHERE c.switch_id = ?"
         args.append(switch_id)
@@ -580,7 +581,8 @@ async def list_changes(switch_id: int | None = None, limit: int = 100, user=Depe
 @router.get("/api/changes/{cid}")
 async def get_change(cid: int, user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
-        async with conn.execute("SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id WHERE c.id = ?", (cid,)) as cur:
+        async with conn.execute("SELECT c.*, s.name AS switch_name, s.zone AS switch_zone FROM changes c JOIN switches s ON s.id = c.switch_id "
+                                "WHERE c.id = ?", (cid,)) as cur:
             r = await cur.fetchone()
         if not r:
             raise HTTPException(404, "Änderung nicht gefunden")

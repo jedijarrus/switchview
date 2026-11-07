@@ -197,3 +197,24 @@ LABELS = {"switch_update": "Switch geändert", "login": "Anmeldung", "login_fail
                                                 ("", "login", [1]), ("anna", "login", []), ("geändert", "", [0])])
 def test_filter_audit(text, action, want):
     assert run(f"(A => L.filterAudit(A, {json.dumps(text)}, {json.dumps(action)}, {json.dumps(LABELS)}).map(r => A.indexOf(r)))({json.dumps(AUDIT)})") == want
+
+
+# Phase 4a Task 8: the role of the signed-in user (/api/auth/me) as the UI compares and names it, and the zone list of the settings
+# as text, one line per app role ("<App-Rolle> = <Zone>, <Zone>", "Ohne Zone" for the empty zone)
+def test_at_least_and_the_labels():
+    assert run('[L.atLeast("freigeben", "aendern"), L.atLeast("aendern", "freigeben"), L.atLeast(null, "lesen"), L.atLeast("chef", "lesen"), '
+               'L.roleLabel("aendern"), L.roleLabel("x"), L.roleLabel(null)]') == [True, False, False, False, "Ändern", "x", "–"]
+
+
+@pytest.mark.parametrize("text, entries, errors", [
+    ("SwitchView.Zone.EK = EK, Lager\n\n# Notiz\nSwitchView.Zone.VK = VK, Ohne Zone",
+     [{"principal": "SwitchView.Zone.EK", "zones": ["EK", "Lager"]}, {"principal": "SwitchView.Zone.VK", "zones": ["VK", ""]}], []),
+    ("X = A\nX = B, A", [{"principal": "X", "zones": ["A", "B"]}], []),
+    ("ohne Zeichen\n = EK\nY = ", [], ["Zeile 1: „App-Rolle = Zone, Zone“ erwartet", "Zeile 2: „App-Rolle = Zone, Zone“ erwartet", "Zeile 3: keine Zone"])])
+def test_parse_scopes(text, entries, errors):
+    assert run(f"L.parseScopes({json.dumps(text)})") == {"entries": entries, "errors": errors}
+
+
+def test_format_scopes_reverses_parse_scopes():
+    text = "SwitchView.Zone.EK = EK, Lager\nSwitchView.Zone.VK = VK, Ohne Zone"
+    assert run(f"L.formatScopes(L.parseScopes({json.dumps(text)}).entries)") == text

@@ -108,8 +108,11 @@ def test_escape_closes_the_top_layer_first():
     assert in_dom(js) == [True, True, False]
 
 
-PANEL = ('MAP = {switches: [], links: [], vlans: {}}; portIdx = {"1": {n: "1", l: [], d: [], u: [], t: [], mc: 0, tr: "", a: "", pv: "", st: "", mb: [], '
-         'o: true, ad: true, s: 1000}}; ')
+# Phase 4a Task 8: the controls follow the role of ME (/api/auth/me); the shared prefixes of the tests that expect controls sign in
+# as Admin unless the test set its own ME before them
+ADMIN_ME = 'ME = ME || {name: "x", role: "admin", zones: null, four_eyes: false}; '
+PANEL = (ADMIN_ME + 'MAP = {switches: [], links: [], vlans: {}}; portIdx = {"1": {n: "1", l: [], d: [], u: [], t: [], mc: 0, tr: "", a: "", pv: "", '
+         'st: "", mb: [], o: true, ad: true, s: 1000}}; ')
 OPEN_PANEL = 'openPort({id: 1, k: "A", model: "x", caps: [], ports: []}, "1"); '
 
 
@@ -480,9 +483,10 @@ def test_the_packetfence_reason_is_shown_inline():
     assert '<div class="banner warn"><span><b>PacketFence:</b> HTTP 500</span></div>' in in_dom(js)
 
 
-SETTINGS = ('ME = {name: "x"}; api = async (m, u) => u === "/api/settings" ? {poll_minutes: 15, opnsense_url: "", opnsense_verify_tls: true, '
-            'radius_server: "", pf_url: "", pf_user: "", pf_verify_tls: true, unreadable: ["opnsense_key", "radius_key", "pf_pass"]} : '
-            '{ok: true, entries: 5, skipped: 2}; await renderSettings(); ')
+SETTINGS_ANSWER = ('{poll_minutes: 15, opnsense_url: "", opnsense_verify_tls: true, radius_server: "", pf_url: "", pf_user: "", pf_verify_tls: true, '
+                   'unreadable: ["opnsense_key", "radius_key", "pf_pass"]}')
+SETTINGS = ('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; api = async (m, u) => u === "/api/settings" ? ' + SETTINGS_ANSWER
+            + ' : u === "/api/zone-scopes" ? {entries: []} : {ok: true, entries: 5, skipped: 2}; await renderSettings(); ')
 
 
 def test_unreadable_secrets_are_noted_outside_any_label():
@@ -570,7 +574,8 @@ def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_chan
 CH = {"created_at": "2026-11-06 10:00:00", "username": "a", "switch_id": 1, "switch_name": "SW", "summary": "Port 2: VLAN 20", "reverted_by": None}
 ROWS = [{**CH, "id": 7, "status": "failed", "saved": 0, "can_revert": True, "can_save": True},
         {**CH, "id": 6, "status": "ok", "saved": 1, "can_revert": True, "can_save": False}]
-LIST = '(async () => { const calls = []; api = async (m, u) => { calls.push(u); return %s; }; const el = $("#lst"); await renderChangesInto(el, 1, %d); %s })()'
+LIST = ('(async () => { ' + ADMIN_ME + 'const calls = []; api = async (m, u) => { calls.push(u); return %s; }; const el = $("#lst"); '
+        'await renderChangesInto(el, 1, %d); %s })()')
 
 
 def test_the_change_list_offers_save_where_the_server_allows_it():
@@ -596,11 +601,11 @@ def test_the_audit_shows_details_and_filters():
           '$("#au-q").value = "bob"; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); return [...a, $("#view").innerHTML]; })()') % json.dumps(AUDIT)
     full, bob, view = in_dom(js)
     assert '<span class="cellnote">host: 10.0.0.1 → 10.0.0.2</span>' in full and full.count("<tr") == 3
-    assert bob.count("<tr") == 1 and "bob" in bob
+    assert bob.count("<tr") == 1 and "<td>bob</td><td>–</td><td>Anmeldung</td>" in bob    # Phase 4a Task 8: the role between user and action
     assert view.count('<option value="login">Anmeldung</option>') == 1 and '<option value="">Alle Aktionen</option>' in view
 
 
-RUN = ('(async () => { const seen = []; MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "switches"; selSwitch = 1; '
+RUN = ('(async () => { ' + ADMIN_ME + 'const seen = []; MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "switches"; selSwitch = 1; '
        'loadMap = async () => { seen.push("map"); }; renderSwitchDetail = () => { seen.push("view"); }; syncPicked = () => {}; '
        'renderChangesInto = async (el, id, n) => { seen.push(["list", id, n]); }; '
        'api = async () => (%s); await runProgress({id: 1, k: "SW"}, 4); await new Promise(r => setTimeout(r, 300)); return seen; })()')
@@ -630,8 +635,8 @@ def test_the_audit_filters_by_action_and_says_when_nothing_is_left():
           '$("#au-act").value = "login"; $("#au-act").fire("change"); a.push($("#au-body").innerHTML); q(" BOB "); q("anna"); '
           'return a; })()') % json.dumps(AUDIT)
     login, bob, none = in_dom(js)
-    assert login.count("<tr") == 1 and "<td>bob</td><td>Anmeldung</td>" in login and bob == login    # the text is trimmed
-    assert none == '<tr><td colspan="4" class="muted">Keine Einträge für diesen Filter.</td></tr>'
+    assert login.count("<tr") == 1 and "<td>bob</td><td>–</td><td>Anmeldung</td>" in login and bob == login    # the text is trimmed
+    assert none == '<tr><td colspan="5" class="muted">Keine Einträge für diesen Filter.</td></tr>'
 
 
 def test_more_never_asks_for_more_than_500():
@@ -646,7 +651,7 @@ def test_a_change_that_sent_nothing_leaves_another_view_alone(where):
 
 # Phase 5 Task 9: a whole trunk is edited from the port panel, its VLANs only and in expert mode (Logik Phase 5, A2 there). The trunk
 # Trk1 (members 5, 6) sits untagged in VLAN 1 and tagged in 20; the switch has VLANs 1, 20, 30. modal is replaced to read the form back.
-TRK = ('MAP = {switches: [], links: [], vlans: {"1": "default", "20": "Clients", "30": "Voice"}}; '
+TRK = (ADMIN_ME + 'MAP = {switches: [], links: [], vlans: {"1": "default", "20": "Clients", "30": "Voice"}}; '
        'const trk = {n: %s, u: ["1"], t: ["20"], tr: %s, mb: ["5", "6"], l: [], d: [], mc: 0, o: true, ad: true, s: 2000, a: "", pv: "1", st: ""}; '
        'portIdx = {[trk.n]: trk}; const sw = {id: 1, k: "SW", ssh: true, caps: ["cli", "nac"], vl: ["1", "20", "30"], ports: [trk]}; '
        'let cap = null; modal = (t, b, btns) => { cap = {t, b, btns}; }; ')
@@ -942,3 +947,120 @@ def test_the_audit_keeps_its_filter_across_a_new_render():                      
     html = in_dom(js)
     assert ('id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="bob"' in html
             and '<option value="login" selected>' in html)
+
+
+# Phase 4a Task 8: the header names the user and the role; each view hides or locks what the role or the zone does not allow and
+# says why in one sentence; the audit log shows the role; a 401 shows the server's reason on the login page; an Admin keeps the zones
+def role_me(role, **k):
+    return f"ME = {json.dumps({'name': 'Anna', 'role': role, 'zones': None, 'four_eyes': False, **k})}; "
+
+
+def test_the_header_names_the_user_and_the_role():
+    js = (NO_VIEWS + '(async () => { api = async (m, u) => u === "/api/auth/me" ? {name: "Anna", role: "freigeben", zones: null, four_eyes: false} : []; '
+          'await start(); return [$("#user-name").textContent, $("#user-role").textContent]; })()')
+    assert in_dom(js) == ["Anna", "Freigeben"]
+
+
+def test_a_401_shows_the_servers_reason_on_the_login_page():
+    js = ('(async () => { fetch = async () => ({status: 401, ok: false, headers: {get: () => "application/json"}, '
+          'json: async () => ({detail: "Abgemeldet nach 120 Minuten ohne Aktivität – bitte neu anmelden"})}); '
+          'await api("GET", "/api/netmap").catch(() => {}); return [$("#login").hidden, $("#login-error").textContent]; })()')
+    assert in_dom(js) == [False, "Abgemeldet nach 120 Minuten ohne Aktivität – bitte neu anmelden"]
+
+
+# Beyond the brief, a pin of today's behaviour: "Nicht angemeldet" is no news on the login page (no text, the error line stays
+# hidden), and an answer without JSON shows the login page without a reason instead of failing
+@pytest.mark.parametrize("headers, body", [('"application/json"', '({detail: "Nicht angemeldet"})'), ('"text/plain"', '"x"')], ids=["not-signed-in", "no-json"])
+def test_a_401_without_news_shows_no_reason(headers, body):
+    js = ('(async () => { fetch = async () => ({status: 401, ok: false, headers: {get: () => %s}, json: async () => %s, text: async () => "x"}); '
+          'const e = await api("GET", "/api/netmap").catch(x => x.message); '
+          'return [$("#login").hidden, $("#login-error").hidden, $("#login-error").textContent, e]; })()') % (headers, body)
+    assert in_dom(js) == [False, True, "", "Bitte erneut anmelden"]
+
+
+SW = {"id": 1, "k": "SW", "zone": "VK", "ssh": True, "caps": ["cli", "nac"], "ok": True, "error": "", "credWarnings": [], "cfgAt": "2026-11-07", "ports": []}
+
+
+@pytest.mark.parametrize("me, why", [(("lesen",), "Deine Rolle „Lesen“ kann hier nur ansehen. Ändern braucht die Rolle „Ändern“."),
+                                     (("aendern",), ""),
+                                     (("aendern", ["EK"]), "Dieser Switch liegt in der Zone „VK“. Du darfst nur an Switches der Zonen „EK“ ändern.")])
+def test_the_switch_view_says_why_the_user_may_not_change(me, why):
+    role, *zones = me
+    html = in_dom(role_me(role, zones=zones[0] if zones else None) + f"switchBanners({json.dumps(SW)})")
+    assert (f'<div class="banner">{why}</div>' in html) == bool(why) and ('data-a="edit"' in html) is False
+
+
+@pytest.mark.parametrize("role, button", [("admin", True), ("freigeben", False)])
+def test_edit_access_is_admin_only(role, button):
+    assert ('data-a="edit"' in in_dom(role_me(role) + "editAccess()")) == button
+    assert in_dom(role_me("lesen") + "editAccess(true)") == '<span class="muted">„Zugang bearbeiten“ braucht die Rolle „Admin“.</span>'
+
+
+@pytest.mark.parametrize("role, four, edit", [("lesen", False, False), ("aendern", False, True), ("aendern", True, True)])
+def test_the_port_panel_offers_editing_by_role(role, four, edit):
+    html = in_dom(PANEL + role_me(role, four_eyes=four) + 'openPort({id: 1, k: "A", model: "x", ssh: true, caps: ["cli"], ports: []}, "1"); '
+                  '$("#dr-body").innerHTML')
+    assert ('id="dr-edit"' in html) == edit and ('id="dr-why"' in html) == (not edit)
+
+
+@pytest.mark.parametrize("role, four, gated", [("aendern", False, True), ("aendern", True, False), ("freigeben", False, False)])
+def test_expert_mode_needs_freigeben_or_four_eyes(role, four, gated):
+    js = (PANEL + role_me(role, four_eyes=four) + 'portIdx["1"].tr = "Trk1"; let cap = null; modal = (t, b) => { cap = b; }; '
+          'editPorts({id: 1, k: "A", ssh: true, caps: ["cli"], ports: []}, ["1"]); cap')
+    b = in_dom(js)
+    assert bool(re.search(r'id="f-expert"[^>]*\bdisabled\b[^>]*aria-describedby="f-gate-exp"', b)) == gated
+    assert ("Der Expertenmodus braucht die Rolle „Freigeben“." in b) == gated
+
+
+@pytest.mark.parametrize("role, expert, revert", [("aendern", 0, True), ("aendern", 1, False), ("freigeben", 1, True), ("lesen", 0, False)])
+def test_the_change_list_offers_revert_by_role(role, expert, revert):
+    rows = [{**ROWS[0], "expert": expert, "switch_zone": ""}]
+    html = in_dom(role_me(role) + LIST % (json.dumps(rows), 10, "return el.innerHTML;"))
+    assert ('data-cr="7"' in html) == revert and ('data-cs="7"' in html) == (role != "lesen")
+
+
+def test_settings_are_read_only_below_admin():
+    html = in_dom('(async () => { ' + SETTINGS.replace('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; ', role_me("freigeben"))
+                  + 'return $("#view").innerHTML; })()')
+    assert 'id="s-save"' not in html and "Einstellungen ändern braucht die Rolle „Admin“." in html and (
+        'id="s-poll" type="number" min="5" max="1440" value="15" disabled' in html)
+    # Beyond the brief: every field of the card is locked, the zone list too; what only reads (names, PacketFence test) and the own
+    # sessions stay
+    assert all(re.search(r"\sdisabled\b", t) for t in re.findall(r"<(?:input|select|textarea)\b[^>]*>", html))
+    assert 'id="s-zones-save"' not in html and all(f'id="{i}"' in html for i in ("s-names", "s-pftest", "s-logout-all"))
+
+
+def test_the_zones_card_saves_what_the_text_says():
+    js = ('(async () => { const puts = []; ME = {name: "x", role: "admin", zones: null, four_eyes: false}; '
+          'api = async (m, u, b) => m === "PUT" ? (puts.push([u, b]), {entries: [{principal: "Z.VK", zones: ["", "VK"]}]}) : u === "/api/settings" ? '
+          + SETTINGS_ANSWER + ' : u === "/api/zone-scopes" ? {entries: [{principal: "Z.EK", zones: ["EK"]}]} : {}; await renderSettings(); '
+          'const a = [$("#s-scopes").value]; const save = () => $("#s-zones-save").handlers.click[0]({target: $("#s-zones-save")}); '
+          '$("#s-scopes").value = "kaputt"; await save(); a.push(puts.length, $("#toasts").children.map(t => t.textContent)); '
+          '$("#s-scopes").value = "Z.VK = VK, Ohne Zone"; await save(); '
+          'return [...a, puts, $("#toasts").children.map(t => t.textContent), $("#s-scopes").value]; })()')
+    first, none, bad, puts, toasts, after = in_dom(js)
+    assert first == "Z.EK = EK" and none == 0 and bad == ["Zeile 1: „App-Rolle = Zone, Zone“ erwartet"]
+    assert puts == [["/api/zone-scopes", {"entries": [{"principal": "Z.VK", "zones": ["VK", ""]}]}]] and toasts[-1] == "Gespeichert"
+    assert after == "Z.VK = Ohne Zone, VK"    # beyond the brief: the field shows what the server stored
+
+
+def test_the_audit_shows_the_role():
+    rows = [{**AUDIT[0], "role": "aendern"}, {**AUDIT[1], "role": None}]
+    html = in_dom('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); return $("#au-body").innerHTML; })()'
+                  % json.dumps(rows))
+    assert "<td>anna</td><td>Ändern</td>" in html and "<td>bob</td><td>–</td>" in html and '<th>Rolle</th>' in in_dom(
+        '(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); return $("#view").innerHTML; })()' % json.dumps(rows))
+
+
+DEVICES = ('(async () => { api = async (m, u) => u === "/api/devices" ? [{mac: "aa:bb:cc:00:00:01", name: "Drucker", kind: "drucker", allowed: 0, '
+           'pf_state: "ok", pf_error: ""}] : u === "/api/pf/roles" ? {configured: true, roles: []} : [{mac: "aa:bb:cc:00:00:02", sw: "A", sid: 1, '
+           'port: "3", vlan: "1", st: "", flags: [], lldp: "", mc: 1}]; await renderDevices(); '
+           'return [$("#view").innerHTML, $("#dbody").innerHTML, $("#ulist").innerHTML, !!$("#dbody").handlers.click]; })()')
+
+
+@pytest.mark.parametrize("role, may", [("lesen", False), ("aendern", True)])
+def test_devices_need_aendern(role, may):
+    view, rows, unknown, click = in_dom(role_me(role) + DEVICES)
+    assert ('id="d-add"' in view, 'id="d-sync"' in view, 'data-u="0"' in unknown) == (may, may, may)
+    assert ('<p class="note gate" id="d-why"' in view, "Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“." in view) == (not may, not may)
+    assert ("clickrow" in rows, click) == (may, may)    # beyond the comment: a reader's rows open nothing

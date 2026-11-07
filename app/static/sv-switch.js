@@ -11,24 +11,26 @@
   let portIdx = {}, picked = new Set(), pickedFor = null;
   // The server's credential warnings (poller.credential_warnings: fallback to "public", SNMPv3 downgrade, secrets that do not decrypt)
   const warnList = ws => (ws || []).length ? `<div class="banner warn"><ul class="blist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "";
-  // The button of the switch view's actions and write banners (its click: data-a="edit")
-  const EDIT_ACCESS = `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`;
+  // The button of the switch view's actions and write banners (its click: data-a="edit"), Admin only (PUT /api/switches/{id}); below
+  // Admin the banner (note) says so, the actions leave it out
+  const editAccess = (note = false) => roleOk("admin") ? `<button class="btn small" type="button" data-a="edit">Zugang bearbeiten</button>`
+    : note ? `<span class="muted">„Zugang bearbeiten“ braucht die Rolle „Admin“.</span>` : "";
   // The line under a switch's name: zone, model and firmware only where known (modelFw), address, driver, time of the last poll
   const switchMeta = s => [esc(s.zone), modelFw(s, "Firmware "), `<span class="mono">${esc(s.host)}</span>`,
     `Treiber <span class="mono">${esc(s.driver || "procurve")}</span>`, `Stand ${esc(fmtTime(s.lastPoll))}`].filter(Boolean).join(" · ");
   // The banners above a switch's facts: the last poll failed or went through with gaps (poller.partial_note keeps its note in error),
-  // the credential warnings, and how SwitchView writes here.
+  // the credential warnings, how SwitchView writes here, and why the user may not change it where SwitchView could (rightsWhy).
   // Ways to write: the SSH CLI only with a driver that has cli and an SSH login, else SNMP (when SNMP writing is on). What only the CLI
   // can do (backup, reading the configuration, RADIUS) the view shows only for a driver that can.
   function switchBanners(s) {
     const cli = has(s, "cli"), canW = writable(s);
-    const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${EDIT_ACCESS}</div>`
-      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports aus- und wieder einschalten („An“, die Anmeldung bleibt, wie sie ist). RADIUS, Bekannte Geräte und Protected brauchen SSH. ${EDIT_ACCESS}</div>`
+    const banner = !canW ? `<div class="banner">${cli ? "Ohne SSH-Zugang kann SwitchView hier nur lesen." : `Treiber ${esc(s.driver)} hat keine SSH-CLI, Änderungen gehen hier nur per SNMP. SNMP-Schreiben ist aus, SwitchView kann hier nur lesen.`} Für Änderungen: ${editAccess(true)}</div>`
+      : cli && !s.ssh ? `<div class="banner">Ohne SSH-Zugang gehen Änderungen hier nur per SNMP: VLANs, Namen${has(s, "snmp_poe") ? ", PoE" : ""} und Ports aus- und wieder einschalten („An“, die Anmeldung bleibt, wie sie ist). RADIUS, Bekannte Geräte und Protected brauchen SSH. ${editAccess(true)}</div>`
       : cli && !s.cfgAt ? `<div class="banner">Die Port-Zustände (RADIUS, bekannte Geräte, Protected) sind noch nicht gelesen. <button class="btn small" type="button" data-a="readcfg">Konfiguration lesen</button></div>` : "";
     return `${s.ok ? "" : `<div class="error">Letzte Abfrage fehlgeschlagen: ${esc(s.error)}</div>`}
       ${s.ok && s.error ? `<div class="banner warn">Abfrage unvollständig: ${esc(s.error)}</div>` : ""}
       ${warnList(s.credWarnings)}
-      ${banner}`;
+      ${banner}${canW && rightsWhy(s) ? `<div class="banner">${esc(rightsWhy(s))}</div>` : ""}`;
   }
 
   async function renderSwitchDetail() {
@@ -38,18 +40,19 @@
     if (pickedFor !== selSwitch) { picked = new Set(); pickedFor = selSwitch; }
     const side = `<nav class="side" aria-label="Switches">${zones().map(z => `<div class="zonehead">${esc(z)}</div>` + MAP.switches.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
       const ph = physOf(s); return `<button type="button" class="si" data-sw="${s.id}" aria-current="${s.id === selSwitch}">${stDot(s)}<span>${esc(s.k)}</span><span class="c">${ph.filter(p => p.o).length}/${ph.length}</span></button>`; }).join("")).join("")}
-      <button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button></nav>`;
-    if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Links „Switch hinzufügen“.</span></div></div></div>`; bindSide(); return; }
+      ${roleOk("admin") ? `<button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button>` : ""}</nav>`;
+    if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>${roleOk("admin") ? "Links „Switch hinzufügen“." : "Switches anlegen braucht die Rolle „Admin“."}</span></div></div></div>`; bindSide(); return; }
     const s = swById(selSwitch), ph = physOf(s), trunks = s.ports.filter(p => p.n.startsWith("Trk"));
     const vset = [...new Set(ph.flatMap(p => [...p.u, ...p.t]))].sort((a, b) => a - b);
     if (swVlan && !vset.includes(swVlan)) swVlan = null;
     const links = MAP.links.filter(l => l.a === s.id || l.b === s.id);
     const cnt = st => ph.filter(p => stOf(s, p.st) === st).length;
     const stFacts = (has(s, "nac") ? [["radius", "RADIUS"], ["known", "Bekannte Geräte"], ["protected", "Protected"]] : [["on", "An"]]).concat([["off", "Aus"]]);
-    const canW = writable(s);
+    // canW: SwitchView can write here (the card "Änderungen"); may: and this user may change it (picking ports, rightsWhy)
+    const canW = writable(s), may = mayChange(s);
     v.innerHTML = `<div class="md">${side}<div style="display:grid;gap:16px;min-width:0">
       <div class="dhead"><div><h1>${esc(s.k)}</h1><div class="meta">${switchMeta(s)}</div></div>
-        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${EDIT_ACCESS}</div></div>
+        <div class="actions"><button class="btn small" type="button" data-a="poll">Jetzt abfragen</button>${has(s, "backup") ? `<button class="btn small" type="button" data-a="backup">Konfiguration sichern</button>` : ""}<button class="btn small" type="button" data-a="test">Verbindung testen</button>${editAccess()}</div></div>
       ${switchBanners(s)}
       <div class="facts"><span class="fact"><b>${ph.filter(p => p.o).length}</b> / ${ph.length} Ports aktiv</span>${stFacts.map(([k, l]) => `<span class="fact"><b>${cnt(k)}</b> ${l}</span>`).join("")}<span class="fact"><b>${ph.filter(isUplink).length}</b> Uplink-Ports</span></div>
       <section class="card"><div class="card-h"><h2>Ports</h2><span class="sub">VLAN wählen, um es hervorzuheben</span></div>
@@ -63,8 +66,8 @@
       <section class="card"><div class="card-h"><h2>Port-Liste</h2>
           <div class="right toolrow"><div class="seg" role="group" aria-label="Ports filtern" id="pf">${[["all", "Alle"], ["up", "Aktiv"], ["free", "Frei"], ["nac", "RADIUS/Bekannt"], ["uplink", "Uplinks"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${swPortFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="pt" placeholder="Port, Gerät, Beschreibung" aria-label="Ports durchsuchen" value="${esc(swText)}"></div></div>
-        <div class="selbar" id="selbar" hidden><span><b id="selcount">0</b> Ports ausgewählt</span><button class="btn small primary" type="button" id="sel-edit">Bearbeiten</button><button class="btn small ghost" type="button" id="sel-clear">Auswahl aufheben</button></div>
-        <div class="tbl-wrap"><table><thead><tr><th class="ck">${canW ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
+        ${may ? `<div class="selbar" id="selbar" hidden><span><b id="selcount">0</b> Ports ausgewählt</span><button class="btn small primary" type="button" id="sel-edit">Bearbeiten</button><button class="btn small ghost" type="button" id="sel-clear">Auswahl aufheben</button></div>` : ""}
+        <div class="tbl-wrap"><table><thead><tr><th class="ck">${may ? `<input type="checkbox" id="pick-all" aria-label="Alle angezeigten Ports auswählen">` : ""}</th><th>Port</th><th>Link</th><th>Zugang</th><th>Ungetaggt</th><th>Getaggt</th><th>Beschreibung</th><th>Gerät / Nachbar</th></tr></thead><tbody id="ptbody"></tbody></table></div></section>
       ${radiusCard(s)}
       ${canW ? `<section class="card"><div class="card-h"><h2>Änderungen</h2><span class="sub">an diesem Switch, neueste zuerst</span></div><div id="sw-changes"><div class="empty">Lade …</div></div></section>` : ""}
       <section class="card"><div class="card-h"><h2>Verbindungen</h2><span class="sub">${links.length} zu anderen Switches</span></div>${linksTable(links, s.id)}</section>
@@ -79,8 +82,10 @@
     // Pick-all leaves trunk members out (they take only name and on / off, editPorts would lock the rest for the whole selection);
     // unticking it clears every shown port, members picked one by one included
     $("#pick-all") && $("#pick-all").addEventListener("change", e => { document.querySelectorAll("#ptbody input[data-pick]").forEach(c => { if (e.target.checked && isMember(portIdx[c.dataset.pick])) return; c.checked = e.target.checked; e.target.checked ? picked.add(c.dataset.pick) : picked.delete(c.dataset.pick); }); syncPicked(); });
-    $("#sel-edit").addEventListener("click", () => editPorts(s, [...picked]));
-    $("#sel-clear").addEventListener("click", () => { picked.clear(); document.querySelectorAll("#ptbody input[data-pick]").forEach(c => c.checked = false); syncPicked(); });
+    if (may) {
+      $("#sel-edit").addEventListener("click", () => editPorts(s, [...picked]));
+      $("#sel-clear").addEventListener("click", () => { picked.clear(); document.querySelectorAll("#ptbody input[data-pick]").forEach(c => c.checked = false); syncPicked(); });
+    }
     v.onclick = e => {
       if (e.target.closest("input[data-pick], label.pick")) return;
       const a = e.target.closest("[data-a]"); if (a && !a.closest(".dhead")) return switchAction(e, s);
@@ -100,15 +105,16 @@
     const li = (ok, t) => `<li class="${ok ? "ok" : "miss"}"><span class="st-dot ${ok ? "" : "down"}"></span>${t}</li>`;
     const miss = r && !(r.host && r.coa && r.tw && r.eap && r.active && r.park);
     return `<section class="card"><div class="card-h"><h2>RADIUS am Switch</h2><span class="sub">${rs ? "Stand " + esc(fmtTime(s.cfgAt)) + (s.cfgStale ? " · veraltet (Switch seither geändert)" : "") : "noch nicht gelesen"}</span>
-      <div class="right"><button class="btn small" type="button" data-a="readcfg">Neu lesen</button><button class="btn small" type="button" data-a="pa">Anmeldungen anzeigen</button>${miss ? `<button class="btn small primary" type="button" data-a="prepare">Vorbereiten</button>` : ""}</div></div>
+      <div class="right"><button class="btn small" type="button" data-a="readcfg">Neu lesen</button><button class="btn small" type="button" data-a="pa">Anmeldungen anzeigen</button>${miss && roleOk("admin") ? `<button class="btn small primary" type="button" data-a="prepare">Vorbereiten</button>` : ""}</div></div>
       <div class="card-b">${r ? `<ul class="checks">${li(r.host, "RADIUS-Server (PacketFence) eingetragen")}${li(r.coa, "CoA erlaubt (dyn-authorization), damit PacketFence umschalten kann")}${li(r.tw, "CoA ohne Zeitstempel erlaubt (time-window 0), PacketFence schickt keinen")}${li(r.eap, "802.1X-Methode eap-radius")}${li(r.active, "802.1X am Switch aktiv")}${li(r.park, "Park-VLAN 3999 angelegt (für Unbekannte)")}</ul>
         ${r.login_radius ? `<p class="note">Die Anmeldung am Switch selbst nutzt RADIUS.</p>` : ""}${r.others && r.others.length ? `<p class="note">Weitere RADIUS-Server: ${esc(r.others.join(", "))}</p>` : ""}
-        ${miss ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}`
+        ${miss ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}
+        ${miss && !roleOk("admin") ? `<p class="note">„Vorbereiten“ braucht die Rolle „Admin“ (es sendet das RADIUS-Secret an den Switch).</p>` : ""}`
         : `<p class="note" style="margin:0">Konfiguration noch nicht gelesen.</p>`}</div></section>`;
   }
   function bindSide() {
     document.querySelectorAll(".side .si").forEach(b => b.addEventListener("click", () => { swVlan = null; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); }));
-    $("#btn-add").addEventListener("click", () => editSwitch(null));
+    const add = $("#btn-add"); if (add) add.addEventListener("click", () => editSwitch(null));
   }
   function renderPlate(s) {
     const ph = physOf(s), main = ph.filter(p => isNum(p.n) && +p.n <= 48).sort((a, b) => +a.n - +b.n), extra = ph.filter(p => !isNum(p.n) || +p.n > 48);
@@ -144,7 +150,7 @@
       return true;
     });
     const dev = p => p.l.length ? p.l.map(x => `${esc(x[0])} <span class="mono muted">${esc(x[1])}</span>`).join(", ") : p.tr && !p.n.startsWith("Trk") ? `<span class="muted">über ${esc(p.tr)}</span>` : p.mc > 3 ? `<span class="muted">${p.mc} Geräte</span>` : p.d.map(d => esc(d[3] || d[2] || d[4] || d[0])).join(", ") || `<span class="muted">–</span>`;
-    const ck = p => writable(s) && !isTrunkPort(p) ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
+    const ck = p => mayChange(s) && !isTrunkPort(p) ? `<label class="pick"><input type="checkbox" data-pick="${esc(p.n)}" ${picked.has(p.n) ? "checked" : ""} aria-label="Port ${esc(p.n)} auswählen"></label>` : "";
     $("#ptbody").innerHTML = rows.length ? rows.map(p => `<tr class="clickrow" data-p="${esc(p.n)}"><td class="ck">${ck(p)}</td><td class="mono">${esc(p.n)}</td><td><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? speedTxt(p.s) : p.ad ? "kein Link" : "aus"}</td><td>${stPill(stOf(s, p.st))}${uplinkPill(p)}</td><td>${chips(p.u)}</td><td>${chips(p.t, "small", 4)}</td><td>${esc(p.a) || `<span class="muted">–</span>`}</td><td>${dev(p)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="muted">Keine Ports für diesen Filter.</td></tr>`;
     if ($("#pick-all")) $("#pick-all").checked = false;
@@ -223,13 +229,14 @@
         <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
           <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
       </div></details>
-      ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>` : ""}`;
+      ${anyProt ? `<label class="check warnbox"><input type="checkbox" id="f-expert" ${f.expert ? "checked" : ""}${expertOk() ? "" : ' disabled aria-describedby="f-gate-exp"'}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>
+        ${expertOk() ? "" : `<p class="note gate" id="f-gate-exp">Der Expertenmodus braucht die Rolle „Freigeben“.</p>`}` : ""}`;
     const collect = () => {
       f.status = (document.querySelector('input[name="f-st"]:checked') || {}).value || "";
       f.untagged = mem ? "" : $("#f-u").value; f.name = $("#f-name").value.trim().replace(/\s+/g, "_"); f.nameClear = $("#f-nclear").checked;
       f.add = mem ? [] : [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta); f.rem = mem ? [] : [...document.querySelectorAll("[data-tr][aria-pressed=true]")].map(b => b.dataset.tr);
       f.limit = nac && !mem ? $("#f-lim").value : ""; f.guest = nac && !mem ? $("#f-guest").value : "-"; f.poe = poeAll && s.snmp_write && !mem ? $("#f-poe").value : "";
-      f.expert = !!($("#f-expert") && $("#f-expert").checked);
+      f.expert = expertOk() && !!($("#f-expert") && $("#f-expert").checked);
       const c = {};
       if (f.status && !stOff[f.status]) c.status = f.status;
       if (f.untagged) c.untagged = f.untagged;
@@ -364,9 +371,10 @@
         if (modalShown(shown)) {
           const btns = [];
           // Which follow-up actions a change has is the server's rule (can_revert / can_save, changes.actions_of): none for a change that
-          // sent nothing, no save (write memory) over SNMP. Here "Rückgängig" only after unclear / failed, as before; the list offers it after ok
-          if (["unclear", "failed"].includes(c.status) && c.can_revert) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
-          if (c.can_save) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
+          // sent nothing, no save (write memory) over SNMP. Here "Rückgängig" only after unclear / failed, as before; the list offers it after ok.
+          // Both also only where the user's role and zones allow them (mayRevert, maySave)
+          if (["unclear", "failed"].includes(c.status) && mayRevert(c)) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
+          if (maySave(c)) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
           btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
           const foot = $("#m-foot"); foot.innerHTML = "";
           const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
@@ -385,9 +393,14 @@
     }
   }
 
+  // The follow-up actions of change c (GET /api/changes) the user may take: the server's rule (can_revert / can_save,
+  // changes.actions_of), and the role and zone /plan asks for (api_changes._mode_rights): taking back an expert change is Freigeben,
+  // every other one and saving Ändern, both in the user's zones (switch_zone)
+  const mayRevert = c => !!c.can_revert && roleOk(c.expert ? "freigeben" : "aendern") && inZone({ zone: c.switch_zone });
+  const maySave = c => !!c.can_save && roleOk("aendern") && inZone({ zone: c.switch_zone });
   // The changes (newest first) of one switch, or of all with switchId null, into el: limit rows (default 100). The follow-up
-  // actions are the server's rule (can_revert / can_save, changes.actions_of); a list the API filled to limit offers "Mehr laden",
-  // which doubles limit up to 500, the maximum of GET /api/changes.
+  // actions are mayRevert / maySave; a list the API filled to limit offers "Mehr laden", which doubles limit up to 500, the maximum
+  // of GET /api/changes.
   async function renderChangesInto(el, switchId, limit = 100) {
     if (!el) return;
     let rows;
@@ -396,7 +409,7 @@
     const more = rows.length >= limit && limit < 500 ? `<div class="more-row"><button class="btn small" type="button" data-more="${Math.min(500, limit * 2)}">Mehr laden</button></div>` : "";
     el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Zeit</th><th>Benutzer</th>${switchId ? "" : "<th>Switch</th>"}<th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(c =>
       `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}</td><td>${chPill(c)}</td>
-        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${c.can_revert ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${c.can_save ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
+        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${mayRevert(c) ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${maySave(c) ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
     el.onclick = async e => {
       const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]"), sv = e.target.closest("[data-cs]"), m = e.target.closest("[data-more]");
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
@@ -429,12 +442,16 @@
     // A trunk (a ProCurve Trk, a LAG such as Po1) is named as it is, its members in the row "Trunk"; a member names its trunk there
     $("#dr-title").textContent = (isTrunkPort(p) ? "" : "Port ") + p.n; $("#dr-sub").textContent = [s.k, s.model].filter(Boolean).join(" · ");
     const lldp = p.l.length ? p.l.map(x => `<div><b>${esc(x[0])}</b> <span class="mono muted">Port ${esc(x[1])}</span></div>`).join("") : "–";
-    const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
+    const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>`
+      : roleOk("aendern") ? `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>` : "";
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
-    // A trunk opens its own form (VLANs only, editTrunk), every other port the port form
-    const canEdit = writable(s), trunk = isTrunkPort(p), why = unconfirmedWhy(p);
-    $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">${trunk ? "Trunk bearbeiten" : "Port bearbeiten"}</button></div>` : ""}
+    // A trunk opens its own form (VLANs only, editTrunk, expert mode only), every other port the port form. Where SwitchView could
+    // write but the user may not, a note says why (dr-why) instead of the button
+    const trunk = isTrunkPort(p), why = unconfirmedWhy(p), canEdit = mayChange(s) && (!trunk || expertOk());
+    const noEdit = rightsWhy(s) || "Einen Trunk ändern geht nur im Expertenmodus, und der braucht die Rolle „Freigeben“.";
+    $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">${trunk ? "Trunk bearbeiten" : "Port bearbeiten"}</button></div>`
+      : writable(s) ? `<div style="margin-bottom:12px"><p class="note gate" id="dr-why">${esc(noEdit)}</p></div>` : ""}
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>

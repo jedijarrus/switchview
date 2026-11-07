@@ -93,6 +93,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .results .r3 { color: var(--muted); font-size: 12px; }
 .results .none { padding: 10px 12px; color: var(--muted); font-size: 13px; }
 .user { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.user .pill { margin-right: 2px; }
 
 .wrap { max-width: 1280px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 80px; display: grid; gap: 20px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); min-width: 0; }
@@ -362,7 +363,7 @@ details.adv[open] summary { margin-bottom: 4px; }
 .field .sec input { flex: 1 1 auto; min-width: 0; }
 .field .sec .btn[aria-pressed="true"] { color: var(--crit); background: var(--crit-bg); border-color: var(--crit); box-shadow: 0 0 0 1px var(--crit) inset; }
 .field .sec.clr input { border-color: var(--crit); background: var(--crit-bg); }
-.field input:disabled, .field select:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
+.field input:disabled, .field select:disabled, .field textarea:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
 .opt:has(input:disabled) { opacity: .55; cursor: not-allowed; background: var(--surface-2); }
 .opt:has(input:disabled):hover { border-color: var(--border-strong); }
 .note.gate { margin: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--fg-2); }

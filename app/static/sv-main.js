@@ -36,7 +36,7 @@
   }
   async function start() {
     ME = await api("GET", "/api/auth/me");
-    $("#user-name").textContent = ME.name; $("#login").hidden = true; $("#app").hidden = false;
+    $("#user-name").textContent = ME.name; $("#user-role").textContent = SVLogic.roleLabel(ME.role); $("#login").hidden = true; $("#app").hidden = false;
     goToHash("replace");
   }
   // Back, Forward and a hash typed in the address bar: the browser fires popstate, then hashchange, and the second finds its view shown
