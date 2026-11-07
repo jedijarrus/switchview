@@ -66,6 +66,12 @@
 ]
 ],
 [
+"/api/audit.csv",
+[
+"GET"
+]
+],
+[
 "/api/auth/azure",
 [
 "POST"

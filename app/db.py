@@ -229,6 +229,10 @@ CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status, id);
 -- time, at another place or back after an absence tells it (alerts.announce_sightings, the event watch). Kept by Ändern
 -- (POST /api/watch, DELETE /api/watch/{mac}), read by Lesen (GET /api/watch); no zone: a MAC belongs to no switch. Never purged.
 CREATE TABLE IF NOT EXISTS watch_macs (mac TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', created_by TEXT, created_at TEXT NOT NULL);
+-- Phase 4b, Task 8: the audit filtered by an action or a user (GET /api/audit, api_settings.audit_filter), a page in the order of the
+-- id. The user's index carries the collation of its filter (username = ? COLLATE NOCASE): SQLite takes no BINARY index for that.
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit(action, id);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit(username COLLATE NOCASE, id);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

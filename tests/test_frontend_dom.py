@@ -608,7 +608,7 @@ def test_a_full_list_offers_more_up_to_500():
 
 
 def test_the_audit_shows_details_and_filters():
-    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); const a = [$("#au-body").innerHTML]; '
+    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); const a = [$("#au-body").innerHTML]; '
           '$("#au-q").value = "bob"; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); return [...a, $("#view").innerHTML]; })()') % json.dumps(AUDIT)
     full, bob, view = in_dom(js)
     assert '<span class="cellnote">host: 10.0.0.1 → 10.0.0.2</span>' in full and full.count("<tr") == 3
@@ -641,7 +641,7 @@ def test_more_gives_the_focus_to_the_first_row_it_added(kids, want):
 # Beyond the brief: the action filter redraws on change (the text filter above on input), a filter without hits shows its row, and
 # a change that sent nothing leaves the list alone when the view shows another switch or another view
 def test_the_audit_filters_by_action_and_says_when_nothing_is_left():
-    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); const a = []; '
+    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); const a = []; '
           'const q = t => { $("#au-q").value = t; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); }; '
           '$("#au-act").value = "login"; $("#au-act").fire("change"); a.push($("#au-body").innerHTML); q(" BOB "); q("anna"); '
           'return a; })()') % json.dumps(AUDIT)
@@ -964,7 +964,8 @@ def test_a_failed_reload_of_more_keeps_the_focus_in_the_list():                 
 
 
 def test_the_audit_keeps_its_filter_across_a_new_render():                            # Phase 5 review, Minor 7
-    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); $("#au-q").value = "bob"; $("#au-q").fire("input"); '
+    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
+          '$("#au-q").value = "bob"; $("#au-q").fire("input"); '
           '$("#au-act").value = "login"; $("#au-act").fire("change"); await renderAudit(); return $("#view").innerHTML; })()') % json.dumps(AUDIT)
     html = in_dom(js)
     assert ('id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="bob"' in html
@@ -973,7 +974,7 @@ def test_the_audit_keeps_its_filter_across_a_new_render():                      
 
 def test_the_audit_drops_a_kept_action_the_new_entries_no_longer_have():              # Phase 4a Task 1 (T1-f)
     later = [r for r in AUDIT if r["action"] != "login"]
-    js = ('(async () => { let rows = %s; api = async (m, u) => u === "/api/audit" ? rows : []; await renderAudit(); '
+    js = ('(async () => { let rows = %s; api = async (m, u) => u === "/api/audit?limit=200" ? {rows} : []; await renderAudit(); '
           '$("#au-act").value = "login"; $("#au-act").fire("change"); rows = %s; await renderAudit(); '
           'return [$("#view").innerHTML, $("#au-body").innerHTML]; })()') % (json.dumps(AUDIT), json.dumps(later))
     html, body = in_dom(js)
@@ -1079,10 +1080,11 @@ def test_the_zones_card_saves_what_the_text_says():
 
 def test_the_audit_shows_the_role():
     rows = [{**AUDIT[0], "role": "aendern"}, {**AUDIT[1], "role": None}]
-    html = in_dom('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); return $("#au-body").innerHTML; })()'
-                  % json.dumps(rows))
+    html = in_dom('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
+                  'return $("#au-body").innerHTML; })()' % json.dumps(rows))
     assert "<td>anna</td><td>Ändern</td>" in html and "<td>bob</td><td>–</td>" in html and '<th>Rolle</th>' in in_dom(
-        '(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); return $("#view").innerHTML; })()' % json.dumps(rows))
+        '(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
+        'return $("#view").innerHTML; })()' % json.dumps(rows))
 
 
 DEVICES = ('(async () => { api = async (m, u) => u === "/api/devices" ? [{mac: "aa:bb:cc:00:00:01", name: "Drucker", kind: "drucker", allowed: 0, '

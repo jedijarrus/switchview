@@ -415,13 +415,14 @@
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
     zone_scopes_update: "Zonen geändert" };
-  // The audit log: the 200 entries of GET /api/audit, filtered in the browser by action and by text (SVLogic.filterAudit over user,
-  // action, target and details); each entry names the role of its user then (Phase 4a, "–" before it), each action shows its detail
-  // below it (it never names a secret, Phase 2). The filter outlives a
-  // new render (auditText as typed, auditAction), like devText of the devices; an action the new entries no longer have is dropped
+  // The audit log: the newest 200 entries (the rows of GET /api/audit?limit=200: the server pages since Phase 4b Task 8, Task 10 hands
+  // it the filters), filtered in the browser by action and by text (SVLogic.filterAudit over user, action, target and details); each
+  // entry names the role of its user then (Phase 4a, "–" before it), each action shows its detail below it (it never names a secret,
+  // Phase 2). The filter outlives a new render (auditText as typed, auditAction), like devText of the devices; an action the new
+  // entries no longer have is dropped
   let auditText = "", auditAction = "";
   async function renderAudit() {
-    const v = $("#view"); const rows = await api("GET", "/api/audit").catch(() => []);
+    const v = $("#view"); const rows = (await api("GET", "/api/audit?limit=200").catch(() => ({}))).rows || [];
     const actions = [...new Set(rows.map(r => r.action))];
     if (!actions.includes(auditAction)) auditAction = "";
     const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}"${a === auditAction ? " selected" : ""}>${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>

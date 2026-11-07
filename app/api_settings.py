@@ -1,18 +1,21 @@
 """The settings API: OPNsense, RADIUS and PacketFence settings with their secrets bound to their destinations, the name refresh, the
-audit log, the zone scopes (Phase 4a, Task 5) and the four-eyes principle (Phase 4a, Task 6). Split from main.py (Phase 3, Task 11),
-the code as it was."""
+audit log (filtered and paged on the server, and as CSV: Phase 4b, Task 8), the zone scopes (Phase 4a, Task 5) and the four-eyes
+principle (Phase 4a, Task 6). Split from main.py (Phase 3, Task 11), the code as it was."""
 import ipaddress
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import approvals
 import auth
 import changes
+import csvout
+import history
 import names as names_mod
 import roles
+from api_history import ROW_ID_MAX
 from api_switches import same_destination
 from crypto import encrypt, unreadable
 from db import audit, db, load_settings, read_settings, write_settings
@@ -143,11 +146,118 @@ async def names_refresh(user=Depends(auth.require(roles.LESEN))):
     return await names_mod.refresh_names()
 
 
-@router.get("/api/audit")
-async def audit_log(user=Depends(auth.require(roles.LESEN))):
+# ── Protokoll (Phase 4b, Task 8) ──────────────────────────────────────────────
+# GET /api/audit filters and pages on the server, GET /api/audit.csv exports the same filter (app/csvout.py, as the history's CSV).
+# Both need Lesen and are not zone-limited, like every read route of Phase 4a (roles.SCOPED limits changes only).
+AUDIT_COLUMNS = ("username", "action", "target", "detail")    # what a text search looks in
+AUDIT_ORDERS = {"desc": ("DESC", "<"), "asc": ("ASC", ">")}    # order -> (the direction of the id, the cursor's comparison)
+AUDIT_CSV_HEADER = ["Zeit (UTC)", "Benutzer", "Rolle", "Aktion", "Ziel", "Details"]
+
+
+async def audit_filter(*, q: str | None = None, action: str | None = None, user: str | None = None, role: str | None = None,
+                       switch_id: int | None = None, since: str | None = None, until: str | None = None) -> tuple[str, list]:
+    """The WHERE condition of the audit (without WHERE, "1" without a filter) and its arguments; each filter given narrows the others.
+    q: a part of user, action, target or details (LIKE, the text as text: the backslash, "%" and "_" escaped; as typed, so without
+    case for A-Z only, T8-c); action exactly; user without case (idx_audit_user); role one of roles.ORDER, "none" for an entry
+    without one (a failed login, a request that expired); switch_id the entries whose target is the switch's id, host or name, as
+    the audit calls of today name a switch (T8-d; only the id for a switch that is not there, never an empty host or name); since
+    from, until before a point in time (history.to_utc: ValueError(history.BAD_TIME) for anything else, T8-b). Each part stands on
+    its own, the LIKE terms in parentheses, so the condition of a cursor can follow with AND."""
+    terms, args = [], []
+    if since is not None:
+        terms.append("ts >= ?")
+        args.append(history.to_utc(since))
+    if until is not None:
+        terms.append("ts < ?")
+        args.append(history.to_utc(until))
+    if q is not None:
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        terms.append("(" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in AUDIT_COLUMNS) + ")")
+        args += [like] * len(AUDIT_COLUMNS)
+    if action is not None:
+        terms.append("action = ?")
+        args.append(action)
+    if user is not None:
+        terms.append("username = ? COLLATE NOCASE")
+        args.append(user)
+    if role == "none":
+        terms.append("role IS NULL")
+    elif role is not None:
+        terms.append("role = ?")
+        args.append(role)
+    if switch_id is not None:
+        names = [str(switch_id)]
+        async with db() as conn:
+            async with conn.execute("SELECT host, name FROM switches WHERE id = ?", (switch_id,)) as cur:
+                row = await cur.fetchone()
+        names += [v for v in ((row["host"], row["name"]) if row else ()) if v and v not in names]
+        terms.append(f"target IN ({', '.join('?' * len(names))})")
+        args += names
+    return " AND ".join(terms) or "1", args
+
+
+def audit_select(where: str, args: list, order: str, cursor: int | None, limit: int) -> tuple[str, list]:
+    """The SELECT of the first limit entries under where in the order of the id (order "desc" newest first, "asc" oldest first),
+    after the id cursor in that direction when given, and its arguments."""
+    direction, beyond = AUDIT_ORDERS[order]
+    if cursor is not None:
+        where, args = f"{where} AND id {beyond} ?", [*args, cursor]
+    return (f"SELECT id, ts, username, action, target, detail, role FROM audit WHERE {where} ORDER BY id {direction} LIMIT ?",
+            [*args, limit])
+
+
+async def _audit_rows(where: str, args: list, order: str, cursor: int | None, limit: int) -> list[dict]:
+    sql, args = audit_select(where, args, order, cursor, limit)
     async with db() as conn:
-        async with conn.execute("SELECT ts, username, action, target, detail, role FROM audit ORDER BY id DESC LIMIT 200") as cur:
+        async with conn.execute(sql, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+ROLE_PATTERN = r"^(lesen|aendern|freigeben|admin|none)$"
+
+
+async def audit_query(q: str | None = Query(default=None, max_length=100), action: str | None = Query(default=None, max_length=40),
+                      who: str | None = Query(default=None, alias="user", max_length=100),
+                      role: str | None = Query(default=None, pattern=ROLE_PATTERN),
+                      switch_id: int | None = Query(default=None, ge=1, le=ROW_ID_MAX),
+                      since: str | None = Query(default=None, max_length=40), until: str | None = Query(default=None, max_length=40),
+                      order: str = Query(default="desc", pattern=r"^(desc|asc)$")) -> dict:
+    """The filters and the order both audit routes take, as query parameters with their bounds (a larger switch_id than SQLite
+    stores would fail in the query, like a cursor of the history, T3-h). Only collects them: the condition comes in the route, after
+    the session is checked."""
+    return {"filters": {"q": q, "action": action, "user": who, "role": role, "switch_id": switch_id, "since": since, "until": until},
+            "order": order}
+
+
+async def _audit_where(asked: dict) -> tuple[str, list]:
+    """audit_filter of the asked filters; a time that is none is a 422 with its German text (history.BAD_TIME)."""
+    try:
+        return await audit_filter(**asked["filters"])
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+@router.get("/api/audit")
+async def audit_log(asked: dict = Depends(audit_query), cursor: int | None = Query(default=None, ge=1, le=ROW_ID_MAX),
+                    limit: int = Query(default=100, ge=1, le=500), user=Depends(auth.require(roles.LESEN))):
+    """One page of the audit under the filters (audit_filter), newest first or with order=asc oldest first, after the id cursor:
+    {"rows": [{"id", "ts", "username", "action", "target", "detail", "role"}], "next": the id of the last row when more follow, else
+    null}. T8-a: an object, no longer a list (the cursor belongs in the answer)."""
+    where, args = await _audit_where(asked)
+    rows = await _audit_rows(where, args, asked["order"], cursor, limit + 1)
+    return {"rows": rows[:limit], "next": rows[limit - 1]["id"] if len(rows) > limit else None}
+
+
+@router.get("/api/audit.csv")
+async def audit_csv(asked: dict = Depends(audit_query), user=Depends(auth.require(roles.LESEN))):
+    """The entries of the same filters and order as a CSV download (switchview-protokoll-<date>.csv), at most history.EXPORT_MAX;
+    the time in UTC, the role by its German name (roles.LABELS, empty without one), the action by its key (its German name is the
+    view's, AUDIT_LABELS)."""
+    where, args = await _audit_where(asked)
+    rows = await _audit_rows(where, args, asked["order"], None, history.EXPORT_MAX)
+    return csvout.response(csvout.render(AUDIT_CSV_HEADER, ([r["ts"], r["username"], roles.LABELS.get(r["role"], r["role"] or ""),
+                                                             r["action"], r["target"], r["detail"]] for r in rows)),
+                           "switchview-protokoll")
 
 
 # ── Zonen ─────────────────────────────────────────────────────────────────────

@@ -103,6 +103,7 @@ MATRIX_4B: dict = {
     ("GET", "/api/watch"): "lesen",
     ("POST", "/api/watch"): "aendern",
     ("DELETE", "/api/watch/{mac}"): "aendern",
+    ("GET", "/api/audit.csv"): "lesen",
 }
 MATRIX = MATRIX_4A | MATRIX_4B
 
@@ -201,7 +202,7 @@ def test_logins_are_audited_with_their_role(login_api):
     login_api.post("/api/auth/local", json=BAD)
     login_api.post("/api/auth/local", json=GOOD)
     assert dbfix.query("SELECT action, role FROM audit ORDER BY id") == [("login_failed", None), ("login", "admin")]
-    assert [r["role"] for r in login_api.get("/api/audit").json()] == ["admin", None]
+    assert [r["role"] for r in login_api.get("/api/audit").json()["rows"]] == ["admin", None]
 
 
 def test_an_sso_login_is_audited_with_the_role_of_its_session(login_api, entra, monkeypatch):
