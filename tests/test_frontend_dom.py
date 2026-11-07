@@ -497,7 +497,7 @@ def test_unreadable_secrets_are_noted_outside_any_label():
 
 
 # Task 10 (browser check): the note of an unreadable secret asks an Admin to type it again; below Admin, where every field is locked,
-# it names the role that can (the T8-e rule: no sentence asks for what the reader cannot do)
+# it names the role that can (the T8-o rule: no sentence asks for what the reader cannot do)
 @pytest.mark.parametrize("role, tail", [("admin", "bitte neu eingeben"), ("freigeben", "neu eingeben braucht die Rolle „Admin“")])
 def test_the_unreadable_note_asks_only_an_admin_to_type_it_again(role, tail):
     prefix = SETTINGS.replace('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; ', role_me(role))
@@ -1206,7 +1206,7 @@ def test_a_second_401_keeps_the_reason_the_login_page_shows(answers, between, wa
 
 # Review round 1: a stored zone list the field cannot hold as it is (SVLogic.lossyScopes) is named above the field, which names the
 # note in aria-describedby; a list it holds has no note. Task 10: only an Admin, who has „Zonen speichern“, reads that saving would
-# change them (the T8-e rule: no sentence points at a button the reader lacks)
+# change them (the T8-o rule: no sentence points at a button the reader lacks)
 LOSSY = ("Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: „A=B“, „Z.H“. Eine Zone mit Komma oder mit dem Namen "
          "„Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben")
 
