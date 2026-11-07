@@ -261,10 +261,12 @@ async def drop_user_sessions(username: str) -> int:
 async def current_user(request: Request) -> dict:
     """The signed-in user of request: username, name, method, role (roles.role_of from the roles the session stored at its login,
     against the mapping of now: a changed mapping counts from the restart that reads it, without a new login), subject (the stable
-    identity; a session of before the update has none and gets <method>:<username>) and zones (None: no zone scope). 401 without a
-    session, for an expired one, and for one idle longer than settings.idle_minutes (then deleted, IDLE; a session that never
-    recorded a request, from before the update, is not idle); 403 for a write without the CSRF header. Every request that passes
-    counts as activity: last_seen is written when it is unset or at least TOUCH_S old."""
+    identity; a session of before the update has none and gets <method>:<username>) and zones (roles.zones_of: for Ändern and
+    Freigeben from the stored roles against the zone_scopes of now, read on the same connection, so a new entry counts at once;
+    None, no zone scope and no read, for every other role). 401 without a session, for an expired one, and for one idle longer than
+    settings.idle_minutes (then deleted, IDLE; a session that never recorded a request, from before the update, is not idle); 403
+    for a write without the CSRF header. Every request that passes counts as activity: last_seen is written when it is unset or at
+    least TOUCH_S old."""
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "Nicht angemeldet")
@@ -285,11 +287,14 @@ async def current_user(request: Request) -> dict:
         if not last_seen or last_seen <= (now - timedelta(seconds=TOUCH_S)).isoformat():
             await conn.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now.isoformat(), hashed))
             await conn.commit()
-    username, method = row["username"], row["method"]
-    stored = json.loads(row["claims"]) if row["claims"] else {}
-    return {"username": username, "name": row["display_name"] or username, "method": method,
-            "role": roles.role_of(method, stored.get("roles") or [], settings), "subject": row["subject"] or f"{method}:{username}",
-            "zones": None}
+        username, method = row["username"], row["method"]
+        claim = (json.loads(row["claims"]) if row["claims"] else {}).get("roles") or []
+        role, scopes = roles.role_of(method, claim, settings), []
+        if role in roles.SCOPED:
+            async with conn.execute("SELECT principal, zone FROM zone_scopes") as cur:
+                scopes = [(r["principal"], r["zone"]) for r in await cur.fetchall()]
+    return {"username": username, "name": row["display_name"] or username, "method": method, "role": role,
+            "subject": row["subject"] or f"{method}:{username}", "zones": roles.zones_of(role, claim, scopes)}
 
 
 @functools.cache

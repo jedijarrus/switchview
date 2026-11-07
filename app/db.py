@@ -153,6 +153,10 @@ CREATE TABLE IF NOT EXISTS audit (
     target TEXT,
     detail TEXT
 );
+-- Phase 4a, Task 5: the zone scopes, kept by an Admin (PUT /api/zone-scopes). A user with Ändern or Freigeben whose Entra app roles
+-- (sessions.claims) contain a principal here changes only switches whose zone is one of that principal's zones (roles.zones_of);
+-- zone '' is the switches without a zone. Read on every request of such a user (auth.current_user). Empty: no one is limited.
+CREATE TABLE IF NOT EXISTS zone_scopes (principal TEXT NOT NULL, zone TEXT NOT NULL, PRIMARY KEY (principal, zone));
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

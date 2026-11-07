@@ -1,7 +1,8 @@
-"""The settings API: OPNsense, RADIUS and PacketFence settings with their secrets bound to their destinations, the name refresh and the
-audit log. Split from main.py (Phase 3, Task 11), the code as it was."""
+"""The settings API: OPNsense, RADIUS and PacketFence settings with their secrets bound to their destinations, the name refresh, the
+audit log and the zone scopes (Phase 4a, Task 5). Split from main.py (Phase 3, Task 11), the code as it was."""
 import ipaddress
 import re
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -123,3 +124,54 @@ async def audit_log(user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT ts, username, action, target, detail, role FROM audit ORDER BY id DESC LIMIT 200") as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Zonen ─────────────────────────────────────────────────────────────────────
+class ZoneScope(BaseModel):
+    """One entry of PUT /api/zone-scopes: an Entra app role value and the zones it limits to; a zone at most 40 characters, like
+    SwitchIn.zone, "" for the switches without a zone."""
+    principal: str = Field(min_length=1, max_length=200)
+    zones: list[Annotated[str, Field(max_length=40)]] = Field(min_length=1, max_length=100)
+
+
+class ZoneScopesIn(BaseModel):
+    entries: list[ZoneScope] = Field(default_factory=list, max_length=200)
+
+
+async def _zone_scopes(conn) -> list[dict]:
+    """The zone scopes as the API serves them: one entry per principal, sorted by it, its zones sorted."""
+    grouped: dict[str, list[str]] = {}
+    async with conn.execute("SELECT principal, zone FROM zone_scopes") as cur:
+        for r in await cur.fetchall():
+            grouped.setdefault(r["principal"], []).append(r["zone"])
+    return [{"principal": p, "zones": sorted(grouped[p])} for p in sorted(grouped)]
+
+
+@router.get("/api/zone-scopes")
+async def get_zone_scopes(user=Depends(auth.require(roles.LESEN))):
+    async with db() as conn:
+        return {"entries": await _zone_scopes(conn)}
+
+
+@router.put("/api/zone-scopes")
+async def put_zone_scopes(body: ZoneScopesIn, user=Depends(auth.require(roles.ADMIN))):
+    """Replaces the whole list in one write transaction: principals and zones trimmed, a principal blank once trimmed refused (422
+    „App-Rolle fehlt“, nothing stored), entries of the same principal merged. It counts from the next request of each user
+    (auth.current_user reads it per request). The audit names every stored entry, cut to 500 characters; the answer is GET's."""
+    rows: set[tuple[str, str]] = set()
+    for entry in body.entries:
+        principal = entry.principal.strip()
+        if not principal:
+            raise HTTPException(422, "App-Rolle fehlt")
+        rows |= {(principal, zone.strip()) for zone in entry.zones}
+    async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute("DELETE FROM zone_scopes")
+        await conn.executemany("INSERT INTO zone_scopes(principal, zone) VALUES (?, ?)", sorted(rows))
+        entries = await _zone_scopes(conn)    # inside the transaction: exactly what this PUT stored
+        await conn.commit()
+    detail = f"{len(entries)} Einträge"
+    if entries:
+        detail += ": " + "; ".join(f"{e['principal']} → {', '.join(roles.zone_label(z) for z in e['zones'])}" for e in entries)
+    await audit(user["username"], "zone_scopes_update", "", detail[:500], role=user["role"])
+    return {"entries": entries}

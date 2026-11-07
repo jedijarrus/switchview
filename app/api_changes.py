@@ -426,10 +426,13 @@ async def _enabled_row(sid: int):
 
 
 async def _mode_rights(user: dict, row, body: PlanIn) -> None:
-    """The rights of the mode of a /plan or /apply request beyond the route's minimum (Ändern), right after _enabled_row: preparing
+    """The rights of a /plan or /apply request beyond the route's minimum (Ändern), right after _enabled_row. First the zone: a user
+    with a zone scope changes only switches of their zones (roles.zone_allows, Task 5), in every mode. Then the mode: preparing
     RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben, and so is
     taking back a change made in it, which goes over the same uplinks. Saving and every other revert stay Ändern. A revert of a change
     that is not at this switch is left to _make_plan (404 as before)."""
+    if not roles.zone_allows(user, row["zone"]):
+        raise HTTPException(403, roles.zone_denial(row["zone"], user["zones"]))
     role = user["role"]
     if body.mode == "prepare" and not roles.at_least(role, roles.ADMIN):
         raise HTTPException(403, roles.denial(roles.ADMIN, role, "„RADIUS vorbereiten“"))

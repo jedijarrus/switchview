@@ -74,6 +74,8 @@ MATRIX = {
     ("PUT", "/api/settings"): "admin",
     ("POST", "/api/names/refresh"): "lesen",
     ("GET", "/api/audit"): "lesen",
+    ("GET", "/api/zone-scopes"): "lesen",
+    ("PUT", "/api/zone-scopes"): "admin",
 }
 
 

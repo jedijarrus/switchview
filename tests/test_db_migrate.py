@@ -67,6 +67,12 @@ PHASE4A_COLUMNS = {
     ("changes", "role"): (("TEXT", 0, None), None),
     ("changes", "approved_by"): (("TEXT", 0, None), None),
 }
+# The tables Phase 4a adds (db.SCHEMA, CREATE TABLE IF NOT EXISTS), table -> (name, declared type, NOT NULL flag, default, position in
+# the primary key) of every column, as PRAGMA table_info reports them. A database of before has none of them; init_db creates each
+# one empty. Task 5: zone_scopes, the Admin-kept list "app role -> zone".
+PHASE4A_TABLES = {
+    "zone_scopes": [("principal", "TEXT", 1, None, 1), ("zone", "TEXT", 1, None, 2)],
+}
 
 
 async def _table_info(conn, table: str) -> list[tuple]:
@@ -245,6 +251,12 @@ async def _first_row_plain(conn, table: str) -> dict:
         return dict(zip(names, await cur.fetchone()))
 
 
+async def _table_names(conn) -> set[str]:
+    """The names of every table of the database on conn."""
+    async with conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'") as cur:
+        return {r[0] for r in await cur.fetchall()}
+
+
 async def _added_state(conn, columns: dict) -> dict:
     """(definition, value in the one row) of each (table, column) of columns; a missing column is (None, None)."""
     out = {}
@@ -295,12 +307,15 @@ async def test_migration_adds_the_phase3_columns(data_dir):
 
 
 async def test_migration_adds_the_phase4a_columns(data_dir):
-    """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA, every column added before Phase 4a, one session,
-    one audit entry and one change of before) gets sessions.claims, sessions.subject, sessions.last_seen, audit.role, changes.role and
-    changes.approved_by from init_db (the rows: NULL in each), the rows keep what they held; a second init_db changes nothing."""
+    """Review Focus 3: a database as the release before Phase 4a left it (db.SCHEMA without the Phase 4a tables, every column added
+    before Phase 4a, one session, one audit entry and one change of before) gets sessions.claims, sessions.subject, sessions.last_seen,
+    audit.role, changes.role and changes.approved_by from init_db (the rows: NULL in each) and the tables of PHASE4A_TABLES (empty),
+    the rows keep what they held; a second init_db changes nothing."""
     path = data_dir / "switchview.db"
     async with aiosqlite.connect(path) as conn:
         await conn.executescript(db.SCHEMA)
+        for table in PHASE4A_TABLES:
+            await conn.execute(f"DROP TABLE {table}")
         for table, column, definition in db.ADDED_COLUMNS:
             if (table, column) not in PHASE4A_COLUMNS:
                 await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -313,12 +328,18 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
                            "(1, 'anna@example.org', 'ports', 'Port 2: VLAN 20', 'ok', 'ssh', 1)")
         await conn.commit()
         assert set((await _added_state(conn, PHASE4A_COLUMNS)).values()) == {(None, None)}    # the premise: none of them is there yet
+        assert not await _table_names(conn) & set(PHASE4A_TABLES)
         before = {t: await _first_row_plain(conn, t) for t in sorted({table for table, _ in PHASE4A_COLUMNS})}
 
     await db.init_db()
 
     async with aiosqlite.connect(path) as conn:
         assert await _added_state(conn, PHASE4A_COLUMNS) == PHASE4A_COLUMNS
+        for table, columns in PHASE4A_TABLES.items():
+            async with conn.execute(f"PRAGMA table_info({table})") as cur:
+                assert [(r[1], r[2], r[3], r[4], r[5]) for r in await cur.fetchall()] == columns, table
+            async with conn.execute(f"SELECT count(*) FROM {table}") as cur:
+                assert (await cur.fetchone())[0] == 0, table
         for table, row in before.items():
             assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row
         version, rows = await _schema_version(conn), {t: await _first_row_plain(conn, t) for t in before}
