@@ -144,12 +144,16 @@ def test_the_roles_note_has_a_row_per_decision_of_the_plan():
 
 def test_the_roles_note_repeats_the_permission_matrix():
     """Phase 4a wrap-up: the note's table "Rechte je Route" has a row for every entry of MATRIX, the matrix the walk over the app's
-    routes holds (tests/test_permissions.py), with the German name of its minimum role - the note cannot go stale silently."""
+    routes holds (tests/test_permissions.py), with the German name of its minimum role, and no other row (none for a removed or
+    renamed route, none twice) - the note cannot go stale silently."""
     from test_permissions import MATRIX
     note = (ROOT / "docs" / "rollen-phase4a.md").read_text(encoding="utf-8")
     label = {None: "öffentlich", **roles.LABELS}
     for (method, path), role in MATRIX.items():
         assert f"| {method} | `{path}` | {label[role]} |" in note, (method, path)
+    section = note.split("\n## Rechte je Route\n", 1)[1].split("\n## ", 1)[0]
+    rows = re.findall(r"^\| ([A-Z]+) \| `([^`]+)` \|", section, re.M)
+    assert len(rows) == len(set(rows)) and set(rows) == set(MATRIX), set(rows) ^ set(MATRIX)
 
 
 def test_the_readme_describes_roles_and_approvals():
