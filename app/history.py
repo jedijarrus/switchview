@@ -8,16 +8,19 @@ poll that read it (switches.last_poll), and only the MAC rows of that poll count
 are no new sighting.
 
 The rule of the place: a place is (MAC, switch, port, VLAN). A new row comes only when the latest row of that place is missing, has
-been overtaken by a row of the same MAC begun later at another place (first_seen there after last_seen here), or carried another IP
-(both not empty); otherwise its last_seen moves on and an empty IP or name is filled in. So a device at two places at once (two
-VLANs, an unconfirmed uplink) grows nothing, a move there and back gives three rows, and a quiet device keeps its row. The ports are
-those of the list of unknown devices (topology.device_port: no Trk port, no trunk or LAG member, no confirmed uplink); a row at a
-possible uplink (topology.suspect_port) is marked suspect, and the base MACs of the managed switches are never recorded.
+been overtaken, or carried another IP (both not empty); otherwise its last_seen moves on and an empty IP or name is filled in. A row
+is overtaken when the device left it - its switch has a recorded poll after the row's last sighting (a later last_seen of another
+row there) - and a place of the same MAC that is not seen now began after that last sighting (first_seen there after last_seen
+here). The times are each switch's own poll times, which differ within a round: a place seen now never overtakes, and a row seen at
+its switch's last recorded poll is never overtaken - the device is at both places. So a device at two places at once (two VLANs, an
+unconfirmed uplink on another switch, whatever the order of the polls) grows nothing, a move there and back gives three rows, and a
+quiet device keeps its row. The ports are those of the list of unknown devices (topology.device_port: no Trk port, no trunk or LAG
+member, no confirmed uplink); a row at a possible uplink (topology.suspect_port) is marked suspect, and the base MACs of the managed
+switches are never recorded.
 
 purge deletes what is older than HISTORY_DAYS from every table of RETAINED, nightly at 04:00 (jobs._schedule).
 """
 import logging
-from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
@@ -84,10 +87,13 @@ async def _record(conn, wanted: list[int], ports: list[tuple[int, str, int]], ba
         seen = await cur.fetchall()
     if not seen:
         return []
-    # The latest row of each place of the MACs seen (max(id): SQLite takes the other columns from that row), and per MAC the two
-    # latest starts (first_seen, id) among those rows: whether another place began after a row's last sighting is then one look
+    # The latest row of each place of the MACs seen (max(id): SQLite takes the other columns from that row), and per MAC the latest
+    # start (first_seen) among the rows of its places not seen now: whether the device was elsewhere after a row's last sighting is
+    # then one look. A place seen now overtakes nothing: the device is at both now (an unconfirmed uplink on another switch, whose
+    # poll time differs from this one's within a round)
     latest: dict[tuple, tuple] = {}    # place -> (id, ip, name, last_seen)
-    starts: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    left: dict[str, str] = {}    # MAC -> the latest first_seen of its places not seen now
+    observed = {(o["mac"], o["switch_id"], o["port"], o["vlan"]) for o in seen}
     macs = sorted({o["mac"] for o in seen})
     for i in range(0, len(macs), IN_CHUNK):
         part = macs[i:i + IN_CHUNK]
@@ -95,13 +101,14 @@ async def _record(conn, wanted: list[int], ports: list[tuple[int, str, int]], ba
                                 f"WHERE mac IN ({', '.join('?' * len(part))}) GROUP BY mac, switch_id, port, vlan", part) as cur:
             for rid, mac, sid, port, vlan, ip, name, first_seen, last_seen in await cur.fetchall():
                 latest[(mac, sid, port, vlan)] = (rid, ip, name, last_seen)
-                starts[mac].append((first_seen, rid))
-    for both in starts.values():
-        both.sort(reverse=True)
-        del both[2:]
-    async with conn.execute(f"SELECT s.id FROM switches s WHERE s.id IN ({', '.join('?' * len(wanted))}) "
-                            "AND EXISTS (SELECT 1 FROM sightings g WHERE g.switch_id = s.id)", wanted) as cur:
-        recorded = {r[0] for r in await cur.fetchall()}    # the switches with a sighting before this call
+                if (mac, sid, port, vlan) not in observed and first_seen > left.get(mac, ""):
+                    left[mac] = first_seen
+    had = {place[0] for place in latest}    # the MACs with a row before this call
+    # Per switch the time of its last recorded poll (the latest last_seen of its rows: a poll records each place it sees with its own
+    # time). A row last seen then was there at its switch's last poll, so the device never left it, whatever began elsewhere since
+    async with conn.execute(f"SELECT switch_id, max(last_seen) FROM sightings WHERE switch_id IN ({', '.join('?' * len(wanted))}) "
+                            "GROUP BY switch_id", wanted) as cur:
+        recorded = dict(await cur.fetchall())    # switch id -> that time; its keys: the switches with a sighting before this call
     absent_before: dict[str, str] = {}    # poll time -> a last_seen before this is an absence (back)
 
     def absence(t: str) -> str:
@@ -115,14 +122,15 @@ async def _record(conn, wanted: list[int], ports: list[tuple[int, str, int]], ba
         r = latest.get(place)
         if r is not None:
             rid, rip, rname, rlast = r
-            other = next((first for first, oid in starts[mac] if oid != rid), None)    # the latest start at another place
-            if not (other is not None and other > rlast) and not (rip and ip and rip != ip):
+            # overtaken: the device left this place (its switch was recorded since without it) and another place began after
+            overtaken = rlast < recorded[sid] and left.get(mac, "") > rlast
+            if not overtaken and not (rip and ip and rip != ip):
                 updates.append((t, ip or rip, name or rname, suspect, switch, rid))
                 if rlast < absence(t):
                     news.append(_news(rid, place, switch, ip or rip, name or rname, known, suspect, "back", sid not in recorded))
                 continue
         inserts.append((mac, sid, switch, port, vlan, ip, name, suspect, t, t))
-        item = _news(None, place, switch, ip, name, known, suspect, "moved" if mac in starts else "first", sid not in recorded)
+        item = _news(None, place, switch, ip, name, known, suspect, "moved" if mac in had else "first", sid not in recorded)
         news.append(item)
         added.append((place, item))
     await conn.executemany("UPDATE sightings SET last_seen = ?, ip = ?, name = ?, suspect = ?, switch_name = ? WHERE id = ?", updates)
@@ -169,5 +177,5 @@ async def purge(days: int | None = None) -> dict[str, int]:
             if total:
                 out[table] = total
     if out:
-        log.info("Verlauf älter als %d Tage gelöscht: %s", days, ", ".join(f"{t} {n}" for t, n in out.items()))
+        log.info("Verlauf älter als %d %s gelöscht: %s", days, "Tag" if days == 1 else "Tage", ", ".join(f"{t} {n}" for t, n in out.items()))
     return out

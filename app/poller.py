@@ -808,4 +808,4 @@ async def poll_all():
     try:
         await history.record(good)
     except Exception:  # noqa: BLE001
-        log.exception("Verlauf der Abfragerunde (%d Switches)", len(good))
+        log.exception("Verlauf der Abfragerunde (%d %s)", len(good), "Switch" if len(good) == 1 else "Switches")
