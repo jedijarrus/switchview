@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import pytest
 
 import apifix
+import approvals
 import auth
 import crypto
 import db
@@ -270,6 +271,14 @@ def test_the_scheduler_prunes_sessions_hourly(api, monkeypatch):
     monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
     asyncio.run(main._schedule())
     assert jobs["sessions"][0] is auth.prune_sessions and jobs["sessions"][1] == "interval" and jobs["sessions"][2]["minutes"] == 60
+
+
+def test_the_scheduler_expires_requests(api, monkeypatch):
+    """Phase 4a, Task 6: open four-eyes requests past their time are marked expired every 10 minutes (and before every read of one)."""
+    jobs = {}
+    monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
+    asyncio.run(main._schedule())
+    assert jobs["approvals"][0] is approvals.expire_due and jobs["approvals"][1] == "interval" and jobs["approvals"][2]["minutes"] == 10
 
 
 async def test_the_start_prunes_sessions(database, monkeypatch):

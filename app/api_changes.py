@@ -1,5 +1,6 @@
 """The changes API: plan a port change, a RADIUS preparation, a revert or a save (choosing SSH or SNMP), apply it as a background task
-of changes.run_change, and list the changes. Split from main.py (Phase 3, Task 11), the code as it was."""
+of changes.run_change, and list the changes. Split from main.py (Phase 3, Task 11), the code as it was. With the four-eyes principle
+on (Phase 4a, Task 6) an expert-mode change is not applied here but requested (api_approvals), from the same checked plan."""
 import asyncio
 import json
 import re
@@ -7,6 +8,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import approvals
 import auth
 import cfgparse
 import changes
@@ -37,6 +39,8 @@ STALE = "Die Vorschau ist veraltet, bitte neu laden"
 DISABLED = "Switch ist deaktiviert – Änderungen erst nach dem Aktivieren (Zugang bearbeiten)"
 SSH_NEEDED = "Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearbeiten)"
 NO_SSH = "für diesen Switch ist kein SSH-Zugang hinterlegt (Zugang bearbeiten)"
+# /apply of a change that needs a four-eyes approval (approvals.needs_approval): it is requested instead (POST /api/approvals)
+APPROVAL_NEEDED = "Diese Änderung braucht eine Freigabe (Vier-Augen-Prinzip): bitte „Freigabe anfordern“"
 _tasks: set = set()
 
 
@@ -425,18 +429,20 @@ async def _enabled_row(sid: int):
     return row
 
 
-async def _mode_rights(user: dict, row, body: PlanIn) -> None:
-    """The rights of a /plan or /apply request beyond the route's minimum (Ändern), right after _enabled_row. First the zone: a user
-    with a zone scope changes only switches of their zones (roles.zone_allows, Task 5), in every mode. Then the mode: preparing
-    RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben, and so is
-    taking back a change made in it, which goes over the same uplinks. Saving and every other revert stay Ändern. A revert of a change
-    that is not at this switch is left to _make_plan (404 as before)."""
+async def _mode_rights(user: dict, row, body: PlanIn, four_eyes: bool) -> None:
+    """The rights of a /plan, /apply or approval request beyond the route's minimum (Ändern), right after _enabled_row. First the
+    zone: a user with a zone scope changes only switches of their zones (roles.zone_allows, Task 5), in every mode. Then the mode:
+    preparing RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben
+    without the four-eyes principle (four_eyes, approvals.policy) and Ändern with it, since then it only gets as far as a request
+    that a second person with Freigeben approves (/apply refuses it, APPROVAL_NEEDED); taking back a change made in expert mode,
+    which goes over the same uplinks, is Freigeben either way. Saving and every other revert stay Ändern. A revert of a change that is
+    not at this switch is left to _make_plan (404 as before)."""
     if not roles.zone_allows(user, row["zone"]):
         raise HTTPException(403, roles.zone_denial(row["zone"], user["zones"]))
     role = user["role"]
     if body.mode == "prepare" and not roles.at_least(role, roles.ADMIN):
         raise HTTPException(403, roles.denial(roles.ADMIN, role, "„RADIUS vorbereiten“"))
-    if body.mode == "ports" and body.expert and not roles.at_least(role, roles.FREIGEBEN):
+    if body.mode == "ports" and body.expert and not four_eyes and not roles.at_least(role, roles.FREIGEBEN):
         raise HTTPException(403, roles.denial(roles.FREIGEBEN, role, "Der Expertenmodus"))
     if body.mode == "revert" and not roles.at_least(role, roles.FREIGEBEN):
         async with db() as conn:
@@ -446,37 +452,64 @@ async def _mode_rights(user: dict, row, body: PlanIn) -> None:
             raise HTTPException(403, roles.denial(roles.FREIGEBEN, role, "Eine Änderung im Expertenmodus zurückzunehmen"))
 
 
-@router.post("/api/switches/{sid}/plan")
-async def plan_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
-    row = await _enabled_row(sid)
-    await _mode_rights(user, row, body)
-    # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
-    plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
-    # What the preview says about the SNMP way, as the server sees it at plan time (Phase 5): whether the driver saves an SNMP change
-    # by itself (R26), and how a SET would go out spoofable ("v2c" / "v3", None when authenticated or not over SNMP)
+class PreviewOutdated(HTTPException):
+    """409: the plan of now is not the one of the preview (a port is blocked now, or the commands differ from the token's)."""
+
+    def __init__(self, detail: str):
+        super().__init__(409, detail)
+
+
+def preview_answer(row, plan: dict, kind: str, summary: str) -> dict:
+    """The preview of plan as /plan answers it (and a four-eyes request stores it, POST /api/approvals): what goes out, the warnings
+    and blocked ports, before and desired, the token of the commands, and what the preview says about the SNMP way, as the server sees
+    it at plan time (Phase 5): whether the driver saves an SNMP change by itself (R26), and how a SET would go out spoofable ("v2c" /
+    "v3", None when authenticated or not over SNMP)."""
     return {"kind": kind, "summary": summary, "mechanism": plan["mechanism"], "commands": plan["shown"], "warnings": plan.get("warnings", []),
             "blocked": plan["blocked"], "before": plan.get("before", {}), "desired": plan.get("desired", {}),
             "token": changes.cmd_token(plan["shown"]), "autosave": drivers.can(drivers.driver_for(row), "snmp_autosave"),
             "insecure_write": write_insecurity(row) if plan["mechanism"] == "snmp" else None}
 
 
+async def checked_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
+    """_make_plan of body, held against the preview body.token stands for: a blocked port is PreviewOutdated „Nicht ausführbar: …“,
+    other commands than the preview's PreviewOutdated(STALE), nothing to change (unless a save) 422. The checks of /apply, and of a
+    four-eyes request (api_approvals) before it stores its preview."""
+    plan, req, kind, summary = await _make_plan(row, body)
+    if plan["blocked"]:
+        raise PreviewOutdated("Nicht ausführbar: " + "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"]))
+    if body.token != changes.cmd_token(plan["shown"]):
+        raise PreviewOutdated(STALE)
+    if not plan["shown"] and kind != "save":
+        raise HTTPException(422, "Es gibt nichts zu ändern")
+    return plan, req, kind, summary
+
+
+@router.post("/api/switches/{sid}/plan")
+async def plan_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
+    """The preview, and whether the change needs a four-eyes approval (approval: then it is requested, not applied)."""
+    row = await _enabled_row(sid)
+    four_eyes = (await approvals.policy())["four_eyes"]
+    await _mode_rights(user, row, body, four_eyes)
+    # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
+    plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
+    return preview_answer(row, plan, kind, summary) | {"approval": approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes)}
+
+
 @router.post("/api/switches/{sid}/apply")
 async def apply_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
-    """The early check for a queued or running change spares the read and the plan; the binding one is changes.create_change's, in one
-    transaction with the INSERT (two requests can both pass this one while they plan): either way 409 changes.BUSY."""
+    """A change that needs a four-eyes approval is refused first (409 APPROVAL_NEEDED), whoever sends it. The early check for a queued
+    or running change spares the read and the plan; the binding one is changes.create_change's, in one transaction with the INSERT
+    (two requests can both pass this one while they plan): either way 409 changes.BUSY."""
     row = await _enabled_row(sid)
-    await _mode_rights(user, row, body)
+    four_eyes = (await approvals.policy())["four_eyes"]
+    await _mode_rights(user, row, body, four_eyes)
+    if approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes):
+        raise HTTPException(409, APPROVAL_NEEDED)
     async with db() as conn:
         async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND status IN ('queued', 'running')", (sid,)) as cur:
             if await cur.fetchone():
                 raise HTTPException(409, changes.BUSY)
-    plan, req, kind, summary = await _make_plan(row, body)
-    if plan["blocked"]:
-        raise HTTPException(409, "Nicht ausführbar: " + "; ".join(f"{b['port']}: {b['reason']}" for b in plan["blocked"]))
-    if body.token != changes.cmd_token(plan["shown"]):
-        raise HTTPException(409, "Die Vorschau ist veraltet, bitte neu laden")
-    if not plan["shown"] and kind != "save":
-        raise HTTPException(422, "Es gibt nichts zu ändern")
+    plan, req, kind, summary = await checked_plan(row, body)
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     try:
         cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,

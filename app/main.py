@@ -13,10 +13,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+import api_approvals
 import api_changes
 import api_devices
 import api_settings
 import api_switches
+import approvals
 import auth
 import bodylimit
 import changes
@@ -275,9 +277,10 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
 
 @app.get("/api/auth/me")
 async def me(user=Depends(auth.require(roles.LESEN))):
-    """The signed-in user for the page: name, role, zones and the idle limit; not the subject (it is for the server's comparisons)."""
+    """The signed-in user for the page: name, role, zones, the idle limit and whether the four-eyes principle is on (approvals.policy);
+    not the subject (it is for the server's comparisons)."""
     return {"username": user["username"], "name": user["name"], "method": user["method"], "role": user["role"], "zones": user["zones"],
-            "idle_minutes": settings.idle_minutes}
+            "idle_minutes": settings.idle_minutes, "four_eyes": (await approvals.policy())["four_eyes"]}
 
 
 @app.post("/api/auth/logout")
@@ -355,3 +358,4 @@ app.include_router(api_settings.router)
 app.include_router(api_changes.router)
 app.include_router(api_devices.router)
 app.include_router(topology.router)
+app.include_router(api_approvals.router)    # Phase 4a, Task 6

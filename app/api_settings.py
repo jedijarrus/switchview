@@ -1,5 +1,6 @@
 """The settings API: OPNsense, RADIUS and PacketFence settings with their secrets bound to their destinations, the name refresh, the
-audit log and the zone scopes (Phase 4a, Task 5). Split from main.py (Phase 3, Task 11), the code as it was."""
+audit log, the zone scopes (Phase 4a, Task 5) and the four-eyes principle (Phase 4a, Task 6). Split from main.py (Phase 3, Task 11),
+the code as it was."""
 import ipaddress
 import re
 from typing import Annotated
@@ -7,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import approvals
 import auth
 import changes
 import names as names_mod
@@ -47,9 +49,11 @@ SETTINGS_SECRETS = ("opnsense_key", "opnsense_secret", "pf_pass", "radius_key")
 @router.get("/api/settings")
 async def get_settings(user=Depends(auth.require(roles.LESEN))):
     """The settings without a secret: of each secret only *_set, and in "unreadable" those stored that do not decrypt (SECRET_KEY
-    changed?), so the view asks for them anew. One SELECT (db.load_settings)."""
+    changed?), so the view asks for them anew; the four-eyes principle and the hours of a request (approvals.policy_of). One SELECT
+    (db.load_settings)."""
     s = await load_settings(["poll_minutes", "opnsense_url", "opnsense_verify_tls", "radius_server", "pf_url", "pf_user", "pf_verify_tls",
-                             *SETTINGS_SECRETS])
+                             *SETTINGS_SECRETS, *approvals.SETTINGS_KEYS])
+    policy = approvals.policy_of(s)
     return {"poll_minutes": int(s["poll_minutes"] or 15),
             "opnsense_url": s["opnsense_url"] or "",
             "opnsense_key_set": bool(s["opnsense_key"]),
@@ -61,7 +65,9 @@ async def get_settings(user=Depends(auth.require(roles.LESEN))):
             "pf_user": s["pf_user"] or "",
             "pf_pass_set": bool(s["pf_pass"]),
             "pf_verify_tls": (s["pf_verify_tls"] or "1") == "1",
-            "unreadable": sorted(k for k in SETTINGS_SECRETS if unreadable(s[k]))}
+            "unreadable": sorted(k for k in SETTINGS_SECRETS if unreadable(s[k])),
+            "four_eyes": policy["four_eyes"],
+            "approval_hours": policy["hours"]}
 
 
 @router.put("/api/settings")
@@ -112,6 +118,24 @@ async def put_settings(body: SettingsIn, user=Depends(auth.require(roles.ADMIN))
     await audit(user["username"], "settings_update", "", ", ".join(changed + ([f"gelöscht: {', '.join(cleared)}"] if cleared else [])),
                 role=user["role"])
     return {"ok": True, "cleared": cleared}
+
+
+class ApprovalSettingsIn(BaseModel):
+    four_eyes: bool = Field(strict=True)
+    hours: int = Field(default=approvals.DEFAULT_HOURS, ge=1, le=168)
+
+
+@router.put("/api/settings/approvals")
+async def put_approval_settings(body: ApprovalSettingsIn, user=Depends(auth.require(roles.ADMIN))):
+    """The four-eyes principle on or off and the hours a new request stays open (1-168), apart from PUT /api/settings: that one sets
+    every field it is not sent to its default, so an older client would switch the principle off in silence. Switching it off leaves
+    the open requests as they are (they can still be decided, withdrawn, or they expire), and a request keeps the expiry it got."""
+    async with db() as conn:
+        await write_settings(conn, {"four_eyes": "1" if body.four_eyes else "0", "approval_hours": str(body.hours)})
+        await conn.commit()
+    await audit(user["username"], "approval_settings", "", f"Vier-Augen-Prinzip: {'an' if body.four_eyes else 'aus'}, Ablauf: {body.hours} h",
+                role=user["role"])
+    return {"ok": True}
 
 
 @router.post("/api/names/refresh")

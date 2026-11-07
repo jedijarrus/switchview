@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS audit (
 -- (sessions.claims) contain a principal here changes only switches whose zone is one of that principal's zones (roles.zones_of);
 -- zone '' is the switches without a zone. Read on every request of such a user (auth.current_user). Empty: no one is limited.
 CREATE TABLE IF NOT EXISTS zone_scopes (principal TEXT NOT NULL, zone TEXT NOT NULL, PRIMARY KEY (principal, zone));
+-- Phase 4a, Task 6: the four-eyes requests (app/approvals.py). One row per request: its kind (approvals.KINDS), its switch (NULL for
+-- a kind without one; deleting the switch deletes its requests), the exact desired state its requester sent (payload, JSON) and the
+-- preview they saw (preview, JSON), its status (open, then approved, rejected, withdrawn, expired or stale), who asked (user name,
+-- display name, subject, role) and when, when it expires (ISO-UTC), who decided and when, the rejection's comment, the reason of a
+-- stale one and the change an approval started (Task 7).
+CREATE TABLE IF NOT EXISTS approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, switch_id INTEGER REFERENCES switches(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL, payload TEXT NOT NULL, preview TEXT NOT NULL, status TEXT NOT NULL,
+    requested_by TEXT NOT NULL, requester_name TEXT, requester_subject TEXT NOT NULL, requester_role TEXT,
+    requested_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+    decided_by TEXT, decided_subject TEXT, decided_at TEXT, comment TEXT, reason TEXT, change_id INTEGER);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, id);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

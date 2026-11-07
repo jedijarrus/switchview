@@ -76,6 +76,12 @@ MATRIX = {
     ("GET", "/api/audit"): "lesen",
     ("GET", "/api/zone-scopes"): "lesen",
     ("PUT", "/api/zone-scopes"): "admin",
+    ("PUT", "/api/settings/approvals"): "admin",
+    ("POST", "/api/approvals"): "aendern",
+    ("GET", "/api/approvals"): "lesen",
+    ("GET", "/api/approvals/{aid}"): "lesen",
+    ("POST", "/api/approvals/{aid}/withdraw"): "aendern",
+    ("POST", "/api/approvals/{aid}/reject"): "freigeben",
 }
 
 

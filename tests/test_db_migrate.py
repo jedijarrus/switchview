@@ -69,9 +69,16 @@ PHASE4A_COLUMNS = {
 }
 # The tables Phase 4a adds (db.SCHEMA, CREATE TABLE IF NOT EXISTS), table -> (name, declared type, NOT NULL flag, default, position in
 # the primary key) of every column, as PRAGMA table_info reports them. A database of before has none of them; init_db creates each
-# one empty. Task 5: zone_scopes, the Admin-kept list "app role -> zone".
+# one empty. Task 5: zone_scopes, the Admin-kept list "app role -> zone". Task 6: approvals, the four-eyes requests.
 PHASE4A_TABLES = {
     "zone_scopes": [("principal", "TEXT", 1, None, 1), ("zone", "TEXT", 1, None, 2)],
+    "approvals": [("id", "INTEGER", 0, None, 1), ("kind", "TEXT", 1, None, 0), ("switch_id", "INTEGER", 0, None, 0),
+                  ("summary", "TEXT", 1, None, 0), ("payload", "TEXT", 1, None, 0), ("preview", "TEXT", 1, None, 0),
+                  ("status", "TEXT", 1, None, 0), ("requested_by", "TEXT", 1, None, 0), ("requester_name", "TEXT", 0, None, 0),
+                  ("requester_subject", "TEXT", 1, None, 0), ("requester_role", "TEXT", 0, None, 0), ("requested_at", "TEXT", 1, None, 0),
+                  ("expires_at", "TEXT", 1, None, 0), ("decided_by", "TEXT", 0, None, 0), ("decided_subject", "TEXT", 0, None, 0),
+                  ("decided_at", "TEXT", 0, None, 0), ("comment", "TEXT", 0, None, 0), ("reason", "TEXT", 0, None, 0),
+                  ("change_id", "INTEGER", 0, None, 0)],
 }
 
 
