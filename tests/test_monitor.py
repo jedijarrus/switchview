@@ -2,9 +2,9 @@
 answers again with the first good one, an LLDP neighbour that appears, changes (another sysName or PortId) or vanishes, a port
 changed outside SwitchView at a switch SwitchView does not back up (drift (b): untagged, tagged, PVID, status, name), and a backup
 that differs from the one before without a SwitchView change between them (drift (a), config_backups.outside). A change explains a
-drift when it may have sent something (changes.sent != 0) and ran in the window; a field of a walk that failed or broke off, the
-VLANs of an empty VLAN table, and a field the poll before could not read count for nothing. GET /api/events lists them, newest
-first.
+drift when it may have sent something (changes.sent != 0) and ran in the window; a field of a walk that failed or broke off or of
+a PVID, status or name table that answered without a row, the VLANs of an empty VLAN table, and a field the poll before could not
+read (each field after a poll from before the update with gaps) count for nothing. GET /api/events lists them, newest first.
 
 The network of tests/netfix.py (fixture `net` from tests/conftest.py), polled by the real poller; the clock of poll_switch is
 poller.utc_now (clock of tests/test_history.py). CATALYST is the Catalyst of tests/test_uplinks.py (driver cisco: no backup, so it
@@ -406,6 +406,38 @@ async def test_the_poll_after_a_gap_is_no_drift_but_the_one_after_that_compares_
     revalue(net, "10.0.0.3", CATALYST, pvid={"1": "20"})
     await poller.poll_switch(sid)                                       # and the next one compares again
     assert events() == [("drift_port", "Gi1/0/1", "Port Gi1/0/1 außerhalb von SwitchView geändert: PVID 10 → 20")]
+
+
+@pytest.mark.parametrize("tables", [("vlanName", "vlanEgress", "vlanUntagged", "pvid"), ("pvid",), ("ifAdmin",), ("ifAlias",),
+                                    ("ifAdmin", "ifAlias")], ids=["without-q-bridge", "pvid", "ifadmin", "ifalias", "if-mib"])
+async def test_a_narrowed_view_is_no_drift_when_it_comes_nor_when_it_goes(net, monkeypatch, tables):
+    sid = await add(net, "C", "10.0.0.3", "cisco", CATALYST)
+    revalue(net, "10.0.0.3", CATALYST)
+    for key in tables:                                                  # answering without a single row: a narrowed SNMP view
+        net.rec["10.0.0.3"][OIDS[key]] = []
+    await poller.poll_switch(sid)                                       # every port would read PVID "", status off or no name
+    assert events() == []
+    revalue(net, "10.0.0.3", CATALYST)                                  # the view restored
+    await poller.poll_switch(sid)                                       # compared with the narrowed poll: no drift either
+    assert events() == []
+    revalue(net, "10.0.0.3", CATALYST, pvid={"1": "20"}, ifAlias={"10101": "Büro"}, ifAdmin={"10101": "2"})
+    await poller.poll_switch(sid)                                       # and the next one compares again
+    assert [port for _, port, _ in events()] == ["Gi1/0/1"]
+
+
+@pytest.mark.parametrize("note, want", [("Teilweise gelesen: vlanEgress fehlgeschlagen (Timeout)", []), (None, ["Gi1/0/1"])],
+                         ids=["partial", "complete"])
+async def test_the_first_poll_after_the_update_compares_only_with_a_complete_poll_from_before(net, monkeypatch, note, want):
+    sid = await add(net, "C", "10.0.0.3", "cisco", CATALYST)
+    gate = refuse(monkeypatch, "10.0.0.3", OIDS["vlanEgress"])
+    gate["on"] = note is not None
+    await poller.poll_switch(sid)                                       # with a note: stored without its tagged VLANs
+    assert dbfix.query("SELECT last_error FROM switches") == [(note,)]
+    dbfix.query("UPDATE switches SET unread_fields = NULL, last_ok_at = NULL")    # as a poll from before the update left it
+    gate["on"] = False
+    revalue(net, "10.0.0.3", CATALYST, pvid={"1": "20"})
+    await poller.poll_switch(sid)
+    assert [port for _, port, _ in events()] == want
 
 
 async def test_a_switch_with_backups_gets_no_port_drift(net, monkeypatch):

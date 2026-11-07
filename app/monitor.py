@@ -13,8 +13,9 @@ What, in the table events (one row each, with its time, never a counter):
                             SwitchView change ran between the two (backup_outside, config_backups.outside).
 A drift is explained by a change at the switch that may have sent something (changes.sent != 0) and ran in the window
 (explained_ports): for a port, one that named the port, its trunk, or the whole switch (prepare, save). Nothing counts that was not
-read completely: a field of a walk that failed or broke off (FIELD_WALKS, unread_fields), the VLANs of an empty VLAN table, and a
-field the poll before could not read (switches.unread_fields: its stored value is no base). list_events serves GET /api/events.
+read completely: a field of a walk that failed or broke off or answered without a row where each port has one (FIELD_WALKS,
+ROW_PER_PORT, unread_fields), the VLANs of an empty VLAN table, and a field the poll before could not read (switches.unread_fields:
+its stored value is no base; every field after a poll from before the update with gaps). list_events serves GET /api/events.
 
 Every caller wraps its call: a failure here is logged and never changes a poll or a backup.
 """
@@ -40,6 +41,13 @@ DRIFT_FIELDS = {"untagged": "ungetaggt", "tagged": "getaggt", "pvid": "PVID", "a
 FIELD_WALKS = {"untagged": ("vlanEgress", "vlanUntagged", "vlanName", "bp2if", "ifStack"),
                "tagged": ("vlanEgress", "vlanUntagged", "vlanName", "bp2if", "ifStack"),
                "pvid": ("pvid", "bp2if", "ifStack"), "admin": ("ifAdmin",), "alias": ("ifAlias",)}
+# The walks whose table has a row for each port whenever the switch lets them be read (ifAdminStatus and ifAlias at every interface,
+# dot1qPvid at every bridge port): one that answered without a single row was not read - a narrowed SNMP view (a view without
+# Q-BRIDGE-MIB empties dot1qPvid with the VLAN table), not a switch without values - and poll_switch counts it among the walks it did
+# not read completely. A table that is always empty costs nothing: its field reads the same at every poll. The VLAN table has its own
+# rule (unread_fields); ifStack and bp2if not: ifStack is empty at a switch without trunks, and bp2if is an LLDP walk as well
+# (poller.lldp_walks: an agent without it would never tell an LLDP event)
+ROW_PER_PORT = ("pvid", "ifAdmin", "ifAlias")
 TEXT_MAX = 500    # characters of the text of a port's event
 TIME = "%Y-%m-%d %H:%M:%S"
 _TRIGGER = re.compile(r"(vor|nach) #([0-9]{1,18})")    # the backups around a change (changes.run_change)
@@ -99,10 +107,20 @@ def port_drift(old: dict[str, dict], new: list[dict], unreadable: set[str]) -> d
 
 
 def unread_fields(failed: Container[str], data: dict) -> set[str]:
-    """The fields of DRIFT_FIELDS a poll did not read completely: each with a walk of FIELD_WALKS in failed (the walks that failed or
-    broke off), and the VLAN lists when the VLAN table came out empty (more likely a narrowed SNMP view than a switch without VLANs)."""
+    """The fields of DRIFT_FIELDS a poll did not read completely: each with a walk of FIELD_WALKS in failed (the walks that failed,
+    broke off or, of ROW_PER_PORT, answered without a row), and the VLAN lists when the VLAN table came out empty (more likely a
+    narrowed SNMP view than a switch without VLANs)."""
     out = {f for f, walks in FIELD_WALKS.items() if any(w in failed for w in walks)}
     return out | ({"untagged", "tagged"} if not data["vlans"] else set())
+
+
+def _unread_before(row) -> set[str]:
+    """The fields the poll before the one of the switch row could not read completely (switches.unread_fields). NULL: a poll from
+    before the update, which stored none; one that went through with gaps (its note "Teilweise gelesen …" in last_error) may have
+    stored any of them incompletely, so then none counts."""
+    if row["unread_fields"] is None:
+        return set(DRIFT_FIELDS) if row["last_error"] else set()
+    return set(json.loads(row["unread_fields"] or "[]"))
 
 
 def _shown(field: str, value) -> str:
@@ -203,10 +221,11 @@ async def poll_failed(row, error: str, at: str) -> dict | None:
 
 async def poll_succeeded(row, old: dict[str, dict], data: dict, failed: Container[str], at: str) -> list[dict]:
     """After the commit of a good poll of the switch row (read before it) at the time at: old are the rows of the table ports the
-    poll replaced, by name, data what it read (poller._build), failed the walks that failed or broke off. Stores and returns the
-    events of this poll, in one transaction: switch_up when the switch counted as unreachable (the minutes since it last answered),
-    the LLDP events (not at the first poll, nor after a failed LLDP walk), and the port drift (only at a switch without backups,
-    against the last good poll, without what is explained or was not read completely, now or by the poll before)."""
+    poll replaced, by name, data what it read (poller._build), failed the walks that failed, broke off or, of ROW_PER_PORT,
+    answered without a row. Stores and returns the events of this poll, in one transaction: switch_up when the switch counted as
+    unreachable (the minutes since it last answered), the LLDP events (not at the first poll, nor after a failed LLDP walk), and the
+    port drift (only at a switch without backups, against the last good poll, without what is explained or was not read completely,
+    now or by the poll before)."""
     items: list[tuple[str, str, str, dict]] = []
     if row["down_since"]:
         m = _minutes(row["last_ok_at"] or row["down_since"], at)
@@ -224,7 +243,7 @@ async def poll_succeeded(row, old: dict[str, dict], data: dict, failed: Containe
                 items.append((kind, port, _lldp_text(port, kind, before, after), {"uplink": uplink, "before": before, "after": after}))
     base = row["last_ok_at"] or (row["last_poll"] if row["last_poll_ok"] else None)
     if old and base and drift_applies(row):
-        unreadable = unread_fields(failed, data) | set(json.loads(row["unread_fields"] or "[]"))
+        unreadable = unread_fields(failed, data) | _unread_before(row)
         drift = port_drift(old, data["ports"], unreadable)
         if drift:
             # The window ends now, not at the poll's start: a change that began while the walks ran may be what they read

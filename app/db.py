@@ -256,8 +256,8 @@ ADDED_COLUMNS = (
     # when the switch counts as unreachable (set by monitor.poll_failed at the UNREACHABLE_AFTER-th failed poll in a row, NULL again
     # with the next good poll; NULL: reachable); the time of the last good poll (NULL: none since the update, monitor then takes
     # last_poll if that one was good); and the fields of the port configuration (monitor.DRIFT_FIELDS keys, a JSON list) the last
-    # good poll could not read completely, which the next one does not compare (NULL: none known, a poll from before the update).
-    # Existing rows have 0 and NULL.
+    # good poll could not read completely, which the next one does not compare (NULL: none known, a poll from before the update;
+    # monitor then compares none of them when that poll left a note in last_error). Existing rows have 0 and NULL.
     ("switches", "poll_failures", "INTEGER NOT NULL DEFAULT 0"),
     ("switches", "down_since", "TEXT"),
     ("switches", "last_ok_at", "TEXT"),

@@ -584,10 +584,11 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
                 log.exception("Ereignisse %s", host)
             return {"ok": False, "error": str(e)}
 
-        # Every walk this poll did not read completely: a failed one, and one that broke off, also outside `keeping` (its rows are taken
-        # as they came, but a cut VLAN or PVID table would read as a change). Its fields are stored with the poll (unread_fields), so
-        # the next poll does not compare against them either (monitor.unread_fields is pure)
-        incomplete = set(failed) | broken
+        # Every walk this poll did not read completely: a failed one, one that broke off, also outside `keeping` (its rows are taken
+        # as they came, but a cut VLAN or PVID table would read as a change), and one of monitor.ROW_PER_PORT that answered without a
+        # single row (a narrowed SNMP view: every port would read PVID "", status off or no name). Its fields are stored with the poll
+        # (unread_fields), so the next poll does not compare against them either (monitor.unread_fields is pure)
+        incomplete = set(failed) | broken | {k for k in monitor.ROW_PER_PORT if not _tbl(W[k], O[k])}
         unread = json.dumps(sorted(monitor.unread_fields(incomplete, data)))
 
         # A failed walk that carries the uplink protection keeps what the last poll stored, and what this poll read of the same table
