@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import auth
 import config
@@ -110,6 +111,7 @@ def test_the_emergency_login_is_admin_also_with_a_mapping(login_api, monkeypatch
     login_api.post("/api/auth/local", json=GOOD)
     me = login_api.get("/api/auth/me").json()
     assert (me["role"], me["zones"], "subject" in me) == ("admin", None, False) and query("SELECT subject FROM sessions") == [("local:admin",)]
+    assert set(me) == {"username", "name", "method", "role", "zones", "idle_minutes", "four_eyes"} and me["idle_minutes"] == 120
 
 
 def test_an_idle_session_ends(login_api):
@@ -153,6 +155,24 @@ def test_a_session_from_before_the_update_stays_signed_in(login_api, monkeypatch
     assert login_api.get("/api/auth/me").json()["role"] == "admin" and query("SELECT last_seen IS NOT NULL FROM sessions") == [(1,)]
     monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, **ON))
     assert login_api.get("/api/auth/me").json()["role"] == "lesen"
+
+
+def test_a_session_from_before_the_update_has_method_and_user_name_as_its_subject(login_api):
+    """A session that stored no subject (from before the update) gets <method>:<username>: the identity the self-approval lock
+    compares (approvals.same_person), so the same person signed in twice is the same subject."""
+    token = "vorher-" + secrets.token_urlsafe(16)
+    now = datetime.now(timezone.utc)
+    query("INSERT INTO sessions(token, username, display_name, method, created_at, expires_at) VALUES "
+          f"('{db.token_hash(token)}', 'anna@example.org', 'Anna', 'entra', '{now.isoformat()}', '{(now + timedelta(hours=1)).isoformat()}')")
+    request = Request({"type": "http", "method": "GET", "path": "/api/auth/me", "query_string": b"",
+                       "headers": [(b"cookie", f"{auth.COOKIE}={token}".encode())]})
+    assert asyncio.run(auth.current_user(request))["subject"] == "entra:anna@example.org"
+
+
+def test_the_login_cookie_is_httponly_lax_site_wide_and_good_for_ten_minutes(login_api):     # main._set_cookie, auth.NONCE_TTL_S
+    headers = login_api.post("/api/auth/nonce").headers.get_list("set-cookie")
+    attrs = {h.split("=", 1)[0]: {a.strip().lower() for a in h.split(";")[1:]} for h in headers}
+    assert attrs.keys() == {"sv_login"} and {"httponly", "samesite=lax", "path=/", "max-age=600"} <= attrs["sv_login"]
 
 
 def test_the_start_names_full_rights_without_a_mapping():

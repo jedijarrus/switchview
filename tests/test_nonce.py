@@ -6,8 +6,11 @@ minutes. The emergency login needs no nonce.
 The app runs in-process through FastAPI's TestClient (login_api in conftest.py); the id_tokens are signed by the entra fixture of
 conftest.py with a key of its own, so the real token check runs and nothing reaches Microsoft.
 """
+import base64
 import dataclasses
+import json
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -42,7 +45,8 @@ def test_the_nonce_of_another_browser_is_refused(login_api, entra):
     nonce = login_api.post("/api/auth/nonce").json()["nonce"]
     other = TestClient(main.app, headers=CSRF)
     other.post("/api/auth/nonce")
-    assert other.post("/api/auth/azure", json={"id_token": entra(nonce=nonce)}).status_code == 401
+    r = other.post("/api/auth/azure", json={"id_token": entra(nonce=nonce)})
+    assert (r.status_code, r.json()["detail"]) == (401, main.NONCE_FAILED)
 
 
 def test_a_second_login_attempt_replaces_the_first(login_api, entra):                      # Review Focus 5
@@ -52,11 +56,27 @@ def test_a_second_login_attempt_replaces_the_first(login_api, entra):           
     assert login_api.post("/api/auth/azure", json={"id_token": entra(nonce=second)}).status_code == 200
 
 
-def test_a_nonce_is_good_for_ten_minutes():                                                # Review Focus 5
+def test_a_nonce_is_good_for_ten_minutes(monkeypatch):                                     # Review Focus 5
+    monkeypatch.setattr(auth, "_used_nonces", {})       # the check that passes remembers the nonce: not in the module's own dict
     nonce, binding = auth.issue_nonce(now=1000.0)
     with pytest.raises(ValueError, match=auth.NONCE_BAD):
         auth.check_nonce(nonce, binding, now=1000.0 + auth.NONCE_TTL_S + 1)
     auth.check_nonce(nonce, binding, now=1000.0 + auth.NONCE_TTL_S - 1)
+
+
+def test_a_refused_token_leaves_the_nonce_unused(login_api, entra, monkeypatch):
+    """Only a token that passed the token check takes the nonce out of use (the order in main.login_azure): a tampered token and one
+    without an allowed role, each carrying the nonce of this attempt, are refused, and the valid token of the attempt still signs in."""
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, entra_allowed_roles=["SwitchView.Admin"]))
+    nonce = login_api.post("/api/auth/nonce").json()["nonce"]
+    good = entra(nonce=nonce, roles=["SwitchView.Admin"])
+    head, _, signature = good.split(".")
+    claims = jwt.decode(good, options={"verify_signature": False}) | {"preferred_username": "mallory@example.org"}
+    tampered = ".".join((head, base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode(), signature))
+    for token, status in ((tampered, 401), (entra(nonce=nonce, roles=["SwitchView.Lesen"]), 403)):
+        r = login_api.post("/api/auth/azure", json={"id_token": token})
+        assert r.status_code == status and r.json()["detail"] != main.NONCE_FAILED, r.json()
+    assert login_api.post("/api/auth/azure", json={"id_token": good}).status_code == 200
 
 
 @pytest.mark.parametrize("mangle", [lambda n, b: (n[:-1] + ("0" if n[-1] != "0" else "1"), b), lambda n, b: (n, b + "x"), lambda n, b: (None, b),
