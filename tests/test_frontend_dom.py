@@ -817,3 +817,31 @@ FAILED_UNSENT = {**DONE, "status": "failed", "sent": 0, "kind": "ports", "saved"
 def test_the_result_of_a_change_keeps_the_focus_in_its_dialog(meanwhile, want):
     assert in_dom(PROGRESS % (json.dumps(FAILED_UNSENT), meanwhile)) == want
 
+
+# Phase 5 final review: Escape closes the list for the text in the field, also while its search still waits. The list of "drucker"
+# is shown and "vk" typed: Escape within the pause keeps the text (default prevented) and the list stays closed when the pause is
+# over; so does a search that waits for /api/netmap. An arrow key after Escape runs that search and opens its list.
+NETMAP_VK = ('{switches: [{id: 1, k: "A", sys: "", ports: [{n: "1", a: "drucker-ek", l: [], d: [], mc: 0, tr: ""}, '
+             '{n: "2", a: "drucker-vk", l: [], d: [], mc: 0, tr: ""}]}], links: [], vlans: {}}')
+
+
+def test_escape_during_the_pause_keeps_the_list_closed():
+    js = ('(async () => { ' + SEARCH + 'const q = $("#q"); q.value = "vk"; q.fire("input"); const e = q.fire("keydown", {key: "Escape"}); '
+          'await new Promise(r => setTimeout(r, 400)); return [e.defaultPrevented, $("#results").hidden, q.getAttribute("aria-expanded"), q.value]; })()')
+    assert in_dom(js) == [True, True, "false", "vk"]
+
+
+def test_escape_while_the_search_waits_for_the_netmap_keeps_the_list_closed():
+    js = ('(async () => { ' + SEARCH + 'let answer; api = () => new Promise(ok => { answer = ok; }); MAP = null; const q = $("#q"); '
+          'q.value = "vk"; q.fire("input"); await new Promise(r => setTimeout(r, 300)); q.fire("keydown", {key: "Escape"}); '
+          f'answer({NETMAP_VK}); await new Promise(r => setTimeout(r, 50)); const a = [$("#results").hidden, searchFound.map(h => h.port)]; '
+          'q.fire("keydown", {key: "ArrowDown"}); await new Promise(r => setTimeout(r, 0)); '
+          'return [...a, $("#results").hidden, q.getAttribute("aria-activedescendant")]; })()')
+    assert in_dom(js) == [True, ["2"], False, "hit-0"]
+
+
+def test_an_arrow_after_escape_runs_the_search_of_the_field():
+    js = ('(async () => { ' + SEARCH + 'const q = $("#q"); q.value = "vk"; q.fire("input"); q.fire("keydown", {key: "Escape"}); '
+          'q.fire("keydown", {key: "ArrowDown"}); await new Promise(r => setTimeout(r, 50)); '
+          'return [$("#results").hidden, q.getAttribute("aria-activedescendant"), searchFound.map(h => h.port)]; })()')
+    assert in_dom(js) == [False, "hit-0", ["2"]]
