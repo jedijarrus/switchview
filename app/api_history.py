@@ -92,6 +92,9 @@ async def get_compliance_rules(user=Depends(auth.require(roles.LESEN))):
     return await compliance.rules_view()
 
 
+CUSTOM_MAX_NO = 999_999_999      # the largest number the id of a custom rule takes: the 9 digits of CustomRuleIn.id
+
+
 class CustomRuleIn(BaseModel):
     """One custom rule of PUT /api/compliance/rules: its id as GET serves it (c<n>; none for a new one), a name, the mode ("must": a
     line has to contain the text, "must_not": none may) and the text (A1: plain text, no pattern)."""
@@ -117,7 +120,8 @@ async def put_compliance_rules(body: RulesIn, user=Depends(auth.require(roles.AD
     (compliance.reevaluate_custom). off takes only ids of compliance.RULES: a custom rule is removed, not switched off (422
     „Unbekannte Regel: <id>“); a name or text blank once trimmed is a 422 too, nothing stored. Names and texts are stored trimmed; a
     custom rule without an id, or with one an earlier rule of the same PUT has, gets c<n>, n one more than the largest number stored
-    or sent. The audit names the rules switched off and the number of custom ones, never a name or a text; the answer is GET's."""
+    or sent - past CUSTOM_MAX_NO the smallest number neither stored nor sent, so every id GET serves comes back through this route.
+    The audit names the rules switched off and the number of custom ones, never a name or a text; the answer is GET's."""
     for rid in body.off:
         if rid not in compliance.RULES:
             raise HTTPException(422, UNKNOWN_RULE.format(rid))
@@ -127,12 +131,15 @@ async def put_compliance_rules(body: RulesIn, user=Depends(auth.require(roles.AD
         if not c.name.strip():
             raise HTTPException(422, NO_NAME)
     stored = (await compliance.load_rules())["custom"]
-    n = max((int(rid[1:]) for rid in [c["id"] for c in stored] + [c.id for c in body.custom if c.id]), default=0)
+    taken = {int(rid[1:]) for rid in [c["id"] for c in stored] + [c.id for c in body.custom if c.id]}
     custom, used = [], set()
     for c in body.custom:
         rid = c.id
         if rid is None or rid in used:
-            n += 1
+            n = max(taken, default=0) + 1
+            if n > CUSTOM_MAX_NO:
+                n = min(set(range(1, len(taken) + 2)) - taken)
+            taken.add(n)
             rid = f"c{n}"
         used.add(rid)
         custom.append({"id": rid, "name": c.name.strip(), "mode": c.mode, "text": c.text.strip()})

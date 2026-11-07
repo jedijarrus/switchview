@@ -9,18 +9,21 @@ Sources, each checked where its data comes from:
   custom   the Admin's text rules (A1: "keine Zeile enthält" / "eine Zeile enthält", without case) on the masked configuration, in
            the same call; and on the latest backup of every switch whose driver backs up when the rules are saved
            (reevaluate_custom), masked once more with today's patterns (a backup from before Phase 2 is masked with older ones, E26).
-           On masked text a rule can never guess a secret: it sees what a backup shows.
+           On masked text a rule can never guess a secret: it sees what a backup shows. A must_not rule shows at most its first
+           CUSTOM_LINES lines per switch.
   snmp     the rules on the SNMP access SwitchView itself uses (check_snmp), after every good poll (poller.poll_switch), for
            every driver.
-The mask: a finding stores only its masked line (cfgparse.mask_secrets), masks it again when it is served, and its detail names
-only the default communities "public" and "private", never another value.
+The mask: a finding stores only its masked line (cfgparse.mask_secrets; a community name masked from its match, whatever the case
+of the keywords), masks it again when it is served, and its detail names only the default communities "public" and "private",
+never another value.
 
-A finding is one row of the table findings, identified by (switch, rule, line): seen again it gets a new last_seen, line number and
-detail; one of the checked sources that is not found any more gets resolved_at. The first check of a switch per source
-(switches.compliance_cfg_at, compliance_snmp_at NULL) is the baseline: stored, listed and counted, never told; afterwards each check
-returns its new findings, which Task 7 announces. A rule an Admin switches off (settings SETTINGS_KEY) still checks, but its
-findings are hidden from the list, the count and the return - switched on again, they are there at once. Every caller wraps its
-call: a failure here is logged and never changes a poll or a backup.
+A finding is one row of the table findings, identified by (switch, rule, line) and, for a line that is there more than once, its
+place among them: seen again it gets a new last_seen, line number and detail; one of the checked sources that is not found any
+more gets resolved_at. The first check of a switch per source (switches.compliance_cfg_at, compliance_snmp_at NULL) is the
+baseline: stored, listed and counted, never told; afterwards each check returns its new findings, which Task 7 announces. A rule
+an Admin switches off (settings SETTINGS_KEY) still checks, but its findings are hidden from the list, the count and the return -
+switched on again, they are there at once. Every caller wraps its call: a failure here is logged and never changes a poll or a
+backup.
 """
 import json
 import re
@@ -58,6 +61,9 @@ RULES: dict[str, Rule] = {r.id: r for r in (
 )}
 SETTINGS_KEY = "compliance_rules"    # {"off": [ids of RULES], "custom": [{"id", "name", "mode", "text"}]}, JSON
 CUSTOM_SEVERITY = "warn"             # a custom rule is never critical: it is the Admin's own check, not a known weakness
+# The most lines a must_not rule shows per switch: 50 rules on every line of a 3000-port configuration were 150 000 open findings, a
+# check 10 s in its write transaction (twice the busy timeout of every other connection) and 30 MB per GET of the list
+CUSTOM_LINES = 100
 DEFAULTS = ("public", "private")     # the communities every SNMP agent knows
 TIME = "%Y-%m-%d %H:%M:%S"
 # What radius_prereq names as missing, by the keys of radiusprep.readiness, in this order
@@ -89,10 +95,13 @@ def check_config(raw: str, radius_server: str) -> list[tuple]:
         if not m:
             continue
         name = (m[1] if m[1] is not None else m[2]).lower()
+        # The name masked from the match itself: the pattern of cfgparse.mask_secrets reads "community" with case only
+        start, end = (m.start(1) - 1, m.end(1) + 1) if m[1] is not None else m.span(2)
+        masked = cfgparse.mask_secrets(x[:start] + '"***"' + x[end:])
         if name in DEFAULTS:
-            defaults.append(("snmp_default_community", n, cfgparse.mask_secrets(x), f"Community „{name}“"))
+            defaults.append(("snmp_default_community", n, masked, f"Community „{name}“"))
         if re.search(r"\bunrestricted\b", m[3], re.I):
-            writing.append(("snmp_write_community", n, cfgparse.mask_secrets(x), ""))
+            writing.append(("snmp_write_community", n, masked, ""))
     out = []
     if not has(r"no\s+telnet-server"):
         out.append(("telnet", None, "", ""))
@@ -143,7 +152,8 @@ def check_snmp(row) -> list[tuple]:
 
 def check_custom(masked: str, rules: list[dict]) -> list[tuple]:
     """The findings of the custom rules ({"id", "name", "mode", "text"}) on the masked configuration masked, lines trimmed, text
-    without case: must_not one per line that contains text, must one without a line when no line does."""
+    without case: must_not one per line that contains text, at most the first CUSTOM_LINES (the last of them names how many more
+    there are), must one without a line when no line does."""
     lines = [x.strip() for x in masked.splitlines()]
     folded = [x.casefold() for x in lines]
     out = []
@@ -152,7 +162,9 @@ def check_custom(masked: str, rules: list[dict]) -> list[tuple]:
         needle = text.casefold()
         hits = [n for n, x in enumerate(folded, 1) if needle in x]
         if rule["mode"] == "must_not":
-            out += [(rule["id"], n, lines[n - 1], f"Zeile enthält „{text}“") for n in hits]
+            shown = hits[:CUSTOM_LINES]
+            more = f" (und {len(hits) - len(shown)} weitere, nicht einzeln aufgeführt)" if len(hits) > len(shown) else ""
+            out += [(rule["id"], n, lines[n - 1], f"Zeile enthält „{text}“" + (more if n == shown[-1] else "")) for n in shown]
         elif not hits:
             out.append((rule["id"], None, "", f"Keine Zeile enthält „{text}“"))
     return out
@@ -183,10 +195,12 @@ def _served(r, rule: Rule) -> dict:
 # ── Storing ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async def _store(switch_id: int, found: dict[str, list[tuple]], column: str | None) -> list[int]:
     """Stores the findings of one check of switch_id - found: source -> its findings - in one write transaction: an open finding of
-    the same (rule, line) gets last_seen, line_no and detail anew, a new one is inserted (the same line twice counts once, at its
-    first number: (switch, rule, line) is the identity), an open one of these sources that was not found gets resolved_at; then
-    column (compliance_cfg_at or compliance_snmp_at, None for none) is now. Returns the ids of the new findings, none for the
-    baseline (column NULL before, or None) or a switch that is gone."""
+    the same (rule, line) gets last_seen, line_no and detail anew, a new one is inserted, an open one of these sources that was not
+    found gets resolved_at; then column (compliance_cfg_at or compliance_snmp_at, None for none) is now. The same (rule, line) more
+    than once - two communities mask alike, a custom rule finds "exit" at every block - is a finding each, the k-th found taking the
+    k-th open one by id: so one more such line is new and one less resolves the last. Returns the ids of the new findings, none for
+    the baseline (column NULL before, or None) or a switch that is gone. Writes in batches: a broad custom rule keeps up to
+    CUSTOM_LINES findings at every check."""
     now, sources = _now(), list(found)
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
@@ -199,26 +213,31 @@ async def _store(switch_id: int, found: dict[str, list[tuple]], column: str | No
         async with conn.execute(f"SELECT id, rule, line FROM findings WHERE switch_id = ? AND resolved_at IS NULL AND source IN "
                                 f"({', '.join('?' * len(sources))}) ORDER BY id", (switch_id, *sources)) as cur:
             stored = [(r["id"], (r["rule"], r["line"])) for r in await cur.fetchall()]
-        known: dict[tuple, int] = {}
+        open_ids: dict[tuple, list[int]] = {}
         for fid, key in stored:
-            known.setdefault(key, fid)
-        kept, new = set(), []
+            open_ids.setdefault(key, []).append(fid)
+        seen: dict[tuple, int] = {}
+        updates, inserts = [], []
         for source, items in found.items():
             for rule, line_no, line, detail in items:
-                if (rule, line) in kept:
-                    continue
-                if (rule, line) in known:
-                    await conn.execute("UPDATE findings SET last_seen = ?, line_no = ?, detail = ? WHERE id = ?",
-                                       (now, line_no, detail, known[(rule, line)]))
-                    kept.add((rule, line))
-                    continue
-                cur = await conn.execute("INSERT INTO findings(switch_id, rule, source, line_no, line, detail, first_seen, last_seen) "
-                                         "VALUES (?,?,?,?,?,?,?,?)", (switch_id, rule, source, line_no, line, detail, now, now))
-                known[(rule, line)] = cur.lastrowid
-                kept.add((rule, line))
-                new.append(cur.lastrowid)
-        gone = [fid for fid, key in stored if not (key in kept and known[key] == fid)]
-        await conn.executemany("UPDATE findings SET resolved_at = ? WHERE id = ?", [(now, fid) for fid in gone])
+                k = seen[(rule, line)] = seen.get((rule, line), 0) + 1
+                ids = open_ids.get((rule, line), [])
+                if k <= len(ids):
+                    updates.append((now, line_no, detail, ids[k - 1]))
+                else:
+                    inserts.append((switch_id, rule, source, line_no, line, detail, now, now))
+        kept = {fid for *_, fid in updates}
+        await conn.executemany("UPDATE findings SET last_seen = ?, line_no = ?, detail = ? WHERE id = ?", updates)
+        await conn.executemany("UPDATE findings SET resolved_at = ? WHERE id = ?", [(now, fid) for fid, _ in stored if fid not in kept])
+        new = []
+        if inserts:
+            async with conn.execute("SELECT coalesce(max(id), 0) FROM findings") as cur:
+                last = (await cur.fetchone())[0]
+            await conn.executemany("INSERT INTO findings(switch_id, rule, source, line_no, line, detail, first_seen, last_seen) "
+                                   "VALUES (?,?,?,?,?,?,?,?)", inserts)
+            # AUTOINCREMENT gives each new row an id above every one before, and BEGIN IMMEDIATE lets no other writer in between
+            async with conn.execute("SELECT id FROM findings WHERE id > ? ORDER BY id", (last,)) as cur:
+                new = [r[0] for r in await cur.fetchall()]
         if column:
             await conn.execute(f"UPDATE switches SET {column} = ? WHERE id = ?", (now, switch_id))
         await conn.commit()

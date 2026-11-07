@@ -11,6 +11,7 @@ SAMPLE_RUNNING_CONFIG of tests/conftest.py (CFG): `snmp-server community "public
 SNMP rules through a poll use the network of tests/netfix.py (fixture `net`).
 """
 import asyncio
+import json
 
 import pytest
 from conftest import SAMPLE_RUNNING_CONFIG as CFG
@@ -93,6 +94,13 @@ def test_a_secret_community_is_never_shown():
     assert "snmp_default_community" not in [r[0] for r in found(raw)]
 
 
+def test_a_community_in_capitals_is_masked_in_its_finding():
+    raw = CFG.replace('snmp-server community "public" Unrestricted', 'SNMP-Server Community "s3cret" Unrestricted') + "SNMP-SERVER COMMUNITY Private\n"
+    assert [f for f in found(raw) if f[0].startswith("snmp_")] == [
+        ("snmp_default_community", len(raw.splitlines()), 'SNMP-SERVER COMMUNITY "***"', "Community „private“"),
+        ("snmp_write_community", line_of("SNMP-Server Community", raw), 'SNMP-Server Community "***" Unrestricted', "")]
+
+
 @pytest.mark.parametrize("extra, gone", [("no telnet-server\n", "telnet"), ("no web-management plaintext\n", "web_plaintext"),
                                          ("no web-management\n", "web_plaintext")])
 def test_switching_a_default_off_clears_its_rule(extra, gone):
@@ -136,6 +144,19 @@ def test_the_snmp_rules(cols, rules):
     assert [r[0] for r in compliance.check_snmp(row)] == rules
 
 
+@pytest.mark.parametrize("cols, want", [
+    ({"snmp_write": 1, "snmp_rw_community": "rw-42"}, [("snmp_write_insecure", None, "", "per SNMPv2c: die Schreib-Community geht im Klartext übers Netz")]),
+    ({"snmp_write": 1, "snmp_rw_user": "sv-rw"}, [("snmp_write_insecure", None, "", "per SNMPv3 ohne Authentifizierung")]),
+    ({"snmp_version": "3", "snmp_user": "sv", "snmp_write": 1}, [("snmp_write_insecure", None, "", "per SNMPv3 ohne Authentifizierung")]),  # the read identity
+    ({"snmp_write": 1, "snmp_rw_user": "sv-rw", "snmp_rw_auth_proto": "SHA", "snmp_rw_auth_pass": "auth-pass-42", "snmp_rw_priv_proto": "AES",
+      "snmp_rw_priv_pass": "priv-pass-42"}, []),                                                  # authPriv: protected
+])
+def test_writing_without_protection_names_how_the_set_would_go_out(cols, want):
+    secret = ("snmp_rw_community", "snmp_rw_auth_pass", "snmp_rw_priv_pass")
+    row = {**apifix_row(), **ROW, "snmp_community": crypto.encrypt("lesen-42"), **{k: crypto.encrypt(v) if k in secret else v for k, v in cols.items()}}
+    assert compliance.check_snmp(row) == want
+
+
 @pytest.mark.parametrize("stored", ["gAAAAA-not-a-token", None])                                 # one that does not decrypt, none at all
 def test_a_read_community_switchview_cannot_read_reads_as_public(stored):
     row = {**apifix_row(), **ROW, "snmp_community": stored}
@@ -149,6 +170,17 @@ def test_a_custom_rule_matches_text_and_never_a_secret():
     must = {"id": "c3", "name": "NTP", "mode": "must", "text": "sntp server"}
     got = compliance.check_custom(cfgparse.mask_secrets(raw), [must_not, guess, must])
     assert [r[0] for r in got].count("c1") >= 1 and "c2" not in [r[0] for r in got] and ("c3", None, "", "Keine Zeile enthält „sntp server“") in got
+
+
+async def test_the_custom_rules_of_a_read_see_its_masked_text_only(database):
+    # The path of every read (sshcli.store_backup -> evaluate_config): a rule that names a secret neither finds it nor misses it
+    sid = dbfix.insert_switch(name="SW", host="10.0.0.1")
+    await db.set_setting(compliance.SETTINGS_KEY, json.dumps({"off": [], "custom": [
+        {"id": "c1", "name": "Rate", "mode": "must_not", "text": "s3cret"}, {"id": "c2", "name": "Gegenprobe", "mode": "must", "text": "s3cret"},
+        {"id": "c3", "name": "Schlüssel", "mode": "must_not", "text": "S3cr3tRadiusKey"}]}))                  # the RADIUS key of the sample
+    assert await sshcli.store_backup(sid, CFG + "radius-server host 203.0.113.11 key s3cret\n", "nightly") is True
+    assert dbfix.query("SELECT rule, line_no, line, detail FROM findings WHERE source = 'custom'") == [("c2", None, "", "Keine Zeile enthält „s3cret“")]
+    assert not any("s3cret" in line.lower() for (line,) in dbfix.query("SELECT line FROM findings"))
 
 
 async def test_the_first_check_is_the_baseline_and_later_ones_tell_what_is_new(database):
@@ -216,6 +248,15 @@ def test_a_custom_rule_without_id_gets_the_next_number_and_the_audit_names_no_te
         ("c4", "NTP", "must", "sntp server"), ("c5", "Banner", "must", "banner motd"), ("c6", "Doppelt", "must", "x")]
     assert dbfix.query("SELECT action, target, detail, role FROM audit ORDER BY id") == [
         ("compliance_rules", "", "aus: – · eigene: 2", "admin"), ("compliance_rules", "", "aus: telnet, web_plaintext · eigene: 3", "admin")]
+
+
+def test_the_next_number_of_a_custom_rule_stays_within_its_pattern(api):
+    top = {"id": "c999999999", "name": "Oben", "mode": "must", "text": "a"}
+    assert put_rules(api, custom=[top]).status_code == 200
+    r = put_rules(api, custom=[top, {"id": None, "name": "Neu", "mode": "must", "text": "b"}, {"id": None, "name": "Noch", "mode": "must", "text": "c"}])
+    custom = [x for x in r.json()["rules"] if x["custom"]]
+    assert [x["id"] for x in custom] == ["c999999999", "c1", "c2"]                               # past the largest: the smallest free numbers
+    assert put_rules(api, custom=[{"id": x["id"], "name": x["label"], "mode": x["mode"], "text": x["text"]} for x in custom]).status_code == 200
 
 
 def test_the_rules_view_lists_every_rule_with_its_state(api):
@@ -335,12 +376,51 @@ async def test_a_finding_seen_again_keeps_its_row_and_takes_the_new_line_and_det
     assert dbfix.query("SELECT compliance_cfg_at, compliance_snmp_at FROM switches") == [("2026-11-02 02:30:00", None)]
 
 
-async def test_the_same_line_twice_is_one_finding_at_the_first(database):
+async def test_the_same_line_twice_is_a_finding_each_matched_in_order(database):
     sid = dbfix.insert_switch(name="SW", host="10.0.0.1")
     await db.set_setting(compliance.SETTINGS_KEY, '{"off": [], "custom": [{"id": "c1", "name": "Exit", "mode": "must_not", "text": "exit"}]}')
+    exits = [i for i, x in enumerate(CFG.splitlines(), 1) if "exit" in x]
     await compliance.evaluate_config(sid, CFG)
-    assert dbfix.query("SELECT line_no, line FROM findings WHERE rule = 'c1'") == [(line_of("exit"), "exit")]
-    assert len(compliance.check_custom(CFG, [{"id": "c1", "name": "Exit", "mode": "must_not", "text": "exit"}])) == CFG.count("exit")
+    rows = dbfix.query("SELECT id, line_no, line FROM findings WHERE rule = 'c1' ORDER BY id")
+    assert [(n, line) for _, n, line in rows] == [(n, "exit") for n in exits] and len(exits) == CFG.count("exit") > 1
+    new = await compliance.evaluate_config(sid, CFG + "exit\n")                                   # one more: told
+    assert [(f["rule"], f["line_no"], f["line"]) for f in new] == [("c1", len(CFG.splitlines()) + 1, "exit")]
+    assert await compliance.evaluate_config(sid, CFG.replace('   disable\n   name "unused"\n   exit\n', "")) == []    # the last but one gone
+    assert dbfix.query("SELECT id, line_no FROM findings WHERE rule = 'c1' AND resolved_at IS NULL ORDER BY id") == [
+        (fid, n) for (fid, _, _), n in zip(rows, exits[:-1])]                                      # the rows in order, the later ones resolved
+
+
+async def test_communities_masked_alike_are_a_finding_each_and_one_more_is_told(database):
+    sid = dbfix.insert_switch(name="SW", host="10.0.0.1")
+
+    def community(name):
+        return f'snmp-server community "{name}" unrestricted\n'
+
+    two = CFG.replace('snmp-server community "public" Unrestricted\n', community("public") + community("private"))
+    n, masked = line_of('"public"', two), 'snmp-server community "***" unrestricted'
+    await compliance.evaluate_config(sid, two)
+    assert dbfix.query("SELECT rule, line_no, line, detail FROM findings WHERE rule LIKE 'snmp%' ORDER BY id") == [
+        ("snmp_default_community", n, masked, "Community „public“"), ("snmp_default_community", n + 1, masked, "Community „private“"),
+        ("snmp_write_community", n, masked, ""), ("snmp_write_community", n + 1, masked, "")]
+    new = await compliance.evaluate_config(sid, two.replace(community("private"), community("private") + community("hinterher")))
+    assert [(f["rule"], f["line_no"], f["line"]) for f in new] == [("snmp_write_community", n + 2, masked)]
+    ids = [fid for (fid,) in dbfix.query("SELECT id FROM findings WHERE rule LIKE 'snmp%' ORDER BY id")]
+    assert await compliance.evaluate_config(sid, two.replace(community("public"), "")) == []      # one of each left: the first rows stay
+    assert dbfix.query("SELECT id, rule, line_no, detail FROM findings WHERE rule LIKE 'snmp%' AND resolved_at IS NULL ORDER BY id") == [
+        (ids[0], "snmp_default_community", n, "Community „private“"), (ids[2], "snmp_write_community", n, "")]
+
+
+def test_a_custom_rule_shows_its_first_lines_and_counts_the_rest():
+    rule = {"id": "c1", "name": "Ports", "mode": "must_not", "text": "INTERFACE"}
+    raw = CFG + "".join(f"interface {i}\n   exit\n" for i in range(1, 151))
+    hits = [i for i, x in enumerate(raw.splitlines(), 1) if "interface" in x]
+    got, limit = compliance.check_custom(raw, [rule]), compliance.CUSTOM_LINES
+    assert len(hits) == 152 > limit and [n for _, n, _, _ in got] == hits[:limit]
+    more = f"Zeile enthält „INTERFACE“ (und {152 - limit} weitere, nicht einzeln aufgeführt)"
+    assert [d for *_, d in got] == ["Zeile enthält „INTERFACE“"] * (limit - 1) + [more]
+    assert len(compliance.check_custom(raw, [{**rule, "mode": "must"}])) == 0
+    just = "\n".join(raw.splitlines()[:hits[limit - 1]])                                           # exactly limit lines: no count
+    assert [d for *_, d in compliance.check_custom(just, [rule])] == ["Zeile enthält „INTERFACE“"] * limit
 
 
 async def test_open_findings_come_critical_first_then_by_line_each_line_masked_again(database):
