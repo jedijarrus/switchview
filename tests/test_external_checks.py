@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import alerts
 import apifix
 import approvals
 import auth
@@ -290,6 +291,15 @@ def test_the_scheduler_purges_the_history_nightly(api, monkeypatch):
     asyncio.run(main._schedule())
     assert jobs["history_purge"][0] is history.purge and jobs["history_purge"][1] == "cron" and (
         jobs["history_purge"][2]["hour"], jobs["history_purge"][2]["minute"]) == (4, 0)
+
+
+def test_the_scheduler_delivers_alerts_every_30_seconds(api, monkeypatch):
+    """Phase 4b, Task 6: the alert queue (alert_outbox) is delivered every 30 seconds (alerts.deliver_due), one run at a time."""
+    jobs = {}
+    monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
+    asyncio.run(main._schedule())
+    assert jobs["alerts"][0] is alerts.deliver_due and jobs["alerts"][1] == "interval" and jobs["alerts"][2]["seconds"] == 30
+    assert (jobs["alerts"][2]["max_instances"], jobs["alerts"][2]["coalesce"]) == (1, True)
 
 
 async def test_the_start_prunes_sessions(database, monkeypatch):

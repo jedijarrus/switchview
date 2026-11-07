@@ -369,7 +369,7 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
 # one before without a SwitchView change, Task 5 the findings of the security rules and their last check per source. A database as
 # Phase 4a left it has none of them; init_db creates each table empty, with the indexes db.SCHEMA gives it, and adds each column,
 # which a row of before reads as the column's default.
-PHASE4B_TABLES = {"sightings", "events", "findings"}
+PHASE4B_TABLES = {"sightings", "events", "findings", "alert_outbox"}
 PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
                                          ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
                                          ("switches", "compliance_snmp_at")}

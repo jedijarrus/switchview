@@ -208,6 +208,20 @@ CREATE TABLE IF NOT EXISTS findings (
     source TEXT NOT NULL, line_no INTEGER, line TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL, resolved_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_findings_sw ON findings(switch_id, resolved_at);
+-- Phase 4b, Task 6: the alert queue (app/alerts.py), one row per message and channel (mail | webhook): created_at when alerts.emit
+-- wrote it, event a key of alerts.EVENTS (or cap, the summary past the hourly limit), dedup_key "<event>:<key>" (the same key within
+-- alerts.DEDUP_MINUTES adds to repeats instead of a new row), the switch it is about (no foreign key: a message outlives its switch,
+-- switch_name keeps the name), title (one line), text and facts (JSON) as they go out, status queued | sent | failed | suppressed
+-- (past the hourly limit, never sent), attempts the failed attempts so far, next_at when a queued row is due, sent_at, error (the
+-- masked text of the last failure). Written by alerts.emit, delivered by the scheduler job alerts.deliver_due; read by GET
+-- /api/alerts/deliveries. Every row but a queued one is purged after HISTORY_DAYS by created_at.
+CREATE TABLE IF NOT EXISTS alert_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, channel TEXT NOT NULL, event TEXT NOT NULL, dedup_key TEXT NOT NULL,
+    switch_id INTEGER, switch_name TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, text TEXT NOT NULL, facts TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT, sent_at TEXT, error TEXT, repeats INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON alert_outbox(status, next_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(channel, dedup_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_created ON alert_outbox(created_at);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

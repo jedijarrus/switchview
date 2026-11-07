@@ -38,9 +38,10 @@ from db import db, get_setting
 log = logging.getLogger("switchview.history")
 
 TIME = "%Y-%m-%d %H:%M:%S"    # the times of the tables, in UTC (macs.last_seen, switches.last_poll, poller.utc_now)
-# The tables purge keeps for HISTORY_DAYS: (table, time column, extra condition of a row that may go, "" for none); Task 6 appends.
-# A finding goes only once resolved (an open one is the state of now, however old its first sighting)
-RETAINED: list[tuple[str, str, str]] = [("sightings", "last_seen", ""), ("events", "ts", ""), ("findings", "resolved_at", "resolved_at IS NOT NULL")]
+# The tables purge keeps for HISTORY_DAYS: (table, time column, extra condition of a row that may go, "" for none). A finding goes
+# only once resolved (an open one is the state of now, however old its first sighting), an alert only once it is no longer queued
+RETAINED: list[tuple[str, str, str]] = [("sightings", "last_seen", ""), ("events", "ts", ""), ("findings", "resolved_at", "resolved_at IS NOT NULL"),
+                                        ("alert_outbox", "created_at", "status <> 'queued'")]
 PURGE_BATCH = 5000    # rows per DELETE of purge, each batch committed on its own: a record or a poll waits for one batch, not for all
 IN_CHUNK = 500        # MACs per IN list of record
 

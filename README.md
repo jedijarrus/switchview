@@ -158,11 +158,13 @@ The settings that matter, in `.env` unless noted:
 | `ENTRA_ROLE_LESEN`, `ENTRA_ROLE_AENDERN`, `ENTRA_ROLE_FREIGEBEN`, `ENTRA_ROLE_ADMIN` | `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben`, `SwitchView.Admin` | the app role values of each role, comma-separated |
 | `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off (the behaviour before Phase 4a); a negative value stops the start |
 | `HISTORY_DAYS` | `180` | days of history kept (sightings, events, resolved findings, delivered alerts), purged nightly at 04:00; `0` = keep forever; a negative value stops the start |
+| `PUBLIC_URL` | unset (alerts without a link) | the address of SwitchView as its users reach it (e.g. `https://switchview.example.com`); alerts link the switch or the approvals there; a value without `http://` or `https://` stops the start |
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |
 | "Vier-Augen-Prinzip" (Settings, Admin) | off, requests expire after `24` hours | on: an expert-mode change is requested, and a second person with Freigeben or Admin approves it; hours 1–168 |
 | "Zonen" (Settings, Admin) | empty: nobody is limited | one line per Entra app role (`SwitchView.Zone.EK = EK`): Ändern and Freigeben with that role change only switches of those zones; needs `ENTRA_ROLE_MAPPING=on` |
+| "Benachrichtigungen" (Settings, Admin) | off until set up | mail via SMTP (STARTTLS, TLS, or without TLS and without login for an internal relay; certificate check on) and a webhook for a Microsoft Teams workflow or plain JSON, each with its events; the SMTP password and the webhook URL are stored encrypted and never shown again (of the URL only its host); a test button per channel |
 
 **Reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address as the container sees it (comma-separated addresses or networks,
 e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container of the compose network): only that sender may set

@@ -1,6 +1,6 @@
 """Shared helpers of the API tests: the test user (USER, and user() for one of any role), the scheduler trap, a fresh database, a
 TestClient signed in through the user override (become() and by_header() sign it in as someone else), and a fake httpx for the code
-that talks to PacketFence and OPNsense (pf, names).
+that talks to PacketFence and OPNsense (pf, names) and to a webhook (alerts).
 
 The fixtures stay in their test files, each with its name and parameters (they hang on different things: a world, a database, a
 fake switch, tmp_path); only their common body lives here: the scheduler trap, the override, the CSRF header and the cleanup.
@@ -72,14 +72,18 @@ def by_header(users: dict[str, dict]) -> None:
 
 
 class Remote:
-    """A fake system behind fake_httpx: the status per (method, URL as the code passes it), 200 unless set; and what it saw: calls
-    (method, URL), urls (the client's base_url + URL) and made (the keyword arguments of every client the code created). It answers
-    every request with reply, {} here; a subclass answers as its system does."""
+    """A fake system behind fake_httpx: the status per (method, URL as the code passes it), 200 unless set, and the exception per
+    (method, URL) raised instead of an answer (raises, empty unless set: an httpx.ReadTimeout, a ConnectError); and what it saw: calls
+    (method, URL), urls (the client's base_url + URL), sent (the keyword arguments of every request, json= among them) and made (the
+    keyword arguments of every client the code created). It answers every request with reply, {} here; a subclass answers as its
+    system does."""
 
     def __init__(self):
         self.status: dict[tuple[str, str], int] = {}
+        self.raises: dict[tuple[str, str], BaseException] = {}
         self.calls: list[tuple[str, str]] = []
         self.urls: list[str] = []
+        self.sent: list[dict] = []
         self.made: list[dict] = []
 
     def reply(self, method: str, url: str):
@@ -103,7 +107,7 @@ class _Response:
 
 
 class _Client:
-    """httpx.AsyncClient as pf and names use it: `async with`, headers, get / post / patch / delete, each recorded on the remote."""
+    """httpx.AsyncClient as pf, names and alerts use it: `async with`, headers, get / post / patch / delete, each recorded on the remote."""
 
     def __init__(self, remote: Remote, base_url: str = "", **kwargs):
         self._remote, self._base_url, self.headers = remote, base_url, {}
@@ -115,25 +119,29 @@ class _Client:
         return False
 
     async def get(self, url, **kwargs):
-        return self._send("GET", url)
+        return self._send("GET", url, kwargs)
 
     async def post(self, url, **kwargs):
-        return self._send("POST", url)
+        return self._send("POST", url, kwargs)
 
     async def patch(self, url, **kwargs):
-        return self._send("PATCH", url)
+        return self._send("PATCH", url, kwargs)
 
     async def delete(self, url, **kwargs):
-        return self._send("DELETE", url)
+        return self._send("DELETE", url, kwargs)
 
-    def _send(self, method: str, url: str) -> _Response:
+    def _send(self, method: str, url: str, kwargs: dict) -> _Response:
+        """Records the request on the remote, then raises its entry in remote.raises, if there is one, or answers."""
         self._remote.calls.append((method, url))
         self._remote.urls.append(self._base_url + url)
+        self._remote.sent.append(kwargs)
+        if (method, url) in self._remote.raises:
+            raise self._remote.raises[(method, url)]
         return _Response(self._remote, method, url)
 
 
 def fake_httpx(remote: Remote) -> types.SimpleNamespace:
-    """A stand-in for the httpx module of pf or names (monkeypatch.setattr(pf, "httpx", fake_httpx(remote))): every AsyncClient the
+    """A stand-in for the httpx module of pf, names or alerts (monkeypatch.setattr(pf, "httpx", fake_httpx(remote))): every AsyncClient the
     code creates records its keyword arguments in remote.made and sends to remote; nothing leaves the process."""
 
     def client(**kwargs) -> _Client:

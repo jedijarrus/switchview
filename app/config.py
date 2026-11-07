@@ -36,6 +36,10 @@ class Settings:
     # Days of history kept (Phase 4b: the sightings, and the tables history.RETAINED names), purged nightly by history.purge; 0 = keep
     # forever. main.check_startup_config refuses < 0.
     history_days: int = field(default_factory=lambda: int(os.getenv("HISTORY_DAYS", "180") or 180))
+    # The address of SwitchView as its users reach it (behind the reverse proxy), for the links in alerts (Phase 4b, alerts.link_for):
+    # trimmed and without a trailing "/"; empty (the default) means alerts without a link. main.check_startup_config refuses a value
+    # that is not http(s)://<host>[/<path>].
+    public_url: str = field(default_factory=lambda: os.getenv("PUBLIC_URL", "").strip().rstrip("/"))
 
     @property
     def role_mapping_on(self) -> bool:

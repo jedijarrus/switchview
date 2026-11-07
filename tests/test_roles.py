@@ -188,7 +188,8 @@ def test_the_start_names_full_rights_without_a_mapping():
 
 @pytest.mark.parametrize("field, value, text", [("entra_role_mapping", "ja", "ENTRA_ROLE_MAPPING muss on oder off sein"),
                                                 ("idle_minutes", -1, "IDLE_MINUTES muss 0 oder größer sein"),
-                                                ("history_days", -1, "HISTORY_DAYS muss 0 oder größer sein")])
+                                                ("history_days", -1, "HISTORY_DAYS muss 0 oder größer sein"),
+                                                ("public_url", "ftp://sv", "PUBLIC_URL muss mit http:// oder https:// beginnen")])
 def test_the_start_refuses(field, value, text):
     with pytest.raises(RuntimeError, match=text):
         main.check_startup_config(config.Settings(secret_key=secrets.token_hex(32), **{field: value}))
