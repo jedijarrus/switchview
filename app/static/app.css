@@ -387,3 +387,25 @@ details.adv[open] summary { margin-bottom: 4px; }
 td.time { white-space: nowrap; }
 /* A link that looks like a button ("Als CSV"): the button's colour, no underline */
 a.btn { color: var(--fg); text-decoration: none; }
+/* Phase 4b Task 10: the text and date fields of a tool row (a MAC to watch, the audit's user and days); the audit's filters in a row
+   of their own under the card's head; the sub-head "Letzte Meldungen"; the events of a channel; the security rules and the rows of
+   the custom ones */
+.toolrow input[type=text], .toolrow input[type=date] { height: 30px; border: 1px solid var(--border-strong); border-radius: 6px; padding: 0 10px; background: var(--surface); min-width: 0; font-size: 13px; }
+.toolrow input[type=text] { flex: 1 1 180px; max-width: 260px; }
+.au-tools { border-bottom: 1px solid var(--border); }
+.card-h.sub-h { border-top: 1px solid var(--border); }
+.card-h h3 { font-size: 13.5px; }
+.evs { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+.evs legend { padding: 0; margin-bottom: 6px; color: var(--fg-2); font-size: 12.5px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.rules { display: grid; gap: 10px; }
+.rule { display: grid; gap: 2px; }
+.rule .hint { padding-left: 28px; color: var(--muted); font-size: 11.5px; }
+.crule { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr) auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.crule input, .crule select { height: 32px; min-width: 0; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); padding: 0 8px; font-size: 13px; }
+.crule input:focus, .crule select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.crule input:disabled, .crule select:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
+@media (max-width: 720px) { .crule { grid-template-columns: minmax(0, 1fr) auto; } }
+/* Browser check at 390 px: a fieldset is as wide as its content at least (min-content), and the security choice's longest option
+   made the alert card wider than the phone */
+#alert-card .fs { min-width: 0; }
+#alert-card select { min-width: 0; max-width: 100%; }

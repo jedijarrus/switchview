@@ -2,15 +2,16 @@
 classic scripts in one node vm context, one global scope as in the browser; the stub keeps the state a test reads back (focus,
 attributes, hidden / inert, handlers, history). Layout and real focus rules stay with the browser check. Skipped without node.
 The tests of the four-eyes UI (Phase 4a, Task 9) live in tests/test_frontend_approvals.py, which imports in_dom and the constants
-from here, as later DOM tests do in modules of their own."""
+from here, as later DOM tests do in modules of their own (Phase 4b: tests/test_frontend_history.py, tests/test_frontend_alerts.py,
+and tests/test_frontend_audit.py with the tests of the audit view)."""
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-from test_frontend_logic import AUDIT  # the audit rows of SVLogic.filterAudit's test, shown by renderAudit here (Task 8)
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
@@ -62,9 +63,12 @@ Promise.resolve(vm.runInContext(expr, ctx)).then(v => process.stdout.write(JSON.
 """
 
 
-def in_dom(expr: str, hash: str = ""):
-    """The value (JSON) of the JavaScript expression expr (a Promise is awaited), evaluated after the scripts of index.html ran."""
-    out = subprocess.run(["node", "-e", DOM, json.dumps({"hash": hash, "hidden": HIDDEN}), expr, *FILES], capture_output=True, text=True, timeout=30)
+def in_dom(expr: str, hash: str = "", tz: str | None = None):
+    """The value (JSON) of the JavaScript expression expr (a Promise is awaited), evaluated after the scripts of index.html ran; tz
+    sets the time zone of the node process (TZ)."""
+    env = {**os.environ, "TZ": tz} if tz else None
+    out = subprocess.run(["node", "-e", DOM, json.dumps({"hash": hash, "hidden": HIDDEN}), expr, *FILES], capture_output=True, text=True, timeout=30,
+                         env=env)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
@@ -581,8 +585,8 @@ def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_chan
 
 
 # Phase 5 Task 8: the change lists offer "Trotzdem speichern" (can_save, the server's rule) and "Mehr laden" (limit doubled up to
-# 500, the maximum of GET /api/changes); a change that sent nothing reloads only the switch's change list; the audit log filters
-# its 200 entries and shows their details (AUDIT: the rows of the filter test in test_frontend_logic.py)
+# 500, the maximum of GET /api/changes); a change that sent nothing reloads only the switch's change list (the tests of the audit
+# view moved to tests/test_frontend_audit.py with Phase 4b Task 10)
 
 CH = {"created_at": "2026-11-06 10:00:00", "username": "a", "switch_id": 1, "switch_name": "SW", "summary": "Port 2: VLAN 20", "reverted_by": None}
 ROWS = [{**CH, "id": 7, "status": "failed", "saved": 0, "can_revert": True, "can_save": True},
@@ -609,15 +613,6 @@ def test_a_full_list_offers_more_up_to_500():
     assert in_dom(LIST % (json.dumps(ROWS), 2, more)) == ["/api/changes?limit=2&switch_id=1", "/api/changes?limit=4&switch_id=1"]
 
 
-def test_the_audit_shows_details_and_filters():
-    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); const a = [$("#au-body").innerHTML]; '
-          '$("#au-q").value = "bob"; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); return [...a, $("#view").innerHTML]; })()') % json.dumps(AUDIT)
-    full, bob, view = in_dom(js)
-    assert '<span class="cellnote">host: 10.0.0.1 → 10.0.0.2</span>' in full and full.count("<tr") == 3
-    assert bob.count("<tr") == 1 and "<td>bob</td><td>–</td><td>Anmeldung</td>" in bob    # Phase 4a Task 8: the role between user and action
-    assert view.count('<option value="login">Anmeldung</option>') == 1 and '<option value="">Alle Aktionen</option>' in view
-
-
 RUN = ('(async () => { ' + ADMIN_ME + 'const seen = []; MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "switches"; selSwitch = 1; '
        'loadMap = async () => { seen.push("map"); }; renderSwitchDetail = () => { seen.push("view"); }; syncPicked = () => {}; '
        'renderChangesInto = async (el, id, n) => { seen.push(["list", id, n]); }; '
@@ -640,18 +635,8 @@ def test_more_gives_the_focus_to_the_first_row_it_added(kids, want):
     assert in_dom(LIST % (json.dumps(ROWS), 2, act)) == want
 
 
-# Beyond the brief: the action filter redraws on change (the text filter above on input), a filter without hits shows its row, and
-# a change that sent nothing leaves the list alone when the view shows another switch or another view
-def test_the_audit_filters_by_action_and_says_when_nothing_is_left():
-    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); const a = []; '
-          'const q = t => { $("#au-q").value = t; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); }; '
-          '$("#au-act").value = "login"; $("#au-act").fire("change"); a.push($("#au-body").innerHTML); q(" BOB "); q("anna"); '
-          'return a; })()') % json.dumps(AUDIT)
-    login, bob, none = in_dom(js)
-    assert login.count("<tr") == 1 and "<td>bob</td><td>–</td><td>Anmeldung</td>" in login and bob == login    # the text is trimmed
-    assert none == '<tr><td colspan="5" class="muted">Keine Einträge für diesen Filter.</td></tr>'
-
-
+# Beyond the brief: a full list never asks for more than 500, and a change that sent nothing leaves the list alone when the view
+# shows another switch or another view
 def test_more_never_asks_for_more_than_500():
     assert 'data-more="500"' in in_dom(LIST % (json.dumps(ROWS * 150), 300, "return el.innerHTML;"))
 
@@ -965,26 +950,9 @@ def test_a_failed_reload_of_more_keeps_the_focus_in_the_list():                 
     assert in_dom(LIST % (json.dumps(ROWS), 2, act)) == ["#lst", "-1", '<div class="empty">weg</div>']
 
 
-def test_the_audit_keeps_its_filter_across_a_new_render():                            # Phase 5 review, Minor 7
-    js = ('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
-          '$("#au-q").value = "bob"; $("#au-q").fire("input"); '
-          '$("#au-act").value = "login"; $("#au-act").fire("change"); await renderAudit(); return $("#view").innerHTML; })()') % json.dumps(AUDIT)
-    html = in_dom(js)
-    assert ('id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="bob"' in html
-            and '<option value="login" selected>' in html)
-
-
-def test_the_audit_drops_a_kept_action_the_new_entries_no_longer_have():              # Phase 4a Task 1 (T1-f)
-    later = [r for r in AUDIT if r["action"] != "login"]
-    js = ('(async () => { let rows = %s; api = async (m, u) => u === "/api/audit?limit=200" ? {rows} : []; await renderAudit(); '
-          '$("#au-act").value = "login"; $("#au-act").fire("change"); rows = %s; await renderAudit(); '
-          'return [$("#view").innerHTML, $("#au-body").innerHTML]; })()') % (json.dumps(AUDIT), json.dumps(later))
-    html, body = in_dom(js)
-    assert re.search(r"<option[^>]* selected", html) is None and body.count("<tr>") == len(later) == 2
-
-
 # Phase 4a Task 8: the header names the user and the role; each view hides or locks what the role or the zone does not allow and
-# says why in one sentence; the audit log shows the role; a 401 shows the server's reason on the login page; an Admin keeps the zones
+# says why in one sentence; the audit log shows the role (tests/test_frontend_audit.py); a 401 shows the server's reason on the login
+# page; an Admin keeps the zones
 def role_me(role, **k):
     return f"ME = {json.dumps({'name': 'Anna', 'role': role, 'zones': None, 'four_eyes': False, **k})}; "
 
@@ -1078,15 +1046,6 @@ def test_the_zones_card_saves_what_the_text_says():
     assert first == "Z.EK = EK" and none == 0 and bad == ["Zeile 1: „App-Rolle = Zone, Zone“ erwartet"]
     assert puts == [["/api/zone-scopes", {"entries": [{"principal": "Z.VK", "zones": ["VK", ""]}]}]] and toasts[-1] == "Gespeichert"
     assert after == "Z.VK = Ohne Zone, VK"    # beyond the brief: the field shows what the server stored
-
-
-def test_the_audit_shows_the_role():
-    rows = [{**AUDIT[0], "role": "aendern"}, {**AUDIT[1], "role": None}]
-    html = in_dom('(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
-                  'return $("#au-body").innerHTML; })()' % json.dumps(rows))
-    assert "<td>anna</td><td>Ändern</td>" in html and "<td>bob</td><td>–</td>" in html and '<th>Rolle</th>' in in_dom(
-        '(async () => { api = async (m, u) => u === "/api/audit?limit=200" ? {rows: %s} : []; await renderAudit(); '
-        'return $("#view").innerHTML; })()' % json.dumps(rows))
 
 
 DEVICES = ('(async () => { api = async (m, u) => u === "/api/devices" ? [{mac: "aa:bb:cc:00:00:01", name: "Drucker", kind: "drucker", allowed: 0, '

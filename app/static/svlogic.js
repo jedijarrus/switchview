@@ -134,12 +134,32 @@ const SVLogic = {
   plural(n, one, many) {
     return `${n} ${n === 1 ? one : many}`;
   },
-  // The audit rows (GET /api/audit) that show action (""/null: every action) and hold text (lower or upper case alike; "" holds
-  // every row) in their user, action label (labels, else the action key), target or details
-  filterAudit(rows, text, action, labels) {
-    const t = String(text || "").toLowerCase();
-    return rows.filter(r => (!action || r.action === action)
-      && (!t || [r.username, labels[r.action] || r.action, r.target, r.detail].some(v => String(v || "").toLowerCase().includes(t))));
+  // The recipients of the alert card from its text field (PUT /api/settings/alerts mail_to): split at line breaks and commas,
+  // trimmed, empty ones dropped; an entry without "@" or with a space is no address and named in errors as the server names it
+  splitRecipients(text) {
+    const list = [], errors = [];
+    for (const a of String(text || "").split(/[\n,]/).map(x => x.trim()).filter(Boolean)) {
+      if (a.includes("@") && !/\s/.test(a)) list.push(a); else errors.push(`Mail-Adresse ungültig: ${a}`);
+    }
+    return { list, errors };
+  },
+  // The query of GET /api/audit for the filter f of the audit view ({text, action, user, role, sw, from, to, order, cursor}, each
+  // optional; SVLogic.query drops what is empty): q and user trimmed, switch_id, since the midnight that starts the day from and
+  // until the midnight that ends the day to (a day "YYYY-MM-DD" of the browser's time zone, as toISOString writes the instant; a
+  // day that is none sends nothing), order only "asc" (the server's default is the newest first), then cursor and limit 100. paged
+  // false leaves cursor and limit out: the CSV (GET /api/audit.csv) of the same filters
+  auditParams(f, paged = true) {
+    const day = (d, next) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ""), t = new Date(2000, 0, 1);
+      if (!m) return "";
+      t.setFullYear(+m[1], +m[2] - 1, +m[3]);
+      if (t.getFullYear() !== +m[1] || t.getMonth() !== +m[2] - 1 || t.getDate() !== +m[3]) return "";
+      if (next) t.setDate(t.getDate() + 1);
+      return t.toISOString();
+    };
+    const trim = v => String(v == null ? "" : v).trim();
+    return SVLogic.query({ q: trim(f.text), action: f.action, user: trim(f.user), role: f.role, switch_id: f.sw, since: day(f.from, false),
+      until: day(f.to, true), order: f.order === "asc" ? "asc" : "", cursor: paged ? f.cursor : null, limit: paged ? 100 : null });
   },
   // Whether role (of /api/auth/me) is min or above it, in the order of roles.ORDER on the server (lowest first); an unknown role
   // (or min) is none, never more

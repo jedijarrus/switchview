@@ -5,6 +5,7 @@ Task 8 of Phase 3: the hash names a switch by id ("#sw=<id>"), an old bookmark "
 §6). Skipped where node is not installed (no Python dependency, no build step).
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,10 +20,11 @@ SVLOGIC = STATIC / "svlogic.js"
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
 
 
-def run(js: str):
-    """The value of the expression js (JSON), with L = require(svlogic.js), in a fresh node process."""
+def run(js: str, tz: str | None = None):
+    """The value of the expression js (JSON), with L = require(svlogic.js), in a fresh node process; tz sets its time zone (TZ)."""
     script = f"const L = require({json.dumps(str(SVLOGIC))});\nprocess.stdout.write(JSON.stringify({js}));"
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    env = {**os.environ, "TZ": tz} if tz else None
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30, env=env)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
@@ -176,8 +178,7 @@ def test_write_alert_mode_sees_each_move_of_the_write_state(row):
     assert run(f"L.writeAlertMode({json.dumps(stored)}, {json.dumps({'host': '10.0.0.1'})}, {json.dumps(row)})") == "dialog"
 
 
-# Phase 5 Task 8: a change that sent nothing reloads only its change list (nothing changed at the switch); the audit filter works in
-# the browser on the 200 entries of GET /api/audit, over user, action (its label), target and details
+# Phase 5 Task 8: a change that sent nothing reloads only its change list (nothing changed at the switch)
 @pytest.mark.parametrize("c, want", [({"sent": 0, "kind": "ports"}, {"reload": "list", "delay": 0}),
                                      ({"sent": 0, "kind": "save"}, {"reload": "list", "delay": 0}),
                                      ({"sent": 1, "kind": "ports"}, {"reload": "map", "delay": 4500}),
@@ -187,16 +188,11 @@ def test_after_change(c, want):
     assert run(f"L.afterChange({json.dumps(c)})") == want
 
 
+# The audit rows of the filter test of Phase 5 Task 8 (SVLogic.filterAudit, gone with Phase 4b Task 10: the server filters); the DOM
+# tests of the audit view (tests/test_frontend_audit.py) show them
 AUDIT = [{"username": "anna", "action": "switch_update", "target": "3", "detail": "host: 10.0.0.1 → 10.0.0.2"},
          {"username": "bob", "action": "login", "target": "local", "detail": ""},
          {"username": "anna", "action": "login_failed", "target": "local", "detail": None}]
-LABELS = {"switch_update": "Switch geändert", "login": "Anmeldung", "login_failed": "Anmeldung fehlgeschlagen"}
-
-
-@pytest.mark.parametrize("text, action, want", [("", "", [0, 1, 2]), ("anna", "", [0, 2]), ("ANMELDUNG", "", [1, 2]), ("10.0.0.2", "", [0]),
-                                                ("", "login", [1]), ("anna", "login", []), ("geändert", "", [0])])
-def test_filter_audit(text, action, want):
-    assert run(f"(A => L.filterAudit(A, {json.dumps(text)}, {json.dumps(action)}, {json.dumps(LABELS)}).map(r => A.indexOf(r)))({json.dumps(AUDIT)})") == want
 
 
 # Phase 4a Task 8: the role of the signed-in user (/api/auth/me) as the UI compares and names it, and the zone list of the settings
@@ -267,3 +263,37 @@ def test_query_skips_empty_values_and_encodes_the_rest():
 @pytest.mark.parametrize("n, want", [(0, "0 Befunde"), (1, "1 Befund"), (2, "2 Befunde")])
 def test_plural(n, want):
     assert run(f'L.plural({n}, "Befund", "Befunde")') == want
+
+
+# Phase 4b Task 10: the recipients of the alert card from their text field, and the query of the audit view (GET /api/audit and its
+# CSV) from its filters - a day is one of the browser's time zone
+@pytest.mark.parametrize("text, want", [("a@b.de\nc@d.de, e@f.de", {"list": ["a@b.de", "c@d.de", "e@f.de"], "errors": []}),
+                                        ("a@b.de\nkein-at\n\n", {"list": ["a@b.de"], "errors": ["Mail-Adresse ungültig: kein-at"]})])
+def test_split_recipients(text, want):
+    assert run(f"L.splitRecipients({json.dumps(text)})") == want
+
+
+def test_audit_params_turn_local_days_into_instants():                                 # node runs with TZ=Europe/Berlin (run(..., tz=...))
+    assert run('L.auditParams({text: "", role: "none", from: "2026-11-07", to: "2026-11-07", order: "asc"})', tz="Europe/Berlin") == \
+        "?role=none&since=2026-11-06T23%3A00%3A00.000Z&until=2026-11-07T23%3A00%3A00.000Z&order=asc&limit=100"
+
+
+# Beyond the brief: an address with a space (also one of two joined by ";") is an error, each bad entry named as it stands; blank
+# lines and commas give no address
+@pytest.mark.parametrize("text, want", [("", {"list": [], "errors": []}), (" , \n ", {"list": [], "errors": []}),
+                                        ("a @b.de;c@d.de", {"list": [], "errors": ["Mail-Adresse ungültig: a @b.de;c@d.de"]}),
+                                        ("x\nx", {"list": [], "errors": ["Mail-Adresse ungültig: x", "Mail-Adresse ungültig: x"]})])
+def test_split_recipients_names_what_is_no_address(text, want):
+    assert run(f"L.splitRecipients({json.dumps(text)})") == want
+
+
+# Beyond the brief: every filter in the order of the ledger's ruling (q, action, user, role, switch_id, since, until, order, cursor,
+# limit), the text and the user trimmed, "desc" sent as nothing (the server's default), a day in summer time (UTC+2), a day that
+# is none sends no time; without paging (the CSV) neither cursor nor limit
+def test_audit_params_send_every_filter_in_order():
+    f = '{text: " bob ", action: "login", user: " Anna ", role: "aendern", sw: "3", from: "2026-07-01", to: "2026-07-31", order: "desc", cursor: 42}'
+    assert run(f"L.auditParams({f})", tz="Europe/Berlin") == ("?q=bob&action=login&user=Anna&role=aendern&switch_id=3&since=2026-06-30T22%3A00%3A00.000Z"
+                                                              "&until=2026-07-31T22%3A00%3A00.000Z&cursor=42&limit=100")
+    assert run(f"L.auditParams({f}, false)", tz="Europe/Berlin") == ("?q=bob&action=login&user=Anna&role=aendern&switch_id=3"
+                                                                     "&since=2026-06-30T22%3A00%3A00.000Z&until=2026-07-31T22%3A00%3A00.000Z")
+    assert run('[L.auditParams({}), L.auditParams({from: "kein Datum", to: "2026-13-45"}), L.auditParams({}, false)]') == ["?limit=100", "?limit=100", ""]

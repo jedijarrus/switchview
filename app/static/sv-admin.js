@@ -126,10 +126,10 @@
       [{ label: "Zugang bearbeiten", onClick: () => editSwitch(row) }, { label: "Verstanden", cls: "primary", onClick: closeModal }]);
   }
   // F2: a stored secret only goes to the address it was entered for. Saving a new address deletes each one not entered anew, and the
-  // server names them in "cleared" (PUT /api/switches/{id} and PUT /api/settings); these are their names in the toast after saving.
+  // server names them in "cleared" (PUT /api/switches/{id}, PUT /api/settings, PUT /api/settings/alerts); their names in the toast.
   const SECRET_NAMES = { snmp_community: "Lese-Community", snmp_auth_pass: "Lese-Auth-Kennwort", snmp_priv_pass: "Lese-Priv-Kennwort", ssh_pass: "SSH-Kennwort",
     snmp_rw_community: "Schreib-Community", snmp_rw_auth_pass: "RW-Auth-Kennwort", snmp_rw_priv_pass: "RW-Priv-Kennwort",
-    opnsense_key: "OPNsense-API-Key", opnsense_secret: "OPNsense-API-Secret", radius_key: "Shared Secret", pf_pass: "PacketFence-Kennwort" };
+    opnsense_key: "OPNsense-API-Key", opnsense_secret: "OPNsense-API-Secret", radius_key: "Shared Secret", pf_pass: "PacketFence-Kennwort", smtp_pass: "Mail-Kennwort" };
   const savedTxt = cleared => cleared && cleared.length ? `Gespeichert. Gelöscht wegen neuer Adresse: ${cleared.map(k => SECRET_NAMES[k] || k).join(", ")}` : "Gespeichert";
   // An address as the server compares it (main.same_destination, less its IP rule): trimmed, without a trailing "/", in any case
   const destTxt = v => String(v == null ? "" : v).trim().replace(/\/+$/, "").toLowerCase();
@@ -313,7 +313,9 @@
           ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button>` : ""}</div></div>
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
-      <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>`;
+      <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>
+      <section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`;
+    const watched = renderWatchInto($("#w-card"));    // the watch list (sv-alerts.js), beside the unknown devices
     const rows = () => {
       const t = devText.toLowerCase();
       const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "err" && d.pf_state === "fehler"))
@@ -341,6 +343,7 @@
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    await watched;
   }
 
   async function editDevice(d, isNew) {
@@ -422,30 +425,51 @@
     device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich",
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
-    zone_scopes_update: "Zonen geändert" };
-  // The audit log: the newest 200 entries (the rows of GET /api/audit?limit=200: the server pages since Phase 4b Task 8, Task 10 hands
-  // it the filters), filtered in the browser by action and by text (SVLogic.filterAudit over user, action, target and details); each
-  // entry names the role of its user then (Phase 4a, "–" before it), each action shows its detail below it (it never names a secret,
-  // Phase 2). The filter outlives a new render (auditText as typed, auditAction), like devText of the devices; an action the new
-  // entries no longer have is dropped
-  let auditText = "", auditAction = "";
+    zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet" };
+  // The audit log asks the server at every change of a filter (GET /api/audit, SVLogic.auditParams; 100 a page, "Mehr laden" by
+  // the cursor, loadPaged): text and user AUDIT_DELAY ms after the last key, which drops the answer to the filter before, the
+  // choices at once; "Als CSV" carries what the fields say. Each entry names its user's role then ("–" before Phase 4a) and its
+  // detail (never a secret). The filters outlive a new render, like devText; a switch the netmap no longer has is dropped
+  let auditText = "", auditAction = "", auditUser = "", auditRole = "", auditSw = "", auditFrom = "", auditTo = "", auditTimer = null; const AUDIT_DELAY = 300;
+  const auditFilter = () => ({ text: auditText, action: auditAction, user: auditUser, role: auditRole, sw: auditSw, from: auditFrom, to: auditTo });
+  const auditRow = r => `<tr><td class="num time">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(SVLogic.roleLabel(r.role))}</td>`
+    + `<td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`;
   async function renderAudit() {
-    const v = $("#view"); const rows = (await api("GET", "/api/audit?limit=200").catch(() => ({}))).rows || [];
-    const actions = [...new Set(rows.map(r => r.action))];
-    if (!actions.includes(auditAction)) auditAction = "";
-    const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}"${a === auditAction ? " selected" : ""}>${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>
-        <input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="${esc(auditText)}"></div>`;
-    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge · der Filter wirkt auf diese</span>${rows.length ? filter : ""}</div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Rolle</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody id="au-body"></tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
+    const v = $("#view");
+    try { await loadMap(false); } catch (e) { /* the switch filter without switches */ }
+    const sws = MAP && Array.isArray(MAP.switches) ? MAP.switches : []; if (!sws.some(s => String(s.id) === auditSw)) auditSw = "";
+    const opt = (val, label, cur) => `<option value="${esc(val)}"${val && val === cur ? " selected" : ""}>${esc(label)}</option>`;
+    const actions = Object.keys(AUDIT_LABELS).sort((a, b) => AUDIT_LABELS[a].localeCompare(AUDIT_LABELS[b], "de"));
+    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section>
+      <section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">neueste zuerst · gefiltert am Server</span></div>
+        <div class="card-b toolrow au-tools"><input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="${esc(auditText)}" maxlength="100">
+          <select id="au-act" aria-label="Aktion">${opt("", "Alle Aktionen", auditAction)}${actions.map(a => opt(a, AUDIT_LABELS[a], auditAction)).join("")}</select>
+          <input type="search" id="au-user" placeholder="Benutzer" aria-label="Benutzer" value="${esc(auditUser)}" maxlength="100">
+          <select id="au-role" aria-label="Rolle">${opt("", "Alle Rollen", auditRole)}${["lesen", "aendern", "freigeben", "admin"].map(k => opt(k, SVLogic.roleLabel(k), auditRole)).join("")}${opt("none", "ohne Rolle", auditRole)}</select>
+          <select id="au-sw" aria-label="Switch">${opt("", "Alle Switches", auditSw)}${sws.map(s => opt(String(s.id), s.k, auditSw)).join("")}</select>
+          <input type="date" id="au-from" aria-label="Von" value="${esc(auditFrom)}"><input type="date" id="au-to" aria-label="Bis" value="${esc(auditTo)}">
+          <a class="btn small" id="au-csv" href="/api/audit.csv${esc(SVLogic.auditParams(auditFilter(), false))}" download>Als CSV</a></div>
+        <div id="au-list"><div class="empty">Lade …</div></div></section>`;
     v.style.display = ""; renderChangesInto($("#all-changes"), null, 100);
-    if (!rows.length) return;
-    const draw = () => {
-      const f = SVLogic.filterAudit(rows, auditText.trim(), auditAction, AUDIT_LABELS);
-      $("#au-body").innerHTML = f.length ? f.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(SVLogic.roleLabel(r.role))}</td><td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("")
-        : `<tr><td colspan="5" class="muted">Keine Einträge für diesen Filter.</td></tr>`;
+    const list = $("#au-list");
+    // A load whose view was replaced meanwhile (the pause ran out after a new render or another view) asks nothing
+    const load = () => {
+      clearTimeout(auditTimer); auditTimer = null;
+      if ($("#au-list") !== list) return null;
+      const f = auditFilter(), any = SVLogic.auditParams(f, false) !== "";
+      return loadPaged(list, "/api/audit", cursor => SVLogic.auditParams({ ...f, cursor }), rows => rows.length
+        ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Rolle</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody>${rows.map(auditRow).join("")}</tbody></table></div>`
+        : `<div class="empty">${any ? "Keine Einträge für diesen Filter." : "Noch keine Einträge."}</div>`);
     };
-    draw();
-    $("#au-q").addEventListener("input", e => { auditText = e.target.value; draw(); });
-    $("#au-act").addEventListener("change", e => { auditAction = e.target.value; draw(); });
+    const on = (id, type, set) => $("#" + id).addEventListener(type, e => {
+      set(e.target.value); $("#au-csv").setAttribute("href", "/api/audit.csv" + SVLogic.auditParams(auditFilter(), false));
+      if (type === "change") return load();
+      list._seq = (list._seq || 0) + 1; clearTimeout(auditTimer); auditTimer = setTimeout(load, AUDIT_DELAY);
+    });
+    on("au-q", "input", x => { auditText = x; }); on("au-user", "input", x => { auditUser = x; });
+    on("au-act", "change", x => { auditAction = x; }); on("au-role", "change", x => { auditRole = x; }); on("au-sw", "change", x => { auditSw = x; });
+    on("au-from", "change", x => { auditFrom = x; }); on("au-to", "change", x => { auditTo = x; });
+    await load();
   }
 
   /* ── Einstellungen ── */
@@ -457,13 +481,15 @@
     ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – ${roleOk("admin") ? "bitte neu eingeben" : "neu eingeben braucht die Rolle „Admin“"}</span>` : "";
   // The settings and the zone list (GET /api/zone-scopes, kept in a textarea: SVLogic.formatScopes / parseScopes). Changing them is
   // Admin: below it every field is locked and the save buttons are gone, the card says why; what only reads (names, PacketFence test)
-  // and ending the own sessions stay
+  // and ending the own sessions stay. The cards of sv-alerts.js ask beside them, each on its own (a failure is its card's text):
+  // "Sicherheitsregeln" for everyone, "Benachrichtigungen" only for an Admin
   async function renderSettings() {
-    const v = $("#view");
+    const v = $("#view"), failed = e => ({ error: e.message });
+    const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), roleOk("admin") ? api("GET", "/api/settings/alerts").catch(failed) : null]);
     const got = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/zone-scopes")])
       .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!got) return;
-    const [s, scopes] = got, admin = roleOk("admin"), dis = admin ? "" : " disabled";
+    const [s, scopes] = got, [rules, alertSet] = await cards, admin = roleOk("admin"), dis = admin ? "" : " disabled";
     // Stored entries the field cannot hold as they are (SVLogic.lossyScopes): named above it, so a save does not change them unseen;
     // that saving would change them is said to an Admin only, who has the button
     const lossy = SVLogic.lossyScopes(scopes.entries);
@@ -509,6 +535,7 @@
         <label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" max="168" value="${esc(s.approval_hours)}"${dis}></label>
         <p class="note warn" style="margin:0">Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit „Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus dann nicht.</p>
         ${admin ? `<div><button class="btn small" type="button" id="s-4save">Vier-Augen-Einstellung speichern</button></div>` : ""}</div></section>
+      <section class="card" id="alert-card">${alertCardHtml(alertSet, admin)}</section><section class="card" id="rules-card">${rulesCardHtml(rules, admin)}</section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
         <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>`;
@@ -565,4 +592,5 @@
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });
     $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${r.entries} Einträge aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
+    bindRulesCard(rules); await bindAlertCard(alertSet);
   }

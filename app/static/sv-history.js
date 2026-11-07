@@ -17,8 +17,9 @@
   // The severities of compliance.RULES as the findings card names them; an unknown one reads as "prüfen"
   const FINDING_SEV = { crit: ["kritisch", "crit"], warn: ["prüfen", "warn"] };
 
-  // One page of url with params (SVLogic.query, the cursor last) into el: the first page (cursor undefined) replaces what el shows, a
-  // later one is appended to the rows before it; draw(rows) gives the HTML of all rows, "Mehr laden" follows while the server names a
+  // One page of url with params (SVLogic.query, the cursor last; or a function of the cursor that gives the query: the audit's
+  // SVLogic.auditParams) into el: the first page (cursor undefined) replaces what el shows, a later one is appended to the rows
+  // before it; draw(rows) gives the HTML of all rows, "Mehr laden" follows while the server names a
   // next page. An answer without rows draws none (the stubs of older tests answer every URL with a list). A load that a newer one of
   // el overtook (another search, a field emptied meanwhile: el._seq) draws nothing; a failed first page shows the server's text in el
   // (a 422 names what to ask), a failed later page is a toast and leaves the list. The focus inside el ("Mehr laden", the panel's
@@ -27,7 +28,7 @@
     if (!el) return null;
     const seq = el._seq = (el._seq || 0) + 1;
     let page;
-    try { page = await api("GET", url + SVLogic.query({ ...params, cursor })); } catch (e) {
+    try { page = await api("GET", url + (typeof params === "function" ? params(cursor) : SVLogic.query({ ...params, cursor }))); } catch (e) {
       if (el._seq === seq) { if (cursor == null) el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; else toast(e.message); }
       return null;
     }
@@ -40,6 +41,8 @@
     if (had) { el.setAttribute("tabindex", "-1"); el.focus(); }
     el.onclick = async e => {
       const m = e.target.closest("[data-more]"); if (!m) return;
+      // A focused button that is disabled drops its focus to body: the list takes it first (Task 10, browser check)
+      if (document.activeElement === m) { el.setAttribute("tabindex", "-1"); el.focus(); }
       m.disabled = true;
       if (!(await loadPaged(el, url, params, draw, next))) m.disabled = false;
     };
@@ -171,13 +174,21 @@
 
   // The overview's groups beyond issueGroups() (same shape: sev, t, sum, items with t, d, go), each only with content and each on its
   // own: a failed request or an answer without the expected fields gives no group (the stubs of older tests answer every URL with the
-  // netmap, a list or {}). "Sicherheitsbefunde": the open findings per switch (GET /api/compliance), crit when one is critical;
-  // "Änderungen außerhalb von SwitchView": the drift events of the last 7 days, at most 20 ("mehr als 20" when the server has more)
+  // netmap, a list or {}). For an Admin (the route is Admin) "Benachrichtigungen nicht zugestellt" first, crit: the messages that
+  // failed in the last 24 hours, of the newest 20 (Task 10), each with its title, way and error, "Öffnen" to the settings;
+  // "Sicherheitsbefunde": the open findings per switch (GET /api/compliance), crit when one is critical; "Änderungen außerhalb von
+  // SwitchView": the drift events of the last 7 days, at most 20 ("mehr als 20" when the server has more)
   async function extraIssueGroups() {
-    const since = new Date(Date.now() - 7 * 864e5).toISOString();
-    const [comp, drift] = await Promise.all([api("GET", "/api/compliance").catch(() => null),
-      api("GET", "/api/events" + SVLogic.query({ kind: "drift", since, limit: 20 })).catch(() => null)]);
+    const since = new Date(Date.now() - 7 * 864e5).toISOString(), day = new Date(Date.now() - 864e5).toISOString().replace("T", " ").slice(0, 19);
+    const [failed, comp, drift] = await Promise.all([roleOk("admin") ? api("GET", "/api/alerts/deliveries?status=failed&limit=20").catch(() => null) : null,
+      api("GET", "/api/compliance").catch(() => null), api("GET", "/api/events" + SVLogic.query({ kind: "drift", since, limit: 20 })).catch(() => null)]);
     const g = [];
+    try {
+      const all = failed && Array.isArray(failed.rows) ? failed.rows : [], rows = all.filter(r => String(r.created_at) >= day);
+      if (rows.length) g.push({ sev: "crit", t: "Benachrichtigungen nicht zugestellt",
+        sum: `${failed.next != null && rows.length === all.length ? "mehr als " : ""}${SVLogic.plural(rows.length, "Meldung", "Meldungen")} in den letzten 24 Stunden`,
+        items: rows.map(r => ({ t: r.title, d: `${ALERT_WAYS[r.channel] || r.channel}: ${r.error || "–"}`, go: () => go("settings") })) });
+    } catch (e) { /* no group */ }
     try {
       if (comp && comp.total > 0 && Array.isArray(comp.switches) && comp.switches.length)
         g.push({ sev: comp.crit > 0 ? "crit" : "warn", t: "Sicherheitsbefunde",
