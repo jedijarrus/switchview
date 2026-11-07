@@ -91,6 +91,7 @@ MATRIX_4A = {
 MATRIX_4B: dict = {
     ("GET", "/api/history"): "lesen",
     ("GET", "/api/history.csv"): "lesen",
+    ("GET", "/api/events"): "lesen",
 }
 MATRIX = MATRIX_4A | MATRIX_4B
 

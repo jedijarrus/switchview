@@ -162,6 +162,12 @@
 ]
 ],
 [
+"/api/events",
+[
+"GET"
+]
+],
+[
 "/api/history",
 [
 "GET"

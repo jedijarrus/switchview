@@ -379,8 +379,10 @@ async def backup_now(sid: int, user=Depends(auth.require(roles.LESEN))):
 
 @router.get("/api/switches/{sid}/backups")
 async def list_backups(sid: int, user=Depends(auth.require(roles.LESEN))):
+    """The switch's last 200 backups, newest first; outside (Phase 4b) 1 for one that differs from the one before without a SwitchView
+    change between them, 0 with one, null where it was not compared (monitor.backup_outside)."""
     async with db() as conn:
-        async with conn.execute("SELECT id, taken_at, sha, trigger, length(content) AS size FROM config_backups WHERE switch_id = ? "
+        async with conn.execute("SELECT id, taken_at, sha, trigger, length(content) AS size, outside FROM config_backups WHERE switch_id = ? "
                                 "ORDER BY id DESC LIMIT 200", (sid,)) as cur:
             return [dict(r) for r in await cur.fetchall()]
 

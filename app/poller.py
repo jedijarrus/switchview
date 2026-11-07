@@ -515,8 +515,11 @@ def utc_now() -> str:
 
 async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
     """Polls the switch and stores what it read; the result is {"ok": True, "ports": n, "macs": n} or {"ok": False, "error": text}.
-    With record (a single poll: "Jetzt abfragen", the poll after a change) a good poll records its sightings right away
-    (history.record), wrapped: a failure is logged and changes nothing of the result. poll_all records once for its whole round."""
+    Each poll keeps its switch's poll state (poll_failures, down_since, last_ok_at, unread_fields) and then tells its events
+    (monitor.poll_succeeded with the ports it replaced, or monitor.poll_failed), wrapped: a failure is logged ("Ereignisse <host>")
+    and changes nothing of the result. With record (a single poll: "Jetzt abfragen", the poll after a change) a good poll records
+    its sightings right away (history.record), wrapped as well. poll_all records once for its whole round."""
+    import monitor  # late: monitor → poller
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
         async with db() as conn:
@@ -536,6 +539,7 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
         walks = {**O, **poe_walks(drivers.driver_for(row), power=True), **(LLDP_LOC if by_iftype(driver_name) else {})}
         now = utc_now()
         failed: dict[str, Exception] = {}    # walks that failed and that _build uses for this driver, in walk order
+        broken: set[str] = set()    # walks that broke off after some rows (snmp.Rows.broken_off), kept ones or not (monitor)
         keeping = set(MAC_WALKS) | set(lldp_walks(driver_name))    # the walks with kept values: one that broke off counts as failed
         try:
             keys = list(walks)
@@ -553,11 +557,14 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
                     if k != "ifType" or by_iftype(driver_name):    # a ProCurve does not use ifType (select_ports)
                         failed[k] = r
                     r = []
-                elif k in keeping and getattr(r, "broken_off", None):
-                    # A lenient walk that ended with an exit code != 0 after some rows (snmp.Rows): its table is cut, and a row it did
-                    # not reach may be the one that protects an uplink. Failed, like one without rows; its rows join the kept ones.
-                    log.warning("%s: Walk %s abgebrochen: %s", host, k, r.broken_off)
-                    failed[k] = snmp.SnmpError(r.broken_off)
+                elif getattr(r, "broken_off", None):
+                    # A lenient walk that ended with an exit code != 0 after some rows (snmp.Rows): its table is cut. Of the walks with
+                    # kept values, a row it did not reach may be the one that protects an uplink: failed, like one without rows, its rows
+                    # join the kept ones. Any other one is taken as it came, but its table counts as unread for the drift (monitor).
+                    broken.add(k)
+                    if k in keeping:
+                        log.warning("%s: Walk %s abgebrochen: %s", host, k, r.broken_off)
+                        failed[k] = snmp.SnmpError(r.broken_off)
                 W[k] = r
             if by_iftype(driver_name) and _tbl(W["ifName"], O["ifName"]) and not _tbl(W["ifType"], O["ifType"]):
                 # Kein Fehler, aber keine einzige Zeile (leere oder verbotene View): ohne ifType kaemen keine Ports heraus, und das
@@ -567,10 +574,21 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
             data = await asyncio.to_thread(_build, W, driver_name)
         except Exception as e:  # noqa: BLE001
             async with db() as conn:
-                await conn.execute("UPDATE switches SET last_poll = ?, last_poll_ok = 0, last_error = ? WHERE id = ?", (now, str(e)[:300], switch_id))
+                await conn.execute("UPDATE switches SET last_poll = ?, last_poll_ok = 0, last_error = ?, poll_failures = poll_failures + 1 "
+                                   "WHERE id = ?", (now, str(e)[:300], switch_id))
                 await conn.commit()
             log.warning("Abfrage %s fehlgeschlagen: %s", host, e)
+            try:
+                await monitor.poll_failed(row, str(e), now)
+            except Exception:  # noqa: BLE001
+                log.exception("Ereignisse %s", host)
             return {"ok": False, "error": str(e)}
+
+        # Every walk this poll did not read completely: a failed one, and one that broke off, also outside `keeping` (its rows are taken
+        # as they came, but a cut VLAN or PVID table would read as a change). Its fields are stored with the poll (unread_fields), so
+        # the next poll does not compare against them either (monitor.unread_fields is pure)
+        incomplete = set(failed) | broken
+        unread = json.dumps(sorted(monitor.unread_fields(incomplete, data)))
 
         # A failed walk that carries the uplink protection keeps what the last poll stored, and what this poll read of the same table
         # joins it (an empty or cut table would leave a link only it shows unprotected; a fresh row may be the only one that shows a
@@ -584,12 +602,15 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
         async with db() as conn:
             kept: dict[str, bool] = {}    # KEPT_NOTES key -> whether the last poll had any of it (partial_note)
             last_lldp: dict[str, list] = {}    # port name -> LLDP entries as the last poll stored them
+            # The ports as the last good poll stored them, by name: what this one replaces (monitor.poll_succeeded compares them)
+            async with conn.execute("SELECT name, alias, admin, pvid, untagged, tagged, trunk, lldp FROM ports WHERE switch_id = ?",
+                                    (switch_id,)) as cur:
+                old = {r["name"]: r for r in await cur.fetchall()}
             if keep_macs:
                 async with conn.execute("SELECT 1 FROM macs WHERE switch_id = ? LIMIT 1", (switch_id,)) as cur:
                     kept["macs"] = await cur.fetchone() is not None
             if keep_lldp:
-                async with conn.execute("SELECT name, lldp FROM ports WHERE switch_id = ?", (switch_id,)) as cur:
-                    last_lldp = {r["name"]: json.loads(r["lldp"] or "[]") for r in await cur.fetchall()}
+                last_lldp = {name: json.loads(r["lldp"] or "[]") for name, r in old.items()}
                 kept["lldp"] = any(last_lldp.values())
             if keep_base:
                 kept["baseMac"] = bool(row["base_mac"])    # read under this switch's poll lock: no other poll wrote it since
@@ -598,8 +619,9 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
 
             await conn.execute(
                 "UPDATE switches SET sys_name=?, sys_descr=?, model=?, firmware=?, base_mac=?, uptime=?, last_poll=?, last_poll_ok=1, "
-                "last_error=? WHERE id=?",
-                (data["sysName"], data["sysDescr"], data["model"], data["firmware"], base_mac, data["uptime"], now, note, switch_id),
+                "last_error=?, poll_failures=0, down_since=NULL, last_ok_at=?, unread_fields=? WHERE id=?",
+                (data["sysName"], data["sysDescr"], data["model"], data["firmware"], base_mac, data["uptime"], now, note, now, unread,
+                 switch_id),
             )
             await conn.execute("DELETE FROM ports WHERE switch_id = ?", (switch_id,))
             await conn.execute("DELETE FROM vlans WHERE switch_id = ?", (switch_id,))
@@ -639,6 +661,10 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
             )
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
             await conn.commit()
+        try:
+            await monitor.poll_succeeded(row, old, data, incomplete, now)
+        except Exception:  # noqa: BLE001
+            log.exception("Ereignisse %s", host)
         if record:
             import history  # late: history → topology → changes → poller
             try:

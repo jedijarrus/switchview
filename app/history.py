@@ -38,10 +38,26 @@ from db import db, get_setting
 log = logging.getLogger("switchview.history")
 
 TIME = "%Y-%m-%d %H:%M:%S"    # the times of the tables, in UTC (macs.last_seen, switches.last_poll, poller.utc_now)
-# The tables purge keeps for HISTORY_DAYS: (table, time column, extra condition of a row that may go, "" for none); Tasks 4-6 append
-RETAINED: list[tuple[str, str, str]] = [("sightings", "last_seen", "")]
+# The tables purge keeps for HISTORY_DAYS: (table, time column, extra condition of a row that may go, "" for none); Tasks 5-6 append
+RETAINED: list[tuple[str, str, str]] = [("sightings", "last_seen", ""), ("events", "ts", "")]
 PURGE_BATCH = 5000    # rows per DELETE of purge, each batch committed on its own: a record or a poll waits for one batch, not for all
 IN_CHUNK = 500        # MACs per IN list of record
+
+
+BAD_TIME = "Zeitpunkt ungültig"
+
+
+def to_utc(value: str) -> str:
+    """A point in time as ISO 8601 writes it - with "Z", with an offset, or without either (then it is UTC), a date alone being its
+    midnight, fractions of a second dropped - as the tables store times: YYYY-MM-DD HH:MM:SS in UTC. ValueError(BAD_TIME) for
+    anything else, also for a time whose UTC falls outside the years 1-9999. The `since` of GET /api/events (Task 4) and of the
+    audit (Task 8)."""
+    try:
+        t = datetime.fromisoformat(value.strip())
+        t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        raise ValueError(BAD_TIME) from None
+    return t.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
 
 
 def back_after(poll_minutes: int) -> int:

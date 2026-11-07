@@ -23,6 +23,7 @@ from netmiko import ConnectHandler, NetmikoTimeoutException
 
 import cfgparse
 import drivers
+import monitor
 from crypto import decrypt, keyed_digest, unreadable
 from db import db, execute_sync, query_sync
 
@@ -251,7 +252,9 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
     then nothing changed. With the same sha and another raw_mac only secrets changed, which makes a new row, except when reading for
     a preview (trigger "lesen", up to every 600 s): that compares the masked text only, since a firmware that salts its encrypted
     secrets anew on every read would otherwise store a backup per preview. A last row from before raw_mac (NULL) with the same sha
-    gets this mark filled in, without a new row: the first backup after the update adds none."""
+    gets this mark filled in, without a new row: the first backup after the update adds none.
+    A new row is compared with the one before it (monitor.backup_outside, Phase 4b): on this connection, before the commit, wrapped
+    in a savepoint - a failure there is logged and leaves outside NULL, the backup stays."""
     sha, mark = backup_sha(content), keyed_digest("backup", content)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     async with db() as conn:
@@ -265,8 +268,19 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
                 return False
             if last["raw_mac"] == mark or trigger == "lesen":
                 return False
-        await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger, raw_mac) VALUES (?,?,?,?,?,?)",
-                           (switch_id, now, sha, cfgparse.mask_secrets(content), trigger, mark))
+        cur = await conn.execute("INSERT INTO config_backups(switch_id, taken_at, sha, content, trigger, raw_mac) VALUES (?,?,?,?,?,?)",
+                                 (switch_id, now, sha, cfgparse.mask_secrets(content), trigger, mark))
+        try:
+            await conn.execute("SAVEPOINT backup_outside")
+            try:
+                await monitor.backup_outside(conn, switch_id, cur.lastrowid, trigger, now)
+            except Exception:
+                await conn.execute("ROLLBACK TO backup_outside")
+                raise
+            finally:
+                await conn.execute("RELEASE backup_outside")
+        except Exception:  # noqa: BLE001
+            log.exception("Ereignisse der Sicherung von Switch %s", switch_id)
         await conn.commit()
     return True
 

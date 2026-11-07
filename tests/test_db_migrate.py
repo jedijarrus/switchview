@@ -36,6 +36,10 @@ NEW_COLUMNS = {
         "snmp_rw_priv_pass": ("TEXT", 0, None),
         "ssh_host_key": ("TEXT", 0, None),
         "ssh_host_key_at": ("TEXT", 0, None),
+        "poll_failures": ("INTEGER", 1, "0"),    # Phase 4b appends the poll state (Task 4)
+        "down_since": ("TEXT", 0, None),
+        "last_ok_at": ("TEXT", 0, None),
+        "unread_fields": ("TEXT", 0, None),
     },
     "ports": {
         "poe_admin": ("INTEGER", 0, None),
@@ -168,8 +172,9 @@ async def test_migrate_keeps_legacy_rows_and_reads_them_as_procurve_without_snmp
     switch = after["switches"]
     assert switch["driver"] == "procurve"
     assert switch["snmp_write"] == 0
+    assert switch["poll_failures"] == 0    # Phase 4b: no failed poll in a row yet
     # Rows from before the feature have no RW identity, no PoE data and no mechanism (they were all SSH changes).
-    assert [c for c in NEW_COLUMNS["switches"] if c not in ("driver", "snmp_write") and switch[c] is not None] == []
+    assert [c for c in NEW_COLUMNS["switches"] if c not in ("driver", "snmp_write", "poll_failures") and switch[c] is not None] == []
     assert [c for c in NEW_COLUMNS["ports"] if after["ports"][c] is not None] == []
     assert after["changes"]["mechanism"] is None
 
@@ -357,11 +362,13 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
         assert {t: await _first_row_plain(conn, t) for t in before} == rows
 
 
-# The tables and the columns Phase 4b adds (Tasks 2-8 extend both): Task 2 the sightings. A database as Phase 4a left it has none of
-# them; init_db creates each table empty, with the indexes db.SCHEMA gives it, and adds each column, which a row of before reads as
-# the column's default.
-PHASE4B_TABLES = {"sightings"}
-PHASE4B_COLUMNS: set[tuple[str, str]] = set()
+# The tables and the columns Phase 4b adds (Tasks 2-8 extend both): Task 2 the sightings, Task 4 the events and the switches' poll
+# state (failures in a row, unreachable since, last good poll, the fields it could not read) and whether a backup differs from the
+# one before without a SwitchView change. A database as Phase 4a left it has none of them; init_db creates each table empty, with
+# the indexes db.SCHEMA gives it, and adds each column, which a row of before reads as the column's default.
+PHASE4B_TABLES = {"sightings", "events"}
+PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
+                                         ("switches", "unread_fields"), ("config_backups", "outside")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:

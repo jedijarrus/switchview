@@ -184,6 +184,18 @@ CREATE INDEX IF NOT EXISTS idx_sightings_mac ON sightings(mac, last_seen);
 CREATE INDEX IF NOT EXISTS idx_sightings_ip ON sightings(ip, last_seen) WHERE ip <> '';
 CREATE INDEX IF NOT EXISTS idx_sightings_port ON sightings(switch_id, port, last_seen);
 CREATE INDEX IF NOT EXISTS idx_sightings_seen ON sightings(last_seen);
+-- Phase 4b, Task 4: discrete events (app/monitor.py), one row each: a switch that stops answering (switch_down, after
+-- monitor.UNREACHABLE_AFTER failed polls in a row) or answers again (switch_up), an LLDP neighbour that appears, changes or vanishes
+-- at a port (lldp_new, lldp_changed, lldp_gone), a port changed outside SwitchView at a switch it does not back up (drift_port) and a
+-- backup that differs from the one before without a SwitchView change between them (drift_config). ts is when it was seen (the
+-- poll's time, the backup's), port '' for an event of the whole switch, text the German sentence, detail JSON (monitor.KINDS says
+-- what each kind carries). Written by poller.poll_switch (through monitor.poll_succeeded / poll_failed) and sshcli.store_backup
+-- (monitor.backup_outside); read by GET /api/events. Deleting the switch deletes its events; purged after HISTORY_DAYS by ts.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, switch_id INTEGER REFERENCES switches(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, port TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS idx_events_sw ON events(switch_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,
@@ -240,6 +252,20 @@ ADDED_COLUMNS = (
     ("audit", "role", "TEXT"),
     ("changes", "role", "TEXT"),
     ("changes", "approved_by", "TEXT"),
+    # Phase 4b, Task 4, written by poller.poll_switch: the failed polls in a row (+1 with each failed poll, 0 with a good one); since
+    # when the switch counts as unreachable (set by monitor.poll_failed at the UNREACHABLE_AFTER-th failed poll in a row, NULL again
+    # with the next good poll; NULL: reachable); the time of the last good poll (NULL: none since the update, monitor then takes
+    # last_poll if that one was good); and the fields of the port configuration (monitor.DRIFT_FIELDS keys, a JSON list) the last
+    # good poll could not read completely, which the next one does not compare (NULL: none known, a poll from before the update).
+    # Existing rows have 0 and NULL.
+    ("switches", "poll_failures", "INTEGER NOT NULL DEFAULT 0"),
+    ("switches", "down_since", "TEXT"),
+    ("switches", "last_ok_at", "TEXT"),
+    ("switches", "unread_fields", "TEXT"),
+    # Phase 4b, Task 4, written by sshcli.store_backup (monitor.backup_outside): 1 when the backup differs from the one before it and
+    # no SwitchView change that may have sent something ran between the two, 0 when one did. NULL: not compared - the first backup
+    # of a switch, a backup from before the update, or one whose check failed.
+    ("config_backups", "outside", "INTEGER"),
 )
 
 
