@@ -23,12 +23,10 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import cfgparse
 import changes
-import config
 import crypto
 import db
 import main
@@ -36,7 +34,6 @@ import snmp
 import sshcli
 from sshfix import Sessions
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 NO_CLI = "Treiber cisco hat keine SSH-CLI"
 UNUSED = {"ok": None, "unused": True, "detail": "nicht verwendet (Treiber ohne CLI)"}
 PC_HOST, CISCO_HOST = "203.0.113.21", "203.0.113.31"
@@ -46,8 +43,7 @@ RUNNING_CONFIG = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagg
 @pytest.fixture
 def world(tmp_path, monkeypatch) -> Sessions:
     """A fresh database under tmp_path (the app's own init_db); ConnectHandler recorded; fresh locks and R27 marks; re-polls recorded."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    asyncio.run(db.init_db())
+    apifix.fresh_db(tmp_path, monkeypatch)
     sessions = Sessions(RUNNING_CONFIG)
     monkeypatch.setattr(sshcli, "ConnectHandler", sessions)
     monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
@@ -56,19 +52,11 @@ def world(tmp_path, monkeypatch) -> Sessions:
     return sessions
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(world, monkeypatch):
-    """A TestClient on main.app (created without `with`: no lifespan, no scheduler), signed in as USER."""
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (created without `with`: no lifespan, no scheduler), signed in as apifix.USER."""
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def query(sql: str, args: tuple = ()) -> list[tuple]:

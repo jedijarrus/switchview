@@ -16,13 +16,11 @@ import logging
 import re
 
 import pytest
-from fastapi.testclient import TestClient
 from netmiko.exceptions import ReadTimeout
 
-import auth
+import apifix
 import cfgparse
 import changes
-import config
 import crypto
 import db
 import main
@@ -33,7 +31,6 @@ from cfgparse import parse_config
 from dbfix import connect, insert_switch, query, raising_async_fn
 from sshfix import SshEnv, procurve
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 SWITCH_SECRETS = {"ssh_pass": "ssh-s3cret", "snmp_community": "ro-s3cret", "snmp_auth_pass": "ro-auth-s3cret",
                   "snmp_priv_pass": "ro-priv-s3cret", "snmp_rw_community": "rw-s3cret", "snmp_rw_auth_pass": "rw-auth-s3cret",
                   "snmp_rw_priv_pass": "rw-priv-s3cret"}
@@ -44,21 +41,12 @@ def add_switch(**cols) -> int:
     return insert_switch(**procurve(**cols))
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    """A TestClient on main.app (no lifespan, scheduler booby-trapped) against a fresh database, signed in as USER."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    asyncio.run(db.init_db())
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (no lifespan, scheduler booby-trapped) against a fresh database, signed in as apifix.USER."""
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def create(api) -> int:

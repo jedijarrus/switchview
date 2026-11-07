@@ -24,13 +24,10 @@ import json
 import httpx
 import pytest
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import cfgparse
 import changes
-import config
-import db
 import dbfix
 import main
 import snmp
@@ -38,7 +35,7 @@ import snmpwrite
 import sshcli
 import sshfix
 from loginfix import CSRF
-from test_secret_destination import USER, create
+from test_secret_destination import create
 
 DISABLED_RUN = "Switch ist deaktiviert: nichts gesendet"
 PLAN = {"shown": [], "desired": {}, "before": {}, "mechanism": "ssh"}
@@ -48,22 +45,13 @@ PORT_INV = {"ports": {p: {"n": p, "tr": "", "l": [], "o": False} for p in ("1", 
 PORT2_OFF = sshfix.RUNNING + "interface 2\n   disable\n   exit\n"    # ssh_env's ProCurve once it took "interface 2 disable"
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    """A TestClient on main.app signed in as USER, against a fresh database under tmp_path set up by the app's own init_db (as in
+    """A TestClient on main.app signed in as apifix.USER, against a fresh database under tmp_path set up by the app's own init_db (as in
     tests/test_secret_destination.py)."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    asyncio.run(db.init_db())
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers=CSRF)
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 @pytest.fixture

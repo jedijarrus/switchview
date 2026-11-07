@@ -371,4 +371,5 @@ details.adv[open] summary { margin-bottom: 4px; }
 /* Reasons in the page, not only in a title: text for screen readers only, a note under a cell's value, a note beside a field */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .cellnote { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; }
-.field > .note { margin: 0; }
+/* The note beside a field is a span: it takes the normal weight back from .field > span (the label's) */
+.field > .note { margin: 0; font-weight: 400; }

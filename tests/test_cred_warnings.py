@@ -17,9 +17,8 @@ import sqlite3
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import cfgparse
 import changes
 import config
@@ -30,10 +29,10 @@ import main
 import names
 import pf
 import poller
+import radiusprep
 import snmp
 import sshcli
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 enc = crypto.encrypt
 
 
@@ -62,21 +61,12 @@ def row_of(cols: dict) -> dict:
         conn.close()
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    """A TestClient on main.app (no lifespan, scheduler booby-trapped) against a fresh database, signed in as USER."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    asyncio.run(db.init_db())
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (no lifespan, scheduler booby-trapped) against a fresh database, signed in as apifix.USER."""
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def body(**fields) -> dict:
@@ -240,6 +230,8 @@ def test_the_settings_name_their_unreadable_secrets(api):
 
 async def test_destination_and_secret_come_from_one_read(api, monkeypatch):
     reads = record_read_settings(monkeypatch)
+    monkeypatch.setattr(db, "get_setting", dbfix.raising_async_fn(AssertionError("get_setting beside the one read")))
+    assert not any(hasattr(m, "get_setting") for m in (pf, names, changes, radiusprep))    # none binds it by name: the trap covers them
     await pf.config()
     assert await names.opnsense_arp() == []    # without a stored OPNsense address: no HTTP
     await changes.radius_settings()
@@ -274,4 +266,5 @@ def test_empty_entra_allowlists_warn_at_start():
     assert "ENTRA_ALLOWED_ROLES und ENTRA_ALLOWED_GROUPS sind leer: jeder Benutzer des Tenants kann sich per SSO anmelden und alles ändern." in (
         main.check_startup_config(s))
     assert main.check_startup_config(dataclasses.replace(s, entra_allowed_roles=["SwitchView.Admin"])) == []
+    assert main.check_startup_config(dataclasses.replace(s, entra_allowed_groups=["g-1"])) == []
     assert main.check_startup_config(dataclasses.replace(s, entra_tenant_id="")) == []

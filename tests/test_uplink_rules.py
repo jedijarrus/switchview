@@ -18,7 +18,7 @@ fake snmp.walk (tests/netfix.py, the `net` fixture of tests/conftest.py); no net
 import changes
 import main
 from netfix import add, fdb, lldp
-from switchfix import W_SAMPLE, edit_walks
+from switchfix import W_CATALYST, W_SAMPLE, edit_walks
 
 MAC_A, MAC_B = "00:1a:2b:00:00:0a", "00:1a:2b:00:00:0b"    # base MACs, as A_BASE / B_BASE in tests/test_lldp_trust.py
 EXPERT = "Uplink/Trunk: nur im Expertenmodus"
@@ -100,6 +100,7 @@ async def test_every_port_with_a_neighbours_base_mac_is_an_uplink(net):         
     a = await add(net, "A", "10.0.0.1", "procurve", W_SAMPLE, fdb("1", MAC_B), fdb("2", MAC_B, vlan="20"), base_mac=MAC_A)
     await add(net, "B", "10.0.0.2", "procurve", W_SAMPLE, fdb("2", MAC_A), base_mac=MAC_B)
     assert {"2", "3"} <= (await changes.inventory(a))["uplinks"]
+    assert (await plan_off(a, "3"))["blocked"] == [{"port": "3", "reason": EXPERT}]    # Logik Phase 3, Später: on to the plan
 
 
 async def test_the_map_flags_base_mac_ports(net):                                # the network of the first test: A learns MAC_B on port 2
@@ -108,6 +109,13 @@ async def test_the_map_flags_base_mac_ports(net):                               
     m = await main.build_map()
     assert port(m, "A", "2")["bm"] is True and port(m, "A", "1")["bm"] is False
     assert port(m, "B", "3")["bm"] is True and port(m, "A", "3")["bm"] is False
+
+
+async def test_a_base_mac_port_is_an_uplink_on_a_driver_that_picks_ports_by_iftype(net):   # Logik Phase 3, Später
+    a = await add(net, "A", "10.0.0.1", "cisco", W_CATALYST, fdb("1", MAC_B), base_mac=MAC_A)   # bridge port 1 = Gi1/0/1
+    await add(net, "B", "10.0.0.2", "procurve", W_SAMPLE, base_mac=MAC_B)
+    m = await main.build_map()
+    assert port(m, "A", "Gi1/0/1")["bm"] is True and "Gi1/0/1" in (await changes.inventory(a))["uplinks"]
 
 
 async def test_a_base_mac_on_a_trunk_flags_the_trunk_and_its_members(net):

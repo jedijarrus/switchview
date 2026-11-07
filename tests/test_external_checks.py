@@ -10,21 +10,19 @@
   another MAC than its path is a 422.
 - Sessions (Review §5): expired sessions are deleted hourly by the scheduler and once at the start, not only at a login.
 
-No network: pf's and names' HTTP clients are fakes that answer per (method, path), the reverse DNS lookup of names is replaced, the
-scheduler never starts. Each test gets its own database under tmp_path, set up by the app's own init_db. Expected messages are written
-out by hand.
+No network: pf's and names' HTTP clients are fakes (apifix.fake_httpx) that answer per (method, path), the reverse DNS lookup of names is
+replaced, the scheduler never starts. Each test gets its own database under tmp_path, set up by the app's own init_db. Expected
+messages are written out by hand.
 """
 import asyncio
 import logging
 import secrets
-import types
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
 
+import apifix
 import auth
-import config
 import crypto
 import db
 import dbfix
@@ -32,91 +30,32 @@ import main
 import names
 import pf
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 MAC = "aa:bb:cc:dd:ee:ff"
 # What the fake PacketFence answers besides its status: a login token and the one role "default"; every other request an empty object
 PF_ANSWERS = {("POST", "/login"): {"token": "t"}, ("GET", "/node_categories"): {"items": [{"category_id": 1, "name": "default"}]}}
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def database(tmp_path, monkeypatch):
     """A fresh database under tmp_path, set up by the app's own init_db."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    asyncio.run(db.init_db())
+    apifix.fresh_db(tmp_path, monkeypatch)
 
 
 @pytest.fixture
 def api(database, monkeypatch):
-    """A TestClient on main.app (no lifespan, scheduler booby-trapped) on database, signed in as USER."""
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (no lifespan, scheduler booby-trapped) on database, signed in as apifix.USER."""
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
-class _Response:
-    """What pf and names read of an httpx response."""
-
-    def __init__(self, status_code: int, data):
-        self.status_code, self._data, self.text = status_code, data, f"answer {status_code}"
-
-    def json(self):
-        return self._data
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-
-class _Client:
-    """httpx.AsyncClient as pf and names use it (`async with`, get / post / patch): records (method, path) of every request in
-    remote.calls and answers with remote.status.get((method, path), 200) and remote.reply(method, path)."""
-
-    def __init__(self, remote, **kwargs):
-        self.remote, self.headers = remote, {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def get(self, url, **kwargs):
-        return self._send("GET", url)
-
-    async def post(self, url, **kwargs):
-        return self._send("POST", url)
-
-    async def patch(self, url, **kwargs):
-        return self._send("PATCH", url)
-
-    def _send(self, method: str, path: str) -> _Response:
-        self.remote.calls.append((method, path))
-        return _Response(self.remote.status.get((method, path), 200), self.remote.reply(method, path))
-
-
-class Remote:
-    """A fake system behind _Client: the status per (method, path) (200 unless set) and the requests it saw."""
-
-    def __init__(self):
-        self.status: dict[tuple[str, str], int] = {}
-        self.calls: list[tuple[str, str]] = []
-
-
-class PacketFence(Remote):
+class PacketFence(apifix.Remote):
     """The fake PacketFence: answers with PF_ANSWERS, else an empty object."""
 
     def reply(self, method: str, path: str):
         return PF_ANSWERS.get((method, path), {})
 
 
-class OPNsense(Remote):
+class OPNsense(apifix.Remote):
     """The fake OPNsense: answers every request with answer (the ARP table, an empty list unless set)."""
 
     def __init__(self):
@@ -130,23 +69,23 @@ class OPNsense(Remote):
 @pytest.fixture
 def pfenv(database, monkeypatch) -> PacketFence:
     """PacketFence set up (address, user, encrypted password) and the released device MAC with role "default"; pf.httpx replaced by
-    a _Client on a PacketFence."""
+    apifix.fake_httpx on a PacketFence."""
     for k, v in {"pf_url": "https://pf.example", "pf_user": "svc", "pf_pass": crypto.encrypt("pf-s3cret")}.items():
         asyncio.run(db.set_setting(k, v))
     dbfix.query("INSERT INTO devices(mac, name, kind, role, allowed) VALUES (?, 'Drucker', 'drucker', 'default', 1)", (MAC,))
     remote = PacketFence()
-    monkeypatch.setattr(pf, "httpx", types.SimpleNamespace(AsyncClient=lambda **kw: _Client(remote, **kw)))
+    monkeypatch.setattr(pf, "httpx", apifix.fake_httpx(remote))
     return remote
 
 
 @pytest.fixture
 def arp(database, monkeypatch) -> OPNsense:
-    """OPNsense set up (address, encrypted key and secret); names.httpx replaced by a _Client on an OPNsense, and the reverse DNS
-    lookup by one that finds no name (no network)."""
+    """OPNsense set up (address, encrypted key and secret); names.httpx replaced by apifix.fake_httpx on an OPNsense, and the reverse
+    DNS lookup by one that finds no name (no network)."""
     for k, v in {"opnsense_url": "https://fw.example", "opnsense_key": crypto.encrypt("k"), "opnsense_secret": crypto.encrypt("s")}.items():
         asyncio.run(db.set_setting(k, v))
     remote = OPNsense()
-    monkeypatch.setattr(names, "httpx", types.SimpleNamespace(AsyncClient=lambda **kw: _Client(remote, **kw)))
+    monkeypatch.setattr(names, "httpx", apifix.fake_httpx(remote))
 
     async def no_name(ip):
         return ""

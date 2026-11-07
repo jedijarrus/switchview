@@ -22,16 +22,14 @@ import sqlite3
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import config
 import crypto
 import db
 import main
 import poller
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 # Written out by hand, not taken from main: every secret column of switches, the read ones and the RW ones.
 SECRET_COLUMNS = ("snmp_community", "snmp_auth_pass", "snmp_priv_pass", "ssh_pass", "snmp_rw_community", "snmp_rw_auth_pass",
                   "snmp_rw_priv_pass")
@@ -56,20 +54,12 @@ ALL_SECRETS = {"snmp_community": "ro-s3cret", "snmp_auth_pass": "ro-auth-s3cret"
                "snmp_rw_priv_pass": "rw-priv-s3cret"}
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """A TestClient on main.app whose db() opens tmp_path/switchview.db (not created yet, see the api fixture)."""
     monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 @pytest.fixture

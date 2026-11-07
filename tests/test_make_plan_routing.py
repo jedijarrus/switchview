@@ -30,12 +30,11 @@ import json
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
 
+import apifix
 import auth
 import cfgparse
 import changes
-import config
 import crypto
 import db
 import drivers
@@ -46,8 +45,6 @@ import snmpwrite
 import sshcli
 from drivers import Driver
 from switchfix import CATALYST_VMVLAN, POE_WALKS, VMVLAN, W_CATALYST, W_POE, W_SAMPLE, agent, edit_walks
-
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 
 # Messages, written out by hand (poller's write-identity reasons included).
 WRITE_DISABLED = "SNMP-Schreiben ist für diesen Switch nicht aktiviert"
@@ -186,10 +183,6 @@ class FakeSwitch:
         return [c[0] for c in self.calls]
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 def _no_ssh(*args, **kwargs):
     raise AssertionError("no real SSH in this test")
 
@@ -234,15 +227,10 @@ def fake(monkeypatch) -> FakeSwitch:
 
 @pytest.fixture
 def api(tmp_path, monkeypatch, fake):
-    """A TestClient on main.app against a fresh database under tmp_path (the app's own init_db), signed in as USER."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    asyncio.run(db.init_db())
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app against a fresh database under tmp_path (the app's own init_db), signed in as apifix.USER."""
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def switch(api, driver: str = "procurve", *, ssh: bool = True, snmp_write: bool = True, creds: dict = RW, **fields) -> int:

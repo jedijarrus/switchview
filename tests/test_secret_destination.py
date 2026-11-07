@@ -12,19 +12,15 @@ snmp.get are recorders. The F2 tests show that nothing reached them; the positiv
 do see what goes out (the SSH recorder counts the attempt; its session offers no host key, so sshcli._open gives up right after it).
 """
 import asyncio
-import functools
 import sqlite3
-import types
 from collections import defaultdict
 from contextlib import closing
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import changes
-import config
 import crypto
 import db
 import main
@@ -35,27 +31,17 @@ import sshcli
 from cfgparse import parse_config
 from loginfix import CSRF
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 ALL_SECRETS = {"snmp_community": "ro-s3cret", "snmp_auth_pass": "ro-auth-s3cret", "snmp_priv_pass": "ro-priv-s3cret",
                "ssh_pass": "ssh-s3cret", "snmp_rw_community": "rw-s3cret", "snmp_rw_auth_pass": "rw-auth-s3cret",
                "snmp_rw_priv_pass": "rw-priv-s3cret"}
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    """A TestClient on main.app signed in as USER, against a fresh database under tmp_path set up by the app's own init_db."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    asyncio.run(db.init_db())
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers=CSRF)
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app signed in as apifix.USER, against a fresh database under tmp_path set up by the app's own init_db."""
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 @pytest.fixture
@@ -66,53 +52,22 @@ async def api_async(api):
         yield client
 
 
-class _Response:
-    """What pf and names read of an httpx response."""
-    status_code = 200
-    text = ""
+class Outbound(apifix.Remote):
+    """PacketFence and OPNsense behind one recorder: the OPNsense (a URL with /api/diagnostics/) answers an empty ARP table,
+    PacketFence a login with a token and a list with no items."""
 
-    def __init__(self, data):
-        self._data = data
-
-    def json(self):
-        return self._data
-
-    def raise_for_status(self):
-        return None
-
-
-class _Client:
-    """httpx.AsyncClient as pf and names use it (`async with`, get / post): records the URL of every request, base_url included, and
-    answers 200 with `answer`."""
-
-    def __init__(self, urls: list[str], answer, base_url: str = "", **kwargs):
-        self.urls, self.answer, self.base_url, self.headers = urls, answer, base_url, {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def get(self, url, **kwargs):
-        return self._send(url)
-
-    async def post(self, url, **kwargs):
-        return self._send(url)
-
-    def _send(self, url) -> _Response:
-        self.urls.append(self.base_url + url)
-        return _Response(self.answer)
+    def reply(self, method: str, url: str):
+        return [] if "/api/diagnostics/" in url else {"token": "t", "items": []}
 
 
 @pytest.fixture
 def outbound(monkeypatch) -> list[str]:
-    """Every URL PacketFence's and OPNsense's code sends a request to. pf's client answers a login with a token and a list with no
-    items, names' client an empty ARP table. Patched in the two modules only: the httpx of api_async stays real."""
-    urls: list[str] = []
-    monkeypatch.setattr(pf, "httpx", types.SimpleNamespace(AsyncClient=functools.partial(_Client, urls, {"token": "t", "items": []})))
-    monkeypatch.setattr(names_mod, "httpx", types.SimpleNamespace(AsyncClient=functools.partial(_Client, urls, [])))
-    return urls
+    """Every URL PacketFence's and OPNsense's code sends a request to, base_url included. Patched in the two modules only: the httpx
+    of api_async stays real."""
+    remote = Outbound()
+    monkeypatch.setattr(pf, "httpx", apifix.fake_httpx(remote))
+    monkeypatch.setattr(names_mod, "httpx", apifix.fake_httpx(remote))
+    return remote.urls
 
 
 class _Session:

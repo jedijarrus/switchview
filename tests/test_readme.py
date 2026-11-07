@@ -2,7 +2,8 @@
 writes (the per-switch snmp_write switch, the RW credentials, PoE), what stays SSH-only, and the pointer to the German list of known
 limitations and device checks. A driver added to drivers.DRIVERS without a README entry fails here. Phase 2: the README names the
 security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
-with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections."""
+with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections.
+Phase 4a: likewise the roles note, with its rights per route."""
 import pathlib
 import re
 
@@ -103,3 +104,12 @@ def test_the_ux_note_has_a_row_per_decision_of_the_plan():
 def test_ruff_is_pinned_and_no_file_is_exempt():
     """A new ruff release brings new rules and would break CI without a code change; every file is held to the full rule set."""
     assert "ruff==0.17.3" in (ROOT / "requirements-dev.txt").read_text() and "per-file-ignores" not in (ROOT / "ruff.toml").read_text()
+
+
+def test_the_roles_note_is_linked_and_has_its_sections():
+    """Phase 4a: the README links the German roles note, which has the sections of the earlier notes and the rights per route."""
+    assert "Roles and approvals notes (German): [docs/rollen-phase4a.md](docs/rollen-phase4a.md)" in README
+    note = (ROOT / "docs" / "rollen-phase4a.md").read_text(encoding="utf-8")
+    for heading in ("## Was gebaut wurde", "## Rechte je Route", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz",
+                    "## Was beim Update zu tun ist", "## Später", "## Entscheidungen"):
+        assert f"\n{heading}\n" in note, heading

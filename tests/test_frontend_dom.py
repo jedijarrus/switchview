@@ -734,7 +734,8 @@ def test_vlan_chip_buttons_keep_the_markup_of_the_port_form():
 
 @pytest.mark.parametrize("error, want", [("Abgebrochen (Prozess beendet), nichts gesendet", "<b>Abgebrochen:</b> Prozess beendet, nichts gesendet"),
                                          ("Abgebrochen durch Neustart von SwitchView, nichts gesendet",
-                                          "<b>Abgebrochen:</b> durch Neustart von SwitchView, nichts gesendet")])
+                                          "<b>Abgebrochen:</b> durch Neustart von SwitchView, nichts gesendet"),
+                                         ("Abgebrochen (Prozess beendet", "<b>Abgebrochen:</b> (Prozess beendet")])    # Phase 5 review, Minor 8
 def test_an_aborted_change_reads_once_as_aborted(error, want):
     assert want in in_dom(f'resultHead({{status: "aborted", error: {json.dumps(error)}, steps: []}})')
 
@@ -863,3 +864,73 @@ def test_a_blocked_preview_does_not_say_there_is_nothing_to_change(plan, blocked
     assert ("<b>Nicht möglich:</b>" in html) is blocked and ("Es gibt nichts zu ändern" in html) is nothing
     assert in_dom(PREVIEW.replace("return [calls, $(\"#m-body\").innerHTML];", "return $(\"#m-foot\").children.map(b => b.textContent);")
                   % json.dumps(plan)) == ["Abbrechen"]
+
+
+# Phase 4a Task 1: the test gaps of Phase 5 ("Später → Phase 4" in docs/ux-phase5.md) and the open Minor findings of its final
+# review. The wiring pins hold behaviour the Phase 5 browser check saw (each dies under its mutation, see the Phase 4a note);
+# runProgress writing into a newer dialog and the port panel naming a LAG "Port Po1" were real bugs.
+def test_a_repeated_message_restarts_its_timer():                                      # UX Phase 5, Später
+    assert in_dom('(async () => { toast("a", 80); await new Promise(r => setTimeout(r, 50)); toast("a", 200); '
+                  'await new Promise(r => setTimeout(r, 60)); return $("#toasts").children.length; })()') == 1
+
+
+def test_an_arrow_in_the_pause_runs_the_search_once():                                 # startSearch's clearTimeout, sync preventDefault
+    js = ('(async () => { ' + SEARCH + 'const q = $("#q"); q.value = "vk"; q.fire("input"); const e = q.fire("keydown", {key: "ArrowDown"}); '
+          'const sync = e.defaultPrevented; await new Promise(r => setTimeout(r, 400)); return [sync, q.getAttribute("aria-activedescendant")]; })()')
+    assert in_dom(js) == [True, "hit-0"]
+
+
+POE_PREVIEW = ('(async () => { api = async () => (%s); await previewChange({id: 1, k: "SW", caps: %s}, '
+               '{mode: "ports", ports: ["2"], change: {poe: true}}); return $("#m-body").innerHTML; })()')
+
+
+@pytest.mark.parametrize("caps, said", [('["cli"]', True), ("[]", False)])
+def test_the_poe_note_names_ssh_only_on_a_driver_with_cli(caps, said):
+    assert ("PoE schaltet SwitchView immer per SNMP, auch wenn SSH geht." in in_dom(POE_PREVIEW % (json.dumps(SNMP_PLAN), caps))) == said
+
+
+def body_of(script: str, fn: str) -> str:
+    text = (STATIC / script).read_text(encoding="utf-8")
+    start = text.index(f"function {fn}(")
+    return text[start:text.index("\n  }\n", start)]
+
+
+def test_the_switch_view_and_the_card_use_the_shared_builders():                       # Pin (browser-checked in Phase 5)
+    head = body_of("sv-switch.js", "renderSwitchDetail")
+    assert "${switchMeta(s)}" in head and "${switchBanners(s)}" in head and "modelFw(s)" in body_of("sv-overview.js", "renderOverview")
+
+
+def test_an_old_progress_never_writes_into_a_newer_dialog():                           # Phase 5 review, Minor 1
+    running = {**DONE, "status": "running"}
+    done = {**DONE, "status": "ok", "saved": 1, "sent": 1, "kind": "ports", "error": None}
+    js = ('(async () => { MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "audit"; loadMap = async () => {}; '
+          'let n = 0; api = async () => (n++ ? %s : %s); const run = runProgress({id: 1, k: "SW"}, 5); await new Promise(r => setTimeout(r, 50)); '
+          'modal("Änderung #6", "", []); $("#prog").innerHTML = "sechs"; await run; '
+          'return [$("#prog").innerHTML, $("#toasts").children.map(t => t.textContent)]; })()') % (json.dumps(done), json.dumps(running))
+    assert in_dom(js) == ["sechs", ["Änderung erledigt"]]
+
+
+@pytest.mark.parametrize("port, title, row", [
+    ({"n": "Po1", "tr": "Po1", "mb": ["Gi1/0/1", "Gi1/0/2"]}, "Po1", "Ports Gi1/0/1, Gi1/0/2"),
+    ({"n": "Trk1", "tr": "", "mb": ["5", "6"]}, "Trk1", "Ports 5, 6"),
+    ({"n": "Gi1/0/1", "tr": "Po1", "mb": []}, "Port Gi1/0/1", "Po1")], ids=["lag", "trk", "member"])
+def test_the_panel_names_a_lag_as_a_trunk(port, title, row):                          # Phase 5 review, Minor 6
+    p = {"l": [], "d": [], "u": [], "t": [], "mc": 0, "a": "", "pv": "", "st": "", "o": True, "ad": True, "s": 1000, **port}
+    t, html = in_dom(f'MAP = {{switches: [], links: [], vlans: {{}}}}; portIdx = {{{json.dumps(p["n"])}: {json.dumps(p)}}}; '
+                     f'openPort({{id: 1, k: "A", caps: [], ports: []}}, {json.dumps(p["n"])}); [$("#dr-title").textContent, $("#dr-body").innerHTML]')
+    assert t == title and f"<dt>Trunk</dt><dd>{row}</dd>" in html
+
+
+def test_a_failed_reload_of_more_keeps_the_focus_in_the_list():                        # Phase 5 review, Minor 3
+    act = ('api = async () => { throw new Error("weg"); }; el.kids = []; '
+           'await el.onclick({target: {closest: s => s === "[data-more]" ? {dataset: {more: "4"}} : null}}); '
+           'return [document.activeElement && document.activeElement.sel, el.getAttribute("tabindex"), el.innerHTML];')
+    assert in_dom(LIST % (json.dumps(ROWS), 2, act)) == ["#lst", "-1", '<div class="empty">weg</div>']
+
+
+def test_the_audit_keeps_its_filter_across_a_new_render():                            # Phase 5 review, Minor 7
+    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); $("#au-q").value = "bob"; $("#au-q").fire("input"); '
+          '$("#au-act").value = "login"; $("#au-act").fire("change"); await renderAudit(); return $("#view").innerHTML; })()') % json.dumps(AUDIT)
+    html = in_dom(js)
+    assert ('id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="bob"' in html
+            and '<option value="login" selected>' in html)

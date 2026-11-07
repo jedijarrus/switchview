@@ -85,6 +85,9 @@ known limits, checks before production use, what to do on an update, decisions)
 UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md) (what was built, known limits, checks before production
 use, what to do on an update, what is left for Phase 4, decisions)
 
+Roles and approvals notes (German): [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (what was built, the rights per route, known
+limits, checks before production use, what to do on an update, decisions).
+
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
 - Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately.

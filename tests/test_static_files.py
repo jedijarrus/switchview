@@ -93,3 +93,13 @@ def test_the_toast_stack_may_take_the_width_of_a_narrow_screen():
     toast's own max-width decide."""
     rule = re.search(r"^\.toasts \{([^}]*)\}", CSS, re.M).group(1)
     assert "width: max-content;" in rule and "max-width: calc(100vw - 32px);" in rule
+
+
+def test_a_note_beside_a_field_keeps_the_normal_weight():                              # Phase 5 review, Minor 4
+    """.field > span sets the label's weight 500; a note beside the field is a span too and takes the normal weight back."""
+    assert re.search(r"\.field > \.note \{[^}]*font-weight: 400", (STATIC / "app.css").read_text(encoding="utf-8"))
+
+
+def test_the_backup_switch_choice_has_no_inline_style():                               # UX Phase 5, Später; Minor 7
+    """.toolrow select styles it as the audit's action filter; an inline style would only repeat that rule."""
+    assert '<select id="b-sw" aria-label="Switch">' in (STATIC / "sv-admin.js").read_text(encoding="utf-8")

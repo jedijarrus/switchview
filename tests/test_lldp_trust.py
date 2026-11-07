@@ -14,11 +14,11 @@ tests/netfix.py, shared with tests/test_uplinks.py.
 import changes
 import db
 import main
+from apifix import USER
 from cfgparse import parse_config
 from netfix import add, fdb, lldp
 from switchfix import CATALYST_VMVLAN, W_CATALYST, W_SAMPLE
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 MAC1, MAC2 = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"
 A_BASE, B_BASE = "00:1a:2b:00:00:0a", "00:1a:2b:00:00:0b"
 

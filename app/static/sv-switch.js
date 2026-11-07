@@ -343,33 +343,37 @@
       : c.saved ? `${sentence(err)} Die Änderung ist gespeichert.`
       : told && told !== err ? told : `${sentence(err)} Was der Switch davon übernommen hat, wirkt schon, ist aber nicht dauerhaft gespeichert.`;
     // "Abgebrochen durch Neustart …" (changes.mark_interrupted) reads "Abgebrochen: durch Neustart …", "Abgebrochen (Prozess beendet),
-    // nichts gesendet" (changes.CANCELLED_UNSENT) "Abgebrochen: Prozess beendet, nichts gesendet", never "Abgebrochen: Abgebrochen …"
-    const aborted = err.replace(/^Abgebrochen\s+\(?([^)]*)\)?/, "$1");
+    // nichts gesendet" (changes.CANCELLED_UNSENT) "Abgebrochen: Prozess beendet, nichts gesendet", never "Abgebrochen: Abgebrochen …";
+    // only a pair of brackets goes, a lone "(" stays
+    const aborted = err.replace(/^Abgebrochen\s+(?:\(([^)]*)\))?/, "$1");
     return { ok: c.saved ? `<div class="banner ok"><b>Erledigt und gespeichert.</b></div>` : `<div class="banner warn"><b>Erledigt, aber nicht dauerhaft gespeichert – am Switch speichern.</b></div>`,
       unclear: `<div class="banner warn"><span><b>Unklar:</b> ${esc(unclear)}</span></div>`,
       failed: `<div class="error"><b>Fehlgeschlagen:</b> ${esc(err)}</div>`, aborted: `<div class="banner"><span><b>Abgebrochen:</b> ${esc(aborted)}</span></div>` }[c.status] || "";
   }
+  // The progress of change id in its own dialog. A dialog closed meanwhile (Back, Escape, ✕) or replaced by a newer one (the next
+  // change's progress, a preview) is asked on to the end, but nothing is written into it: #prog and the footer then belong to the
+  // dialog shown now (modalShown). The toast and the reload come either way, an error of the fetch as a toast then.
   async function runProgress(s, id) {
     const shown = modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
     for (;;) {
-      if (!$("#prog")) return;
-      let c; try { c = await api("GET", `/api/changes/${id}`); } catch (e) { $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
+      let c; try { c = await api("GET", `/api/changes/${id}`); }
+      catch (e) { if (modalShown(shown)) $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; else toast(e.message); return; }
       const done = ["ok", "unclear", "failed", "aborted"].includes(c.status);
-      const head = resultHead(c);
-      if (!$("#prog")) return;
-      $("#prog").innerHTML = `<p style="margin:0 0 10px"><b>${esc(c.summary)}</b></p>${head}<div style="margin-top:10px">${stepsHtml(c)}</div>${done && c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`;
+      if (modalShown(shown)) $("#prog").innerHTML = `<p style="margin:0 0 10px"><b>${esc(c.summary)}</b></p>${resultHead(c)}<div style="margin-top:10px">${stepsHtml(c)}</div>${done && c.output ? `<details class="adv"><summary>Ausgabe des Switches</summary><pre class="code">${esc(c.output)}</pre></details>` : ""}`;
       if (done) {
-        const btns = [];
-        // Which follow-up actions a change has is the server's rule (can_revert / can_save, changes.actions_of): none for a change that
-        // sent nothing, no save (write memory) over SNMP. Here "Rückgängig" only after unclear / failed, as before; the list offers it after ok
-        if (["unclear", "failed"].includes(c.status) && c.can_revert) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
-        if (c.can_save) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
-        btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
-        const foot = $("#m-foot"); foot.innerHTML = "";
-        const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
-        // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
-        // new "Schließen"; a focus still in the dialog (the ✕) stays, a dialog closed meanwhile takes none
-        if (modalShown(shown) && !$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
+        if (modalShown(shown)) {
+          const btns = [];
+          // Which follow-up actions a change has is the server's rule (can_revert / can_save, changes.actions_of): none for a change that
+          // sent nothing, no save (write memory) over SNMP. Here "Rückgängig" only after unclear / failed, as before; the list offers it after ok
+          if (["unclear", "failed"].includes(c.status) && c.can_revert) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
+          if (c.can_save) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
+          btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
+          const foot = $("#m-foot"); foot.innerHTML = "";
+          const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
+          // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
+          // new "Schließen"; a focus still in the dialog (the ✕) stays
+          if (!$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
+        }
         if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
         // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
         const next = SVLogic.afterChange(c);
@@ -406,9 +410,11 @@
       if (r) { if (!MAP) await loadMap(false); const s = swOf(+r.dataset.sw); if (s) previewChange(s, { mode: "revert", of: +r.dataset.cr }); }
       if (sv) { if (!MAP) await loadMap(false); const s = swOf(+sv.dataset.sw); if (s) previewChange(s, { mode: "save", of: +sv.dataset.cs }); }
       if (m) {
-        // "Mehr laden" goes with the old list: the focus moves to the first row the click added (the last row, if none came), not body
+        // "Mehr laden" goes with the old list: the focus moves to the first row the click added (the last row, if none came), not body;
+        // a list that could not load (its message only, no row) takes the focus itself
         const shown = rows.length; await renderChangesInto(el, switchId, +m.dataset.more);
-        const ds = el.querySelectorAll("[data-cd]"), f = ds[shown] || ds[ds.length - 1]; if (f) f.focus();
+        const ds = el.querySelectorAll("[data-cd]"), f = ds[shown] || ds[ds.length - 1];
+        if (f) f.focus(); else { el.setAttribute("tabindex", "-1"); el.focus(); }
       }
     };
   }
@@ -420,7 +426,8 @@
     drLast = trigger || document.activeElement;
     if (selEl) selEl.classList.remove("sel");
     selEl = document.querySelector(`#plate .port[data-p="${CSS.escape(n)}"]`); if (selEl) selEl.classList.add("sel");
-    $("#dr-title").textContent = (p.n.startsWith("Trk") ? "" : "Port ") + p.n; $("#dr-sub").textContent = [s.k, s.model].filter(Boolean).join(" · ");
+    // A trunk (a ProCurve Trk, a LAG such as Po1) is named as it is, its members in the row "Trunk"; a member names its trunk there
+    $("#dr-title").textContent = (isTrunkPort(p) ? "" : "Port ") + p.n; $("#dr-sub").textContent = [s.k, s.model].filter(Boolean).join(" · ");
     const lldp = p.l.length ? p.l.map(x => `<div><b>${esc(x[0])}</b> <span class="mono muted">Port ${esc(x[1])}</span></div>`).join("") : "–";
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
@@ -431,7 +438,7 @@
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
-      <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
+      <dt>Trunk</dt><dd>${trunk ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
     if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); if (trunk) editTrunk(s, p.n); else editPorts(s, [p.n]); });
     $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
     $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();

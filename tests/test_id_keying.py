@@ -18,10 +18,10 @@ import changes
 import db
 import main
 import poller
+from apifix import USER
 from netfix import add, fdb, lldp
 from switchfix import CATALYST_VMVLAN, W_CATALYST, W_SAMPLE, edit_walks
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 MAC1, MAC2 = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"
 MAC_CORE, MAC_SW_A, MAC_SW_B = "00:1a:2b:00:00:0a", "00:1a:2b:00:00:0b", "00:1a:2b:00:00:0c"    # base MACs
 FACTORY = "HP-2530"    # the sysName switches of one model carry until someone sets one

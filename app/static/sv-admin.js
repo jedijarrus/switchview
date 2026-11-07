@@ -375,7 +375,7 @@
     const list = await api("GET", "/api/switches").catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!list) return;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Konfigurationssicherungen</h2><span class="sub">nächtlich 02:30, gespeichert nur bei Änderung</span>
-      <div class="right toolrow"><select id="b-sw" aria-label="Switch" style="height:30px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);padding:0 8px">${list.map(s => `<option value="${s.id}" ${s.id === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
+      <div class="right toolrow"><select id="b-sw" aria-label="Switch">${list.map(s => `<option value="${s.id}" ${s.id === selSwitch ? "selected" : ""}>${esc(s.name)}${!has(s, "backup") ? " (ohne Sicherung)" : s.ssh_pass_set ? "" : " (ohne SSH)"}</option>`).join("")}</select>
       <button class="btn small" type="button" id="b-now" aria-describedby="b-why">Jetzt sichern</button></div></div><p class="note gate" id="b-why" style="margin:12px 16px 0" hidden></p><div id="b-list"><div class="empty">Kein Switch angelegt.</div></div></section>`;
     if (!list.length) return;
     const selected = () => list.find(x => String(x.id) === $("#b-sw").value);
@@ -408,22 +408,26 @@
     change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
     device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
   // The audit log: the 200 entries of GET /api/audit, filtered in the browser by action and by text (SVLogic.filterAudit over user,
-  // action, target and details); each action shows its detail below it (it never names a secret, Phase 2)
+  // action, target and details); each action shows its detail below it (it never names a secret, Phase 2). The filter outlives a
+  // new render (auditText as typed, auditAction), like devText of the devices; an action the new entries no longer have is dropped
+  let auditText = "", auditAction = "";
   async function renderAudit() {
     const v = $("#view"); const rows = await api("GET", "/api/audit").catch(() => []);
     const actions = [...new Set(rows.map(r => r.action))];
-    const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}">${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>
-        <input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen"></div>`;
+    if (!actions.includes(auditAction)) auditAction = "";
+    const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}"${a === auditAction ? " selected" : ""}>${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>
+        <input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen" value="${esc(auditText)}"></div>`;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge · der Filter wirkt auf diese</span>${rows.length ? filter : ""}</div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody id="au-body"></tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
     v.style.display = ""; renderChangesInto($("#all-changes"), null, 100);
     if (!rows.length) return;
     const draw = () => {
-      const f = SVLogic.filterAudit(rows, $("#au-q").value.trim(), $("#au-act").value, AUDIT_LABELS);
+      const f = SVLogic.filterAudit(rows, auditText.trim(), auditAction, AUDIT_LABELS);
       $("#au-body").innerHTML = f.length ? f.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("")
         : `<tr><td colspan="4" class="muted">Keine Einträge für diesen Filter.</td></tr>`;
     };
     draw();
-    $("#au-q").addEventListener("input", draw); $("#au-act").addEventListener("change", draw);
+    $("#au-q").addEventListener("input", e => { auditText = e.target.value; draw(); });
+    $("#au-act").addEventListener("change", e => { auditAction = e.target.value; draw(); });
   }
 
   /* ── Einstellungen ── */

@@ -16,7 +16,6 @@ import base64
 import json
 import os
 import sqlite3
-import types
 from collections import defaultdict
 from contextlib import closing
 
@@ -24,20 +23,17 @@ import paramiko
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from fastapi.testclient import TestClient
 from netmiko import NetmikoTimeoutException
 
-import auth
+import apifix
 import changes
 import config
 import crypto
 import db
-import main
 import names
 import pf
 import sshcli
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 HOST = "203.0.113.21"
 RUNNING_CONFIG = 'hostname "SW-EK-01"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n   exit\n'
 
@@ -157,8 +153,7 @@ class Paramikoish:
 @pytest.fixture
 def world(tmp_path, monkeypatch) -> Paramikoish:
     """A fresh database under tmp_path (the app's own init_db); ConnectHandler recorded; fresh locks and R27 marks; re-polls recorded."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    asyncio.run(db.init_db())
+    apifix.fresh_db(tmp_path, monkeypatch)
     recorder = Paramikoish()
     monkeypatch.setattr(sshcli, "ConnectHandler", recorder)
     monkeypatch.setattr(sshcli, "_locks", defaultdict(asyncio.Lock))
@@ -206,19 +201,11 @@ def last_audit_detail() -> str:
     return query("SELECT detail FROM audit ORDER BY id DESC LIMIT 1")[0][0]
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def api(world, monkeypatch):
-    """A TestClient on main.app (created without `with`: no lifespan, no scheduler), signed in as USER, on world's database."""
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (created without `with`: no lifespan, no scheduler), signed in as apifix.USER, on world's database."""
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def body(**fields) -> dict:
@@ -575,32 +562,17 @@ def test_host_key_of_reads_the_key_the_server_offered():
 
 
 # ── TLS defaults ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-class _Response:
-    def raise_for_status(self):
-        pass
+class EmptyArp(apifix.Remote):
+    """An OPNsense with an empty ARP table: with {} names.opnsense_arp would take the answer for an unexpected one."""
 
-    def json(self):
+    def reply(self, method: str, url: str):
         return []
 
 
 def test_tls_verification_defaults_on_where_the_clients_are_made(world, monkeypatch):
     """pf.config and names.opnsense_arp read a missing row as on, and a stored "0" as off, as before."""
-    seen: list[bool] = []
-
-    class AsyncClient:
-        def __init__(self, verify, timeout):
-            seen.append(verify)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def get(self, url, auth=None):
-            return _Response()
-
-    monkeypatch.setattr(names, "httpx", types.SimpleNamespace(AsyncClient=AsyncClient))
+    remote = EmptyArp()
+    monkeypatch.setattr(names, "httpx", apifix.fake_httpx(remote))
     for k, v in (("opnsense_url", "https://opnsense.example.org"), ("opnsense_key", crypto.encrypt("k")),
                  ("opnsense_secret", crypto.encrypt("s"))):
         asyncio.run(db.set_setting(k, v))
@@ -610,7 +582,7 @@ def test_tls_verification_defaults_on_where_the_clients_are_made(world, monkeypa
         asyncio.run(db.set_setting(k, "0"))
     assert asyncio.run(pf.config())["verify"] is False
     asyncio.run(names.opnsense_arp())
-    assert seen == [True, False]
+    assert [k["verify"] for k in remote.made] == [True, False]
 
 
 def test_a_settings_put_without_the_tls_fields_turns_verification_on(api):

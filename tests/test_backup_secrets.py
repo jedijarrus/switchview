@@ -17,46 +17,34 @@ import hashlib
 import hmac
 
 import pytest
-from fastapi.testclient import TestClient
 
-import auth
+import apifix
 import cfgparse
 import changes
 import config
 import crypto
-import db
 import main
 import sshcli
 import sshfix
 from dbfix import connect, insert_switch, query
 
-USER = {"username": "tester", "name": "Tester", "method": "local"}
 CONFIG_A = ('hostname "SW-EK-01"\nradius-server host 10.0.0.1 key "alt-Schluessel1"\nvlan 1\n   name "DEFAULT_VLAN"\n   untagged 1-24\n'
             "   exit\n")
 CONFIG_B = CONFIG_A.replace("alt-Schluessel1", "neu-Schluessel2")    # the same configuration with another RADIUS key
 
 
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
 @pytest.fixture
 def world(tmp_path, monkeypatch) -> int:
     """A fresh database under tmp_path with the ProCurve of sshfix.procurve; its id."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    asyncio.run(db.init_db())
+    apifix.fresh_db(tmp_path, monkeypatch)
     return insert_switch(**sshfix.procurve())
 
 
 @pytest.fixture
 def api(world, monkeypatch):
-    """A TestClient on main.app (no lifespan, scheduler booby-trapped) on world's database, signed in as USER."""
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    """A TestClient on main.app (no lifespan, scheduler booby-trapped) on world's database, signed in as apifix.USER."""
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def backups() -> dict[int, int]:

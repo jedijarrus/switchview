@@ -16,6 +16,8 @@ SCRIPTS = re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX)
 BASE = ("default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self'; font-src 'self'; "
         "connect-src 'self'{sso}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
 WITH_SSO, WITHOUT_SSO = BASE.format(sso=" https://login.microsoftonline.com"), BASE.format(sso="")
+# A handler attribute in any quoting or as a template value, and one set through setAttribute (Phase 5 review, Minor 5)
+HANDLER = re.compile(r"\son[a-z]+\s*=\s*[\"'$]|setAttribute\(\s*[\"']on")
 
 
 def test_the_policy_is_pinned():
@@ -58,7 +60,14 @@ def test_the_page_needs_no_inline_script_style_or_handler():
     assert not re.search(r"<style\b|\son[a-z]+=|javascript:", INDEX)
     for n in SCRIPTS[1:]:
         text = (STATIC / n).read_text(encoding="utf-8")
-        assert not re.search(r"\beval\(|new Function|\bset(?:Timeout|Interval)\(\s*['\"`]|<style\b|\son[a-z]+=\"|javascript:", text), n
+        assert not re.search(r"\beval\(|new Function|\bset(?:Timeout|Interval)\(\s*['\"`]|<style\b|javascript:", text), n
+        assert not HANDLER.search(text), n
+
+
+@pytest.mark.parametrize("text, found", [(' onclick="x"', True), (" onclick='x'", True), (" onclick=${h}", True), ('el.setAttribute("onclick", h)', True),
+                                         ("el.onclick = null", False), ("const onTxt = on => 1", False)])
+def test_the_handler_guard_catches_every_form(text, found):
+    assert bool(HANDLER.search(text)) == found
 
 
 def test_msal_needs_no_eval():

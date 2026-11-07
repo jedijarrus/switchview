@@ -22,12 +22,8 @@ import stat
 import tempfile
 
 import pytest
-from fastapi.testclient import TestClient
 
-import auth
-import config
-import db
-import main
+import apifix
 import snmp
 from switchfix import HOST, IF_ADMIN, IF_NAME, FakeProcess
 
@@ -106,25 +102,13 @@ def spawn(monkeypatch, shm) -> _Spawn:
     return spawner
 
 
-# ── The switch API, as in tests/test_switch_api.py (copied: an imported fixture trips ruff F401/F811) ─────────────────────────────
-USER = {"username": "tester", "name": "Tester", "method": "local"}
-
-
-def _never(*args, **kwargs):
-    raise AssertionError("the scheduler must not start in a test (no background polling, no network)")
-
-
+# ── The switch API, as in tests/test_switch_api.py (its body from tests/apifix.py; an imported fixture trips ruff F401/F811) ─────
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     """A TestClient on main.app against a fresh database under tmp_path (the app's own init_db); lifespan and scheduler never run."""
-    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
-    monkeypatch.setattr(main.scheduler, "start", _never)
-    asyncio.run(db.init_db())
-    main.app.dependency_overrides[auth.current_user] = lambda: USER
-    try:
-        yield TestClient(main.app, headers={"X-Requested-With": "SwitchView"})
-    finally:
-        main.app.dependency_overrides.pop(auth.current_user, None)
+    apifix.fresh_db(tmp_path, monkeypatch)
+    with apifix.signed_in(monkeypatch) as client:
+        yield client
 
 
 def body(**fields) -> dict:
