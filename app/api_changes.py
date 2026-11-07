@@ -433,17 +433,19 @@ async def _enabled_row(sid: int):
 async def _mode_rights(user: dict, row, body: PlanIn, four_eyes: bool) -> None:
     """The rights of a /plan, /apply or approval request beyond the route's minimum (Ändern), right after _enabled_row. First the
     zone: a user with a zone scope changes only switches of their zones (roles.zone_allows, Task 5), in every mode. Then the mode:
-    preparing RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben
-    without the four-eyes principle (four_eyes, approvals.policy) and Ändern with it, since then it only gets as far as a request
-    that a second person with Freigeben approves (/apply refuses it, APPROVAL_NEEDED); taking back a change made in expert mode,
-    which goes over the same uplinks, is Freigeben either way. Saving and every other revert stay Ändern. A revert of a change that is
-    not at this switch is left to _make_plan (404 as before)."""
+    preparing RADIUS is Admin (it sends the RADIUS secret, Sicherheit Phase 2 T2-R1); the expert mode (uplinks, trunks) is Freigeben,
+    and Ändern only where the change needs a four-eyes approval (approvals.needs_approval with four_eyes, approvals.policy: the one
+    predicate, so an expert change it exempts stays Freigeben), since then it only gets as far as a request that a second person with
+    Freigeben approves (/apply refuses it, APPROVAL_NEEDED); taking back a change made in expert mode, which goes over the same
+    uplinks, is Freigeben either way. Saving and every other revert stay Ändern. A revert of a change that is not at this switch is
+    left to _make_plan (404 as before)."""
     if not roles.zone_allows(user, row["zone"]):
         raise HTTPException(403, roles.zone_denial(row["zone"], user["zones"]))
     role = user["role"]
     if body.mode == "prepare" and not roles.at_least(role, roles.ADMIN):
         raise HTTPException(403, roles.denial(roles.ADMIN, role, "„RADIUS vorbereiten“"))
-    if body.mode == "ports" and body.expert and not four_eyes and not roles.at_least(role, roles.FREIGEBEN):
+    if (body.mode == "ports" and body.expert and not approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes)
+            and not roles.at_least(role, roles.FREIGEBEN)):
         raise HTTPException(403, roles.denial(roles.FREIGEBEN, role, "Der Expertenmodus"))
     if body.mode == "revert" and not roles.at_least(role, roles.FREIGEBEN):
         async with db() as conn:

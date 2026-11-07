@@ -245,6 +245,37 @@ def test_with_four_eyes_taking_back_an_expert_change_stays_freigeben(world, clie
     assert (r.status_code, r.json()["detail"]) == (403, roles.denial("freigeben", "aendern", "Eine Änderung im Expertenmodus zurückzunehmen"))
 
 
+def test_with_four_eyes_apply_still_runs_what_needs_no_approval(world, client):
+    """Four eyes hold back only an expert port change: a port change without expert mode, the revert of an expert change by
+    Freigeben (it must work in an outage without a second person, T6-b) and a save are previewed without "approval" and start at
+    /apply, each under whoever sent it."""
+    four_eyes()
+    [(cid,)] = dbfix.query("INSERT INTO changes(switch_id, kind, summary, status, expert, sent) VALUES (?, 'ports', 'x', 'ok', 1, 1) "
+                           "RETURNING id", (world,))
+    started = []
+    for who, body in (("anna", {**PLAN, "expert": False}), ("ben", {"mode": "revert", "of": cid}), ("anna", {"mode": "save", "of": cid})):
+        p = client.post(f"/api/switches/{world}/plan", json=body, headers=H(who)).json()
+        assert p["approval"] is False, (who, body, p)
+        r = client.post(f"/api/switches/{world}/apply", json={**body, "token": p["token"]}, headers=H(who))
+        assert r.status_code == 200, (who, body, r.json())
+        started.append(r.json()["id"])
+        dbfix.query("UPDATE changes SET status = 'ok' WHERE id = ?", (r.json()["id"],))        # the switch is free for the next one
+    assert ran == started and dbfix.query("SELECT username, revert_of FROM changes WHERE id > ? ORDER BY id", (cid,)) == [
+        ("anna", None), ("ben", cid), ("anna", None)]
+
+
+def test_expert_mode_is_aendern_only_where_an_approval_is_needed(world, client, monkeypatch):
+    """With four eyes on, Ändern may plan an expert change only because it then needs an approval (approvals.needs_approval, the one
+    predicate 4c extends): an expert change that predicate exempts stays Freigeben at /plan and /apply, never applied directly."""
+    four_eyes()
+    monkeypatch.setattr(approvals, "needs_approval", lambda kind, request, on: False)
+    want = (403, roles.denial("freigeben", "aendern", "Der Expertenmodus"))
+    for route in ("plan", "apply"):
+        r = client.post(f"/api/switches/{world}/{route}", json={**PLAN, "token": "x"}, headers=H("anna"))
+        assert (r.status_code, r.json()["detail"]) == want, route
+    assert ran == []
+
+
 def test_a_request_and_a_rejection_hold_the_zone(world, client):
     """The switch is in zone "EK"; olga (Ändern) and otto (Freigeben) may change only in "VK"."""
     USERS["olga"] = apifix.user("aendern", "olga", zones=["VK"])
