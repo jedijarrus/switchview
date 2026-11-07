@@ -100,6 +100,9 @@ MATRIX_4B: dict = {
     ("PUT", "/api/settings/alerts"): "admin",
     ("POST", "/api/alerts/test"): "admin",
     ("GET", "/api/alerts/deliveries"): "admin",
+    ("GET", "/api/watch"): "lesen",
+    ("POST", "/api/watch"): "aendern",
+    ("DELETE", "/api/watch/{mac}"): "aendern",
 }
 MATRIX = MATRIX_4A | MATRIX_4B
 

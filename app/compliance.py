@@ -20,10 +20,11 @@ never another value.
 A finding is one row of the table findings, identified by (switch, rule, line) and, for a line that is there more than once, its
 place among them: seen again it gets a new last_seen, line number and detail; one of the checked sources that is not found any
 more gets resolved_at. The first check of a switch per source (switches.compliance_cfg_at, compliance_snmp_at NULL) is the
-baseline: stored, listed and counted, never told; afterwards each check returns its new findings, which Task 7 announces. A rule
-an Admin switches off (settings SETTINGS_KEY) still checks, but its findings are hidden from the list, the count and the return -
-switched on again, they are there at once. Every caller wraps its call: a failure here is logged and never changes a poll or a
-backup.
+baseline: stored, listed and counted, never told; afterwards each check returns its new findings, which its caller hands to the
+alerts (alerts.announce_findings in sshcli.store_backup and poller.poll_switch; reevaluate_custom stores a baseline and tells
+nothing). A rule an Admin switches off (settings SETTINGS_KEY) still checks, but its findings are hidden from the list, the count
+and the return - switched on again, they are there at once. Every caller wraps its call: a failure here is logged and never changes
+a poll or a backup.
 """
 import json
 import re

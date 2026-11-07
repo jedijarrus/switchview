@@ -366,10 +366,10 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
 
 # The tables and the columns Phase 4b adds (Tasks 2-8 extend both): Task 2 the sightings, Task 4 the events and the switches' poll
 # state (failures in a row, unreachable since, last good poll, the fields it could not read) and whether a backup differs from the
-# one before without a SwitchView change, Task 5 the findings of the security rules and their last check per source. A database as
-# Phase 4a left it has none of them; init_db creates each table empty, with the indexes db.SCHEMA gives it, and adds each column,
-# which a row of before reads as the column's default.
-PHASE4B_TABLES = {"sightings", "events", "findings", "alert_outbox"}
+# one before without a SwitchView change, Task 5 the findings of the security rules and their last check per source, Task 6 the
+# alert queue, Task 7 the MAC watch list. A database as Phase 4a left it has none of them; init_db creates each table empty, with
+# the indexes db.SCHEMA gives it, and adds each column, which a row of before reads as the column's default.
+PHASE4B_TABLES = {"sightings", "events", "findings", "alert_outbox", "watch_macs"}
 PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
                                          ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
                                          ("switches", "compliance_snmp_at")}

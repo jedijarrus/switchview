@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from netmiko.exceptions import ConfigInvalidException
 
+import alerts
 import cfgparse
 import drivers
 import poller
@@ -571,7 +572,8 @@ async def run_change(cid: int):
     CANCELLED_UNSENT, as after a restart (mark_interrupted). A change that ends "failed" without having sent anything (a switch
     disabled meanwhile, a read that failed) gets no re-poll (_repolls_after). Before lines go out the cached read is marked stale and
     dropped (R27, mark_cfg_stale): the end stores the read-back as the fresh read, or the read from before when no line went out;
-    after lines without a read-back it stores neither. A revert that ends ok marks the change it took back (_mark_reverted).
+    after lines without a read-back it stores neither. A revert that ends ok marks the change it took back (_mark_reverted). After
+    the audit the end goes to the alerts (alerts.change_ended, Phase 4b, with the masked error), wrapped by _logged like each step.
 
     Inside the lock, before anything else, the switch row of then: a switch disabled while the change waited ends it failed with
     DISABLED_RUN, no session. Only then the inventory of a port change (the poll's ports and uplinks): a change before it may have
@@ -720,6 +722,7 @@ async def run_change(cid: int):
         # names the state it read before, the start of the sha of its backup "vor #cid" (or of the equal one before it)
         stand = f", Stand {sshcli.backup_sha(pre)[:12]}" if kind == "save" and pre else ""
         await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}{stand}", role=ch["role"])
+        await _logged(cid, "Benachrichtigung", alerts.change_ended(ch, cid, status, error and mask(error)))    # unmasked until _upd
         if _repolls_after(status, kind, sent):
             asyncio.create_task(_repoll(sid))
 
@@ -960,11 +963,12 @@ async def _close(cid: int, ch, status: str, error: str | None, saved: int, outpu
     """Abschluss einer Aenderung, die nicht ueber SSH lief: Ergebnis und Schritte in EINEM Schreiben in die Zeile, Audit wie auf dem
     SSH-Weg, dazu der Schreibweg, und die Nach-Abfrage wie dort (_repolls_after; sent: whether the switch may have taken something,
     _run_snmp's sent). Keine Sicherung und kein switch_cfg: es gibt keine running-config. A revert that ended ok marks the change it
-    took back (_mark_reverted), as on the SSH way."""
+    took back (_mark_reverted), as on the SSH way, and after the audit the end goes to the alerts (alerts.change_ended)."""
     sid = ch["switch_id"]
     await _upd(cid, status=status, error=error, saved=saved, finished_at=_now(), output=output, steps=json.dumps(steps))
     await _logged(cid, "Rücknahme vermerken", _mark_reverted(ch, cid, status))    # as in run_change: audit and re-poll still run
     await audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}", role=ch["role"])
+    await _logged(cid, "Benachrichtigung", alerts.change_ended(ch, cid, status, error))    # error is masked here already
     if _repolls_after(status, ch["kind"], sent):
         asyncio.create_task(_repoll(sid))
 

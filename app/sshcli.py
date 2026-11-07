@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from netmiko import ConnectHandler, NetmikoTimeoutException
 
+import alerts
 import cfgparse
 import drivers
 import monitor
@@ -257,10 +258,16 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
     in a savepoint - a failure there is logged and leaves outside NULL, the backup stays.
     Then, new row or not and after this connection is closed, the security rules check the unmasked content
     (compliance.evaluate_config, Phase 4b; it writes on a connection of its own, which would wait out this one's write transaction),
-    wrapped: a failure there is logged and changes nothing of the answer."""
+    wrapped: a failure there is logged and changes nothing of the answer.
+    The alerts (Phase 4b, Task 7) come after the commit: a backup outside SwitchView (alerts.announce_events), then the new findings
+    (alerts.announce_findings), both with the switch's row as this function reads it first (id, name, host); each wrapped, a failure
+    logged ("Meldungen der Sicherung von Switch <id>")."""
     sha, mark = backup_sha(content), keyed_digest("backup", content)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    outside = None    # the drift_config event of a new row (monitor.backup_outside), told once the row is committed
     async with db() as conn:
+        async with conn.execute("SELECT id, name, host FROM switches WHERE id = ?", (switch_id,)) as cur:
+            switch = await cur.fetchone()    # for the alerts
         async with conn.execute("SELECT id, sha, raw_mac FROM config_backups WHERE switch_id = ? ORDER BY id DESC LIMIT 1",
                                 (switch_id,)) as cur:
             last = await cur.fetchone()
@@ -276,22 +283,37 @@ async def store_backup(switch_id: int, content: str, trigger: str) -> bool:
             try:
                 await conn.execute("SAVEPOINT backup_outside")
                 try:
-                    await monitor.backup_outside(conn, switch_id, cur.lastrowid, trigger, now)
+                    outside = await monitor.backup_outside(conn, switch_id, cur.lastrowid, trigger, now)
                 except Exception:
                     await conn.execute("ROLLBACK TO backup_outside")
                     raise
                 finally:
                     await conn.execute("RELEASE backup_outside")
             except Exception:  # noqa: BLE001
+                outside = None
                 log.exception("Ereignisse der Sicherung von Switch %s", switch_id)
             await conn.commit()
             made = True
+    if outside and switch:
+        await _announce(switch_id, alerts.announce_events([outside], switch))
     import compliance  # late, like changes below: compliance reaches back to api_switches → sshcli when it checks SNMP
     try:
-        await compliance.evaluate_config(switch_id, content)
+        new = await compliance.evaluate_config(switch_id, content)
     except Exception:  # noqa: BLE001
         log.exception("Sicherheitsregeln %s", switch_id)
+    else:
+        if new and switch:
+            await _announce(switch_id, alerts.announce_findings(switch, new))
     return made
+
+
+async def _announce(switch_id: int, aw) -> None:
+    """await aw, an alert of a backup of switch_id (alerts.announce_*): it never raises, and should one, it is logged and changes
+    nothing of the backup."""
+    try:
+        await aw
+    except Exception:  # noqa: BLE001
+        log.exception("Meldungen der Sicherung von Switch %s", switch_id)
 
 
 async def backup_config(switch_id: int, trigger: str = "nightly") -> dict:

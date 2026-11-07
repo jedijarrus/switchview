@@ -224,6 +224,11 @@ CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(channel, dedup_key, cr
 CREATE INDEX IF NOT EXISTS idx_outbox_created ON alert_outbox(created_at);
 -- A page of one status, newest first (GET /api/alerts/deliveries?status=...): without it, every row of that status is sorted per page
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status, id);
+-- Phase 4b, Task 7: the MAC watch list (app/history.py), one row per watched MAC ("aa:bb:cc:dd:ee:ff", api_devices.norm_mac) with
+-- the note of whoever added it, their user name and when (UTC). A recording (history.record) that sees one of them for the first
+-- time, at another place or back after an absence tells it (alerts.announce_sightings, the event watch). Kept by Ändern
+-- (POST /api/watch, DELETE /api/watch/{mac}), read by Lesen (GET /api/watch); no zone: a MAC belongs to no switch. Never purged.
+CREATE TABLE IF NOT EXISTS watch_macs (mac TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', created_by TEXT, created_at TEXT NOT NULL);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,

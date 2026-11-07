@@ -1,8 +1,9 @@
 """Alerts by mail (SMTP) and webhook (Microsoft Teams or plain JSON), through a queue in the database (Phase 4b, Task 6). Without
 FastAPI; the routes are app/api_alerts.py.
 
-The way of a message: a source (a poll, a backup, a change, a four-eyes request; Task 7) calls emit, which only writes rows of
-alert_outbox - one per channel that is on and wants the event - and never waits for a delivery. Within DEDUP_MINUTES the same event
+The way of a message: a source (a poll, a backup, a change, a four-eyes request, the watch list; Task 7, the section "Sources"
+below) calls emit, which only writes rows of alert_outbox - one per channel that is on and wants the event - and never waits for a
+delivery. Within DEDUP_MINUTES the same event
 with the same key on the same channel is counted on its row (repeats), not queued again; a channel takes at most CAP_PER_HOUR rows
 an hour, the rest are stored as suppressed, with one summary ("Zu viele Meldungen") queued in their place. The scheduler job
 deliver_due (every 30 seconds, jobs._schedule) takes up to BATCH queued rows that are due and makes one attempt each through _send:
@@ -33,7 +34,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from httpx import HTTPError, TimeoutException
 
+import approvals
 import cfgparse
+import compliance
 import crypto
 from config import settings
 from db import audit, db, load_settings
@@ -476,3 +479,142 @@ async def deliveries(status: str | None = None, cursor: int | None = None, limit
              "switch_name": r["switch_name"], "title": r["title"], "status": r["status"], "attempts": r["attempts"], "next_at": r["next_at"],
              "sent_at": r["sent_at"], "error": r["error"], "repeats": r["repeats"]} for r in got[:limit]]
     return {"rows": rows, "next": rows[-1]["id"] if len(got) > limit else None}
+
+
+# ── Sources (Task 7) ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# Each one is called where its data comes from - poller.poll_switch, sshcli.store_backup, history.record, the end of a change
+# (changes.run_change, changes._close), approvals.emit - and each is wrapped: it never raises, a failure is logged („Benachrichtigung
+# …“) and never changes the poll, the backup, the recording or the change. The key of a message (emit's dedup) is its subject: a
+# change of reachability is each one a message (its key carries the event's id; the three polls of monitor.UNREACHABLE_AFTER are the
+# debounce), everything else counts once per port, MAC, finding, change or step of a request within DEDUP_MINUTES.
+
+def _switch_facts(name: str, host: str) -> dict[str, str]:
+    return {"Switch": name, "Adresse": host}
+
+
+async def announce_events(events: list[dict], switch) -> None:
+    """The events of monitor (poll_failed, poll_succeeded, backup_outside: dicts as list_events reads them) of the switch (a row
+    with id, name and host): switch_down and switch_up as reachability, drift_port and drift_config as drift, an LLDP event at an
+    uplink (detail.uplink) as lldp_uplink; an LLDP event elsewhere tells nothing."""
+    try:
+        sid, name = switch["id"], switch["name"]
+        facts = _switch_facts(name, switch["host"])
+        for e in events:
+            kind, port, text = e["kind"], e["port"], e["text"]
+            if kind in ("switch_down", "switch_up"):
+                title = f"Switch {name} antwortet {'nicht' if kind == 'switch_down' else 'wieder'}"
+                await emit("reachability", title, text, switch_id=sid, switch_name=name, key=f"{sid}:{e['id']}", facts=facts)
+            elif kind == "drift_port":
+                await emit("drift", f"Änderung außerhalb von SwitchView: {name} Port {port}", text, switch_id=sid, switch_name=name,
+                           key=f"drift_port:{sid}:{port}", facts=facts)
+            elif kind == "drift_config":
+                await emit("drift", f"Konfiguration außerhalb von SwitchView geändert: {name}",
+                           f"{text.rstrip('.')}. Den Vergleich zeigt SwitchView unter Sicherungen.", switch_id=sid, switch_name=name,
+                           key=f"drift_config:{sid}:{e['detail']['backup']}", facts=facts)
+            elif kind.startswith("lldp_") and e["detail"].get("uplink"):
+                await emit("lldp_uplink", f"LLDP-Nachbar an Uplink geändert: {name} Port {port}", text, switch_id=sid,
+                           switch_name=name, key=f"lldp:{sid}:{port}", facts=facts)
+    except Exception:  # noqa: BLE001 - a poll or a backup never fails over an alert
+        log.exception("Benachrichtigung der Ereignisse")
+
+
+SEEN_AS = {"first": "zum ersten Mal gesehen", "moved": "an einem anderen Port", "back": "wieder da"}
+
+
+async def announce_sightings(news: list[dict]) -> None:
+    """What history.record added or revived (its return): a first sighting ever of a MAC that is neither in the device database
+    (known) nor at a possible uplink (suspect), outside the first recording of its switch (baseline), as unknown_device (once per
+    MAC and call: a MAC first seen in two VLANs at once is one device); and every watched MAC (history.watched) seen for the first
+    time, at another place or back, as watch (its note first)."""
+    try:
+        import history  # late: history → alerts
+        hits = [n for n in news if n["first"] or n["moved"] or n["back"]]
+        if not hits:
+            return
+        notes = await history.watched({n["mac"] for n in hits})
+        told: set[str] = set()    # the keys told in this call: one message per subject, not one and a repeat
+
+        async def tell(event: str, n: dict, title: str, text: str, key: str) -> None:
+            if key not in told:
+                told.add(key)
+                await emit(event, title, text, switch_id=n["switch_id"], switch_name=n["switch"], key=key,
+                           facts={"Switch": n["switch"], "Port": n["port"]})
+
+        for n in hits:
+            mac, switch, port, vlan, ip, name = n["mac"], n["switch"], n["port"], n["vlan"], n["ip"], n["name"]
+            if n["first"] and not (n["known"] or n["suspect"] or n["baseline"]):
+                await tell("unknown_device", n, f"Neues unbekanntes Gerät an {switch} Port {port}",
+                           f"MAC {mac}{', IP ' + ip if ip else ''}{', Name ' + name if name else ''} im VLAN {vlan}, zum ersten Mal gesehen.",
+                           f"unknown:{mac}")
+            if mac in notes:
+                note, why = notes[mac], next(w for w in SEEN_AS if n[w])
+                await tell("watch", n, f"Beobachtete MAC {mac} gesehen: {switch} Port {port}",
+                           f"{note + ': ' if note else ''}{SEEN_AS[why]} (VLAN {vlan}{', IP ' + ip if ip else ''}).",
+                           f"watch:{mac}:{n['switch_id']}:{port}")
+    except Exception:  # noqa: BLE001 - a recording never fails over an alert
+        log.exception("Benachrichtigung der Sichtungen")
+
+
+async def announce_findings(switch, findings: list[dict]) -> None:
+    """The new findings of the switch (a row with id, name and host) as compliance.evaluate_config and evaluate_snmp return them,
+    each as compliance: its detail and, with a line, „Zeile <n>: <the masked line>“; with neither, the rule's hint."""
+    try:
+        sid, name = switch["id"], switch["name"]
+        facts = _switch_facts(name, switch["host"])
+        for f in findings:
+            text = (f["detail"] + (f" Zeile {f['line_no']}: {f['line']}" if f["line_no"] else "")).strip()
+            rule = compliance.RULES.get(f["rule"])
+            await emit("compliance", f"Neuer Sicherheitsbefund an {name}: {f['label']}", text or (rule.hint if rule else ""),
+                       switch_id=sid, switch_name=name, key=f"compliance:{sid}:{f['id']}", facts=facts)
+    except Exception:  # noqa: BLE001 - a poll or a backup never fails over an alert
+        log.exception("Benachrichtigung der Sicherheitsbefunde")
+
+
+CHANGE_LABELS = {"failed": "fehlgeschlagen", "unclear": "unklar", "aborted": "abgebrochen"}
+
+
+async def change_ended(ch, cid: int, status: str, error: str | None) -> None:
+    """The end of change cid (ch: its changes row, as run_change and _close read it; error masked): failed, unclear or aborted as
+    change_problem („Änderung #<cid> an <switch> <fehlgeschlagen|unklar|abgebrochen>“, the summary, who and the error), a revert that
+    ended ok as „Änderung #<revert_of> an <switch> zurückgenommen“; any other end tells nothing. The switch's name from the table
+    switches (gone meanwhile: „Switch <id>“)."""
+    try:
+        sid, revert_of = ch["switch_id"], ch["revert_of"]
+        if status not in CHANGE_LABELS and not (status == "ok" and revert_of):
+            return
+        async with db() as conn:
+            async with conn.execute("SELECT name FROM switches WHERE id = ?", (sid,)) as cur:
+                row = await cur.fetchone()
+        name = row["name"] if row else f"Switch {sid}"
+        if status in CHANGE_LABELS:
+            title = f"Änderung #{cid} an {name} {CHANGE_LABELS[status]}"
+            text = f"{ch['summary']} (von {ch['username']})" + (f": {error}" if error else "")
+        else:
+            title, text = f"Änderung #{revert_of} an {name} zurückgenommen", f"Zurückgenommen mit #{cid} von {ch['username']}."
+        await emit("change_problem", title, text, switch_id=sid, switch_name=name, key=f"change:{cid}", facts={"Switch": name})
+    except Exception:  # noqa: BLE001 - a change never ends otherwise over an alert
+        log.exception("Benachrichtigung zum Ende von Änderung %s", cid)
+
+
+APPROVAL_LABELS = {"requested": "angefordert", "approved": "freigegeben", "rejected": "abgelehnt", "withdrawn": "zurückgezogen",
+                   "expired": "abgelaufen", "stale": "veraltet"}
+
+
+async def on_approval(event: str, approval: dict) -> None:
+    """The listener of approvals (subscribed below, at import): every step of a request (APPROVAL_LABELS) as approval, linked to
+    #approvals (the fact "_view", which steers and is never shown): its summary, switch and requester, who decided (if anyone), the
+    comment and the reason (if any). A step not in APPROVAL_LABELS tells nothing."""
+    try:
+        if event not in APPROVAL_LABELS:
+            return
+        a, name = approval, approval.get("switch_name") or ""
+        text = (f"{a['summary']}{' an ' + name if name else ''}, angefordert von {a.get('requester_name') or a['requested_by']}"
+                + (f", entschieden von {a['decided_by']}" if a.get("decided_by") else "") + (f": {a['comment']}" if a.get("comment") else "")
+                + (f" – {a['reason']}" if a.get("reason") else ""))
+        await emit("approval", f"Freigabe #{a['id']} {APPROVAL_LABELS[event]}", text, switch_id=a.get("switch_id"), switch_name=name,
+                   key=f"approval:{a['id']}:{event}", facts=({"Switch": name} if name else {}) | {"_view": "approvals"})
+    except Exception:  # noqa: BLE001 - approvals.emit wraps it as well; a step of a request never fails over an alert
+        log.exception("Benachrichtigung zur Freigabe (%s)", event)
+
+
+approvals.subscribe(on_approval)

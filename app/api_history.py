@@ -1,10 +1,12 @@
 """The history routes (Phase 4b): where a device was seen (Task 3: GET /api/history, the search; GET /api/history.csv, the same search
-as a CSV download), the events (Task 4: GET /api/events) and the security rules (Task 5: GET /api/switches/{sid}/findings, GET
-/api/compliance, GET and PUT /api/compliance/rules). The search itself is app/history.py, the CSV app/csvout.py, the events
-app/monitor.py, the rules and their findings app/compliance.py.
+as a CSV download), the events (Task 4: GET /api/events), the security rules (Task 5: GET /api/switches/{sid}/findings, GET
+/api/compliance, GET and PUT /api/compliance/rules) and the MAC watch list (Task 7: GET and POST /api/watch, DELETE
+/api/watch/{mac}). The search and the watch list themselves are app/history.py, the CSV app/csvout.py, the events app/monitor.py,
+the rules and their findings app/compliance.py.
 
 Every read needs Lesen and is not limited by zone, like every read route of Phase 4a: zones limit changes only (roles.SCOPED), and a
-place of a device belongs to no single switch. Changing the rules is Admin.
+place of a device belongs to no single switch. Changing the rules is Admin; the watch list is kept by Ändern, like the device
+database, without a zone either: a MAC belongs to no switch.
 """
 import json
 import logging
@@ -13,6 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import api_devices
 import auth
 import compliance
 import csvout
@@ -151,3 +154,42 @@ async def put_compliance_rules(body: RulesIn, user=Depends(auth.require(roles.AD
         log.exception("Eigene Sicherheitsregeln an den Sicherungen")
     await audit(user["username"], "compliance_rules", "", f"aus: {', '.join(off) or '–'} · eigene: {len(custom)}", role=user["role"])
     return await compliance.rules_view()
+
+
+WATCHED = "Diese MAC-Adresse wird schon beobachtet"
+NOT_WATCHED = "Nicht in der Beobachtungsliste"
+
+
+class WatchIn(BaseModel):
+    """A MAC for the watch list, in any usual spelling (api_devices.norm_mac), with a note (stored trimmed; none is fine)."""
+    mac: str = Field(max_length=20)
+    note: str = Field(default="", max_length=200)
+
+
+@router.get("/api/watch")
+async def get_watch_list(user=Depends(auth.require(roles.LESEN))):
+    """Every watched MAC by MAC, each with its note, who added it and when, and its latest sighting (last, null without one)."""
+    return await history.watch_list()
+
+
+@router.post("/api/watch")
+async def add_to_watch_list(body: WatchIn, user=Depends(auth.require(roles.AENDERN))):
+    """Watches a MAC (422 „MAC-Adresse ungültig“, 409 WATCHED when it is watched already) and audits it (watch_add, the MAC, the note);
+    the answer is the entry as GET lists it."""
+    mac = api_devices.norm_mac(body.mac)
+    try:
+        entry = await history.watch_add(mac, body.note.strip(), user)
+    except KeyError:
+        raise HTTPException(409, WATCHED) from None
+    await audit(user["username"], "watch_add", mac, entry["note"], role=user["role"])
+    return entry
+
+
+@router.delete("/api/watch/{mac}")
+async def remove_from_watch_list(mac: str, user=Depends(auth.require(roles.AENDERN))):
+    """Watches the MAC no longer (422 „MAC-Adresse ungültig“, 404 NOT_WATCHED when it is not watched) and audits it (watch_remove)."""
+    mac = api_devices.norm_mac(mac)
+    if not await history.watch_remove(mac):
+        raise HTTPException(404, NOT_WATCHED)
+    await audit(user["username"], "watch_remove", mac, "", role=user["role"])
+    return {"ok": True}

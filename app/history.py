@@ -23,6 +23,10 @@ purge deletes what is older than HISTORY_DAYS from every table of RETAINED, nigh
 search answers "where was device X" (Task 3, GET /api/history): by a MAC in any usual spelling, an IP address (exact) or a part of a
 name or MAC, or by a switch and a port; newest first by last_seen (the place of now on top, even when an old row lives again), paged
 by the cursor "<last_seen>|<id>" of the last row shown. export gives the same rows for the CSV (at most EXPORT_MAX).
+
+The watch list (Task 7, table watch_macs, GET/POST /api/watch, DELETE /api/watch/{mac}): MACs a helpdesk wants to hear of, each
+with a note. After its commit, record hands what it added or revived to alerts.announce_sightings, which tells a new unknown device
+and every watched MAC seen for the first time, at another place or back (watched gives their notes).
 """
 import ipaddress
 import logging
@@ -30,6 +34,7 @@ import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
+import alerts
 import names
 import topology
 from config import settings
@@ -73,7 +78,9 @@ async def record(switch_ids: Iterable[int]) -> list[dict]:
     place (module docstring), in one transaction. Returns one dict per row it added or revived: id, mac, switch_id, switch (its
     name), port, vlan, ip, name, known (the MAC is in devices), suspect (a possible uplink), first (the MAC had no row before),
     moved (a new row while the MAC had one: another place, or another IP at the same place), back (a row whose last sighting was
-    more than back_after minutes ago, continued) and baseline (the switch had no sighting before this call)."""
+    more than back_after minutes ago, continued) and baseline (the switch had no sighting before this call). After the commit, the
+    same list goes to alerts.announce_sightings, wrapped: a failure there is logged ("Meldungen des Verlaufs") and changes nothing
+    of the recording or of what it returns (announce writes on a connection of its own, which would wait out this one's lock)."""
     wanted = set(switch_ids)
     if not wanted:
         return []
@@ -89,6 +96,10 @@ async def record(switch_ids: Iterable[int]) -> list[dict]:
         await conn.execute("BEGIN IMMEDIATE")
         news = await _record(conn, sorted(wanted), ports, base, window)
         await conn.commit()
+    try:
+        await alerts.announce_sightings(news)
+    except Exception:  # noqa: BLE001 - an alert never changes the recording
+        log.exception("Meldungen des Verlaufs")
     return news
 
 
@@ -255,15 +266,23 @@ def _question(q: str | None, switch_id: int | None, port: str | None) -> tuple[s
     return "switch_id = ? AND port = ?", [switch_id, port]
 
 
+def _served(r) -> dict:
+    """A row of sightings as search answers it."""
+    return {"id": r["id"], "mac": r["mac"], "vendor": names.vendor_of(r["mac"]), "ip": r["ip"], "name": r["name"],
+            "switch_id": r["switch_id"], "switch": r["switch_name"], "port": r["port"], "vlan": r["vlan"],
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"], "suspect": bool(r["suspect"])}
+
+
+async def _select(conn, where: str, args: list, limit: int) -> list[dict]:
+    async with conn.execute(f"SELECT {COLUMNS} FROM sightings WHERE {where} ORDER BY last_seen DESC, id DESC LIMIT ?",
+                            [*args, limit]) as cur:
+        return [_served(r) for r in await cur.fetchall()]
+
+
 async def _rows(where: str, args: list, limit: int) -> list[dict]:
     """The first limit rows of sightings under where, newest first (last_seen, then id), as search answers them."""
     async with db() as conn:
-        async with conn.execute(f"SELECT {COLUMNS} FROM sightings WHERE {where} ORDER BY last_seen DESC, id DESC LIMIT ?",
-                                [*args, limit]) as cur:
-            got = await cur.fetchall()
-    return [{"id": r["id"], "mac": r["mac"], "vendor": names.vendor_of(r["mac"]), "ip": r["ip"], "name": r["name"],
-             "switch_id": r["switch_id"], "switch": r["switch_name"], "port": r["port"], "vlan": r["vlan"],
-             "first_seen": r["first_seen"], "last_seen": r["last_seen"], "suspect": bool(r["suspect"])} for r in got]
+        return await _select(conn, where, args, limit)
 
 
 async def search(*, q: str | None = None, switch_id: int | None = None, port: str | None = None, cursor: str | None = None,
@@ -288,3 +307,56 @@ async def export(*, q: str | None = None, switch_id: int | None = None, port: st
     """The rows search gives for the same question, in the same order, all on one page: at most EXPORT_MAX."""
     where, args = _question(q, switch_id, port)
     return await _rows(where, args, EXPORT_MAX)
+
+
+# ── The watch list (Task 7) ──────────────────────────────────────────────────
+async def _last(conn, mac: str) -> dict | None:
+    """The latest sighting of mac as search reads it (the first row of a search by that MAC, on idx_sightings_mac), None without one."""
+    rows = await _select(conn, "mac = ?", [mac], 1)
+    return rows[0] if rows else None
+
+
+async def watch_list() -> list[dict]:
+    """Every watched MAC by MAC: mac, note, created_by, created_at and last, its latest sighting as search reads it (None without
+    one)."""
+    async with db() as conn:
+        async with conn.execute("SELECT mac, note, created_by, created_at FROM watch_macs ORDER BY mac") as cur:
+            out = [dict(r) for r in await cur.fetchall()]
+        for w in out:
+            w["last"] = await _last(conn, w["mac"])
+    return out
+
+
+async def watch_add(mac: str, note: str, user: dict) -> dict:
+    """Watches mac (as api_devices.norm_mac writes it) with note, added by user (auth.current_user) now; the entry as watch_list
+    reads it. KeyError when mac is watched already (nothing changes then)."""
+    now = datetime.now(timezone.utc).strftime(TIME)
+    async with db() as conn:
+        cur = await conn.execute("INSERT INTO watch_macs(mac, note, created_by, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (mac) DO NOTHING",
+                                 (mac, note, user["username"], now))
+        await conn.commit()
+        if cur.rowcount != 1:
+            raise KeyError(mac)
+        return {"mac": mac, "note": note, "created_by": user["username"], "created_at": now, "last": await _last(conn, mac)}
+
+
+async def watch_remove(mac: str) -> bool:
+    """Watches mac no longer; whether it was watched."""
+    async with db() as conn:
+        cur = await conn.execute("DELETE FROM watch_macs WHERE mac = ?", (mac,))
+        await conn.commit()
+    return cur.rowcount == 1
+
+
+async def watched(macs: set[str]) -> dict[str, str]:
+    """Of macs those that are watched, each with its note (MAC -> note); no query for none."""
+    out: dict[str, str] = {}
+    wanted = sorted(macs)
+    if not wanted:
+        return out
+    async with db() as conn:
+        for i in range(0, len(wanted), IN_CHUNK):
+            part = wanted[i:i + IN_CHUNK]
+            async with conn.execute(f"SELECT mac, note FROM watch_macs WHERE mac IN ({', '.join('?' * len(part))})", part) as cur:
+                out |= {r["mac"]: r["note"] for r in await cur.fetchall()}
+    return out

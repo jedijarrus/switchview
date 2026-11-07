@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Container
 from datetime import datetime, timezone
 
+import alerts
 import drivers
 import snmp
 from crypto import decrypt, unreadable
@@ -517,9 +518,11 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
     """Polls the switch and stores what it read; the result is {"ok": True, "ports": n, "macs": n} or {"ok": False, "error": text}.
     Each poll keeps its switch's poll state (poll_failures, down_since, last_ok_at, unread_fields) and then tells its events
     (monitor.poll_succeeded with the ports it replaced, or monitor.poll_failed), wrapped: a failure is logged ("Ereignisse <host>")
-    and changes nothing of the result; a good poll then checks the SNMP access against the security rules (compliance.evaluate_snmp,
-    wrapped the same way, "Sicherheitsregeln <host>"). With record (a single poll: "Jetzt abfragen", the poll after a change) a good
-    poll records its sightings right away (history.record), wrapped as well. poll_all records once for its whole round."""
+    and changes nothing of the result; the events go on to the alerts (alerts.announce_events, wrapped the same way, "Meldungen
+    <host>"). A good poll then checks the SNMP access against the security rules (compliance.evaluate_snmp, wrapped,
+    "Sicherheitsregeln <host>") and hands the new findings to the alerts (alerts.announce_findings, "Meldungen <host>"). With record
+    (a single poll: "Jetzt abfragen", the poll after a change) a good poll records its sightings right away (history.record, which
+    tells its own), wrapped as well. poll_all records once for its whole round."""
     import monitor  # late: monitor → poller
     lock = _locks.setdefault(switch_id, asyncio.Lock())
     async with lock:
@@ -580,9 +583,11 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
                 await conn.commit()
             log.warning("Abfrage %s fehlgeschlagen: %s", host, e)
             try:
-                await monitor.poll_failed(row, str(e), now)
+                down = await monitor.poll_failed(row, str(e), now)
             except Exception:  # noqa: BLE001
                 log.exception("Ereignisse %s", host)
+            else:
+                await _announce(row, alerts.announce_events([down] if down else [], row))
             return {"ok": False, "error": str(e)}
 
         # Every walk this poll did not read completely: a failed one, one that broke off, also outside `keeping` (its rows are taken
@@ -664,14 +669,18 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
             await conn.executemany("INSERT INTO vlans(switch_id, vid, name) VALUES (?,?,?)", [(switch_id, v, n) for v, n in data["vlans"].items()])
             await conn.commit()
         try:
-            await monitor.poll_succeeded(row, old, data, incomplete, now)
+            events = await monitor.poll_succeeded(row, old, data, incomplete, now)
         except Exception:  # noqa: BLE001
             log.exception("Ereignisse %s", host)
+        else:
+            await _announce(row, alerts.announce_events(events, row))
         import compliance  # late: compliance → api_switches → poller (at call time)
         try:
-            await compliance.evaluate_snmp(row)
+            new = await compliance.evaluate_snmp(row)
         except Exception:  # noqa: BLE001
             log.exception("Sicherheitsregeln %s", host)
+        else:
+            await _announce(row, alerts.announce_findings(row, new))
         if record:
             import history  # late: history → topology → changes → poller
             try:
@@ -679,6 +688,15 @@ async def poll_switch(switch_id: int, *, record: bool = True) -> dict:
             except Exception:  # noqa: BLE001
                 log.exception("Verlauf %s", host)
         return {"ok": True, "ports": len(data["ports"]), "macs": len(data["macs"])}
+
+
+async def _announce(row, aw) -> None:
+    """await aw, the alerts of a poll of the switch row (alerts.announce_*): they never raise, and should one, it is logged
+    ("Meldungen <host>") and changes nothing of the poll."""
+    try:
+        await aw
+    except Exception:  # noqa: BLE001
+        log.exception("Meldungen %s", row["host"])
 
 
 def merge_lldp(fresh: list[list[str]], kept: list[list[str]], failed: Container[str]) -> list[list[str]]:
