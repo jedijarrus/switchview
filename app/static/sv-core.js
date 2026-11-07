@@ -28,11 +28,13 @@
     if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
     const r = await fetch(url, opt);
     // A session that ended: the login page names the server's reason (the idle logout, an expired session); "Nicht angemeldet" says
-    // nothing the login page does not
+    // nothing the login page does not. A reason it shows stays: of two requests at once (renderSettings, renderDevices) the first
+    // answer names the idle logout and deletes the session, the second then finds none ("Sitzung abgelaufen")
     if (r.status === 401 && !url.startsWith("/api/auth/")) {
       let why = "";
       try { const d = (r.headers.get("content-type") || "").includes("json") ? await r.json() : null; if (d && typeof d.detail === "string") why = d.detail; } catch (e) { /* kein JSON */ }
-      showLogin(why === "Nicht angemeldet" ? "" : why); throw new Error("Bitte erneut anmelden");
+      if ($("#login").hidden || !$("#login-error").textContent) showLogin(why === "Nicht angemeldet" ? "" : why);
+      throw new Error("Bitte erneut anmelden");
     }
     const data = (r.headers.get("content-type") || "").includes("json") ? await r.json() : await r.text();
     if (!r.ok) { let m = data && data.detail ? data.detail : (typeof data === "string" ? data : "Fehler " + r.status); if (Array.isArray(m)) m = m.map(x => x.msg).join(", "); throw new Error(m); }

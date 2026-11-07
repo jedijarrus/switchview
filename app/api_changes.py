@@ -539,7 +539,8 @@ def _change_out(r, secrets: list[str]) -> dict:
     """A changes row as the API serves it: error, output and the text of every step masked again (cfgparse.mask_secrets with
     secrets, changes._secrets_of of its switch). A row from before Phase 2 was stored unmasked; on one that run_change stored masked
     the masking changes nothing. The row in the database stays as it is (E26, as for backups). Plus can_revert and can_save
-    (changes.actions_of): the UI offers "Rückgängig" and "Trotzdem speichern" by these flags alone."""
+    (changes.actions_of): the UI offers "Rückgängig" and "Trotzdem speichern" by these flags plus the user's role and zone
+    (sv-switch.js mayRevert / maySave, over switch_zone)."""
     d = dict(r) | changes.actions_of(r)
     for k in ("ports", "desired", "before", "commands", "steps"):
         d[k] = json.loads(d[k] or ("[]" if k in ("ports", "commands", "steps") else "{}"))

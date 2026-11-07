@@ -1064,3 +1064,127 @@ def test_devices_need_aendern(role, may):
     assert ('id="d-add"' in view, 'id="d-sync"' in view, 'data-u="0"' in unknown) == (may, may, may)
     assert ('<p class="note gate" id="d-why"' in view, "Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“." in view) == (not may, not may)
     assert ("clickrow" in rows, click) == (may, may)    # beyond the comment: a reader's rows open nothing
+
+
+# Phase 4a Task 8, review round 1: each gate of the brief that no test held, by role and zone (SW lies in zone "VK"); each dies
+# under its mutation (see the Phase 4a note, T8-k)
+@pytest.mark.parametrize("zone, zones, offered", [("VK", ["EK"], False), ("VK", ["VK"], True), ("VK", None, True), ("", [""], True), ("", ["EK"], False)])
+def test_the_change_list_offers_revert_and_save_only_in_the_users_zones(zone, zones, offered):
+    rows = [{**ROWS[0], "expert": 0, "switch_zone": zone}]
+    html = in_dom(role_me("aendern", zones=zones) + LIST % (json.dumps(rows), 10, "return el.innerHTML;"))
+    assert ('data-cr="7"' in html, 'data-cs="7"' in html) == (offered, offered)
+
+
+# The footer runProgress builds once the change has ended: the stub's innerHTML = "" keeps the first footer's "Schließen" (modal())
+FOOT = ('(async () => { current = "audit"; api = async () => (%s); await runProgress({id: 1, k: "SW"}, 4); '
+        'return $("#m-foot").children.slice(1).map(b => b.textContent); })()')
+FAILED_SENT = {**DONE, "status": "failed", "sent": 1, "kind": "ports", "saved": 0, "can_revert": True, "can_save": True, "switch_zone": "VK"}
+
+
+@pytest.mark.parametrize("role, zones, expert, want", [
+    ("lesen", None, 0, ["Schließen"]), ("aendern", None, 0, ["Rückgängig", "Trotzdem speichern", "Schließen"]),
+    ("aendern", None, 1, ["Trotzdem speichern", "Schließen"]), ("freigeben", None, 1, ["Rückgängig", "Trotzdem speichern", "Schließen"]),
+    ("aendern", ["EK"], 0, ["Schließen"]), ("aendern", ["VK"], 0, ["Rückgängig", "Trotzdem speichern", "Schließen"])])
+def test_the_result_of_a_change_offers_what_role_and_zone_allow(role, zones, expert, want):
+    assert in_dom(role_me(role, zones=zones) + FOOT % json.dumps({**FAILED_SENT, "expert": expert})) == want
+
+
+READY = {"host": True, "coa": True, "tw": True, "eap": True, "active": True, "park": True, "login_radius": False, "others": []}
+PREPARE_NOTE = "„Vorbereiten“ braucht die Rolle „Admin“ (es sendet das RADIUS-Secret an den Switch)."
+
+
+@pytest.mark.parametrize("role, missing, button, note", [("lesen", True, False, True), ("aendern", True, False, True), ("admin", True, True, False),
+                                                         ("lesen", False, False, False)])
+def test_only_an_admin_is_offered_to_prepare_a_switch(role, missing, button, note):
+    html = in_dom(role_me(role) + f"radiusCard({json.dumps({**SW, 'ready': {**READY, 'host': not missing}})})")
+    assert ('data-a="prepare"' in html, PREPARE_NOTE in html) == (button, note)
+
+
+TRUNK_WHY = "Einen Trunk ändern geht nur im Expertenmodus, und der braucht die Rolle „Freigeben“."
+
+
+@pytest.mark.parametrize("role, four, zones, why", [
+    ("aendern", False, None, TRUNK_WHY), ("aendern", True, None, None), ("freigeben", False, None, None),
+    ("aendern", True, ["EK"], "Dieser Switch liegt in der Zone „Ohne Zone“. Du darfst nur an Switches der Zonen „EK“ ändern.")])
+def test_a_trunk_is_offered_for_editing_only_with_expert_mode(role, four, zones, why):
+    html = in_dom(role_me(role, four_eyes=four, zones=zones) + trk() + 'openPort(sw, "Trk1"); $("#dr-body").innerHTML')
+    assert ('id="dr-edit">Trunk bearbeiten</button>' in html) == (why is None)
+    assert (f'<p class="note gate" id="dr-why">{why}</p>' in html) if why else 'id="dr-why"' not in html
+
+
+@pytest.mark.parametrize("role, offered", [("lesen", False), ("aendern", True)])
+def test_a_learned_device_is_offered_as_a_new_device_with_aendern(role, offered):
+    js = (role_me(role) + PANEL + 'Object.assign(portIdx["1"], {mc: 1, d: [["aa:bb:cc:00:00:09", "1", "10.0.0.9", "", "", 0]]}); '
+          + OPEN_PANEL + '$("#dr-body").innerHTML')
+    assert ('data-newdev="aa:bb:cc:00:00:09">Als Gerät anlegen</button>' in in_dom(js)) == offered
+
+
+PORT = {"n": "1", "l": [], "d": [], "u": ["1"], "t": [], "mc": 0, "tr": "", "a": "", "pv": "1", "st": "", "o": True, "ad": True, "s": 1000}
+MAP_SW = {"switches": [{**SW, "host": "10.0.0.1", "ports": [PORT]}], "links": [], "vlans": {}}
+MAY = [("lesen", None, False), ("aendern", None, True), ("aendern", ["EK"], False), ("aendern", ["VK"], True)]
+
+
+@pytest.mark.parametrize("role, zones, may", MAY)
+def test_only_who_may_change_the_switch_picks_its_ports(role, zones, may):
+    js = role_me(role, zones=zones) + 'MAP = {switches: [], links: [], vlans: {}}; renderPortRows(%s); $("#ptbody").innerHTML' % json.dumps(
+        MAP_SW["switches"][0])
+    assert ('data-pick="1"' in in_dom(js)) == may
+
+
+# renderSwitchDetail with MAP set (no /api/netmap); the stub's closest() answers null, so applySwFilter (the VLAN highlight) is left
+# out, and $(".dhead .actions") is named for it
+DETAIL = ('(async () => { MAP = %s; selSwitch = %s; api = async () => []; applySwFilter = () => {}; document.els[".dhead .actions"] = $("#acts"); '
+          'await renderSwitchDetail(); return $("#view").innerHTML; })()')
+
+
+@pytest.mark.parametrize("role, zones, may", MAY)
+def test_the_switch_view_offers_picking_all_and_the_selection_bar_only_to_who_may_change(role, zones, may):
+    html = in_dom(role_me(role, zones=zones) + DETAIL % (json.dumps(MAP_SW), 1))
+    assert ('id="pick-all"' in html, 'id="selbar"' in html) == (may, may)
+
+
+@pytest.mark.parametrize("role, add", [("admin", True), ("freigeben", False)])
+def test_only_an_admin_is_offered_to_add_a_switch(role, add):
+    empty, full = (in_dom(role_me(role) + DETAIL % (m, s)) for m, s in (("{switches: [], links: [], vlans: {}}", "null"), (json.dumps(MAP_SW), 1)))
+    assert ('id="btn-add"' in empty, 'id="btn-add"' in full) == (add, add)
+    assert ("Links „Switch hinzufügen“." in empty, "Switches anlegen braucht die Rolle „Admin“." in empty) == (add, not add)
+
+
+@pytest.mark.parametrize("role, add", [("admin", True), ("lesen", False)])
+def test_the_empty_overview_tells_only_an_admin_to_add_a_switch(role, add):
+    html = in_dom(role_me(role) + '(async () => { api = async () => ({switches: [], links: [], vlans: {}}); await renderOverview(); '
+                  'return $("#view").innerHTML; })()')
+    assert ('id="go-add"' in html, "Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an." in html) == (add, add)
+    assert ("Switches anlegen braucht die Rolle „Admin“." in html) == (not add)
+
+
+# Review round 1: renderSettings and renderDevices ask twice at once; when the session ended idle, the first answer names the
+# reason and deletes the session, the second finds none ("Sitzung abgelaufen"). The login page keeps the reason it shows; one
+# shown without a reason takes a later one, and after a new sign-in (start() hides the login page) a 401 names its own again
+IDLE_WHY = "Abgemeldet nach 120 Minuten ohne Aktivität – bitte neu anmelden"
+
+
+@pytest.mark.parametrize("answers, between, want", [
+    ([IDLE_WHY, "Sitzung abgelaufen"], "", IDLE_WHY), (["Nicht angemeldet", IDLE_WHY], "", IDLE_WHY),
+    ([IDLE_WHY, "Sitzung abgelaufen"], '$("#login").hidden = true; ', "Sitzung abgelaufen")], ids=["kept", "first-without", "signed-in-again"])
+def test_a_second_401_keeps_the_reason_the_login_page_shows(answers, between, want):
+    js = ('(async () => { const answers = %s; fetch = async () => ({status: 401, ok: false, headers: {get: () => "application/json"}, '
+          'json: async () => ({detail: answers.shift()})}); await api("GET", "/api/settings").catch(() => {}); %s'
+          'await api("GET", "/api/zone-scopes").catch(() => {}); return [$("#login").hidden, $("#login-error").hidden, $("#login-error").textContent]; })()'
+          ) % (json.dumps(answers), between)
+    assert in_dom(js) == [False, False, want]
+
+
+# Review round 1: a stored zone list the field cannot hold as it is (SVLogic.lossyScopes) is named above the field, which names the
+# note in aria-describedby; a list it holds has no note
+LOSSY = ("Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: „A=B“, „Z.H“. Eine Zone mit Komma oder mit dem Namen "
+         "„Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben; „Zonen speichern“ würde sie ändern.")
+
+
+@pytest.mark.parametrize("entries, noted", [([{"principal": "Z.EK", "zones": ["EK"]}], False),
+                                            ([{"principal": "A=B", "zones": ["EK"]}, {"principal": "Z.H", "zones": ["Haus 1, Nord"]}], True)])
+def test_the_zones_card_names_entries_the_field_cannot_hold(entries, noted):
+    js = '(async () => { ' + SETTINGS.replace("{entries: []}", json.dumps({"entries": entries})) + 'return $("#view").innerHTML; })()'
+    html = in_dom(js)
+    assert (f'<p class="note warn" id="s-scopes-lossy" style="margin:0">{LOSSY}</p>' in html) == noted
+    assert ('aria-describedby="s-scopes-hint s-scopes-lossy"' in html) == noted and ('aria-describedby="s-scopes-hint"' in html) == (not noted)

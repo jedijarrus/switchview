@@ -142,25 +142,39 @@ const SVLogic = {
   },
   // The zone list of the settings (PUT /api/zone-scopes) from its text: a line "<App-Rolle> = <Zone>, <Zone>" per app role, empty
   // lines and lines starting with "#" skipped, "Ohne Zone" for the switches without a zone (""). One app role on two lines is one
-  // entry, its zones once each in the order they first came; errors name the line (1 = the first)
+  // entry, its zones once each in the order they first came; errors name the line (1 = the first), also for the limits of
+  // api_settings.ZoneScope (an app role at most 200 characters, a zone at most 40, as Python counts them: code points; at most 100
+  // zones per app role and 200 app roles), and a line with an error adds nothing
   parseScopes(text) {
-    const entries = [], errors = [];
+    const entries = [], errors = [], chars = s => [...s].length;
     String(text || "").split("\n").forEach((raw, i) => {
-      const line = raw.trim(), eq = line.indexOf("=");
+      const line = raw.trim(), eq = line.indexOf("="), bad = why => errors.push(`Zeile ${i + 1}: ${why}`);
       if (!line || line.startsWith("#")) return;
       const principal = eq < 0 ? "" : line.slice(0, eq).trim();
-      if (!principal) { errors.push(`Zeile ${i + 1}: „App-Rolle = Zone, Zone“ erwartet`); return; }
+      if (!principal) return bad("„App-Rolle = Zone, Zone“ erwartet");
+      if (chars(principal) > 200) return bad("App-Rolle länger als 200 Zeichen");
       const zones = line.slice(eq + 1).split(",").map(z => z.trim()).filter(Boolean).map(z => (z === "Ohne Zone" ? "" : z));
-      if (!zones.length) { errors.push(`Zeile ${i + 1}: keine Zone`); return; }
-      let e = entries.find(x => x.principal === principal);
-      if (!e) entries.push(e = { principal, zones: [] });
-      zones.forEach(z => { if (!e.zones.includes(z)) e.zones.push(z); });
+      if (!zones.length) return bad("keine Zone");
+      if (zones.some(z => chars(z) > 40)) return bad("Zone länger als 40 Zeichen");
+      const e = entries.find(x => x.principal === principal), merged = [...new Set([...(e ? e.zones : []), ...zones])];
+      if (merged.length > 100) return bad("mehr als 100 Zonen für eine App-Rolle");
+      if (!e && entries.length === 200) return bad("mehr als 200 App-Rollen");
+      if (e) e.zones = merged; else entries.push({ principal, zones: merged });
     });
     return { entries, errors };
   },
   // The text of a zone list (GET /api/zone-scopes entries), the inverse of parseScopes
   formatScopes(entries) {
     return (entries || []).map(e => `${e.principal} = ${e.zones.map(z => (z === "" ? "Ohne Zone" : z)).join(", ")}`).join("\n");
+  },
+  // The app roles of the entries whose line formatScopes writes and parseScopes reads back otherwise (the text has no quoting): a
+  // comma in a zone, a zone named "Ohne Zone", an "=" in the app role or a "#" at its start. Saving the field would change them
+  lossyScopes(entries) {
+    const same = (a, b) => a.length === b.length && a.every((z, i) => z === b[i]);
+    return (entries || []).filter(e => {
+      const [back, more] = SVLogic.parseScopes(SVLogic.formatScopes([e])).entries;
+      return !back || more || back.principal !== e.principal || !same(back.zones, e.zones);
+    }).map(e => e.principal);
   },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;

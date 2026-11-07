@@ -218,3 +218,24 @@ def test_parse_scopes(text, entries, errors):
 def test_format_scopes_reverses_parse_scopes():
     text = "SwitchView.Zone.EK = EK, Lager\nSwitchView.Zone.VK = VK, Ohne Zone"
     assert run(f"L.formatScopes(L.parseScopes({json.dumps(text)}).entries)") == text
+
+
+# Review round 1: the limits of PUT /api/zone-scopes (api_settings.ZoneScope: an app role 1-200 characters, a zone at most 40, at
+# most 100 zones per app role and 200 app roles) as German line errors, before the server's 422 answers in pydantic's English;
+# characters as Python counts them (code points: an emoji is one)
+def test_parse_scopes_keeps_the_limits_of_the_server():
+    many = ", ".join(f"z{i}" for i in range(100))
+    text = "\n".join(["X = " + "a" * 40, "Y = " + "a" * 41, "R" * 201 + " = EK", "R" * 200 + " = EK", "E = " + "😀" * 40, "M = " + many, "M = z100"])
+    got = run(f"(r => [r.entries.map(e => [e.principal.length, e.zones.length]), r.errors])(L.parseScopes({json.dumps(text)}))")
+    assert got == [[[1, 1], [200, 1], [1, 1], [1, 100]],
+                   ["Zeile 2: Zone länger als 40 Zeichen", "Zeile 3: App-Rolle länger als 200 Zeichen", "Zeile 7: mehr als 100 Zonen für eine App-Rolle"]]
+    roles = "\n".join(f"R{i} = EK" for i in range(201))
+    assert run(f"(r => [r.entries.length, r.errors])(L.parseScopes({json.dumps(roles)}))") == [200, ["Zeile 201: mehr als 200 App-Rollen"]]
+
+
+# Review round 1: the text has no quoting, so a stored entry with a comma in a zone, a zone named "Ohne Zone", an "=" in its app
+# role or a "#" at its start does not read back as stored; saving the field would change it, and the zones card names it
+def test_lossy_scopes_names_the_entries_the_text_cannot_hold():
+    entries = [{"principal": "Z.EK", "zones": ["", "EK"]}, {"principal": "Z.H", "zones": ["Haus 1, Nord"]}, {"principal": "A=B", "zones": ["EK"]},
+               {"principal": "#X", "zones": ["EK"]}, {"principal": "Z.O", "zones": ["Ohne Zone"]}, {"principal": "Z.K", "zones": ["Lager", "VK"]}]
+    assert run(f"L.lossyScopes({json.dumps(entries)})") == ["Z.H", "A=B", "#X", "Z.O"]

@@ -453,6 +453,8 @@
       .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!got) return;
     const [s, scopes] = got, admin = roleOk("admin"), dis = admin ? "" : " disabled";
+    // Stored entries the field cannot hold as they are (SVLogic.lossyScopes): named above it, so a save does not change them unseen
+    const lossy = SVLogic.lossyScopes(scopes.entries);
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
     // A secret field (k its key in s.unreadable, set: a value is stored): the input with its hint and its unread note as siblings,
@@ -487,7 +489,8 @@
       ${admin ? `<div><button class="btn primary" type="button" id="s-save">Speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Zonen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Benutzer mit „Ändern“ oder „Freigeben“ und einer dieser Entra-App-Rollen ändern nur Switches dieser Zonen. Wer keine trägt, ist nicht beschränkt.</p>
-        <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint"${dis}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label>
+        ${lossy.length ? `<p class="note warn" id="s-scopes-lossy" style="margin:0">Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: ${lossy.map(x => `„${esc(x)}“`).join(", ")}. Eine Zone mit Komma oder mit dem Namen „Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben; „Zonen speichern“ würde sie ändern.</p>` : ""}
+        <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint${lossy.length ? " s-scopes-lossy" : ""}"${dis}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label>
         ${admin ? `<div><button class="btn small" type="button" id="s-zones-save">Zonen speichern</button></div>` : ""}</div></section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>

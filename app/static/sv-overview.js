@@ -5,8 +5,8 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(true); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     if (!MAP.switches.length) {
-      // Adding a switch is Admin (POST /api/switches): below Admin the empty overview says so instead of the button
-      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b><span>Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an.</span>${roleOk("admin") ? `<button class="btn primary" type="button" id="go-add">Switch hinzufügen</button>` : `<span>Switches anlegen braucht die Rolle „Admin“.</span>`}</div></div>`;
+      // Adding a switch is Admin (POST /api/switches): below Admin the empty overview says so instead of the instruction and the button
+      v.innerHTML = `<div class="card"><div class="empty"><b>Noch keine Switches</b>${roleOk("admin") ? `<span>Lege unter „Switches“ den ersten Switch mit seinen Zugangsdaten an.</span><button class="btn primary" type="button" id="go-add">Switch hinzufügen</button>` : `<span>Switches anlegen braucht die Rolle „Admin“.</span>`}</div></div>`;
       if (roleOk("admin")) $("#go-add").addEventListener("click", () => editSwitch(null));
       return;
     }
