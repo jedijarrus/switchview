@@ -634,3 +634,94 @@ def test_more_never_asks_for_more_than_500():
 def test_a_change_that_sent_nothing_leaves_another_view_alone(where):
     c = {**DONE, "status": "failed", "sent": 0, "kind": "ports", "saved": 0}
     assert in_dom(RUN.replace('current = "switches"; selSwitch = 1;', where) % json.dumps(c)) == []
+
+
+# Phase 5 Task 9: a whole trunk is edited from the port panel, its VLANs only and in expert mode (Logik Phase 5, A2 there). The trunk
+# Trk1 (members 5, 6) sits untagged in VLAN 1 and tagged in 20; the switch has VLANs 1, 20, 30. modal is replaced to read the form back.
+TRK = ('MAP = {switches: [], links: [], vlans: {"1": "default", "20": "Clients", "30": "Voice"}}; '
+       'const trk = {n: %s, u: ["1"], t: ["20"], tr: %s, mb: ["5", "6"], l: [], d: [], mc: 0, o: true, ad: true, s: 2000, a: "", pv: "1", st: ""}; '
+       'portIdx = {[trk.n]: trk}; const sw = {id: 1, k: "SW", ssh: true, caps: ["cli", "nac"], vl: ["1", "20", "30"], ports: [trk]}; '
+       'let cap = null; modal = (t, b, btns) => { cap = {t, b, btns}; }; ')
+
+
+def trk(name="Trk1"):
+    return TRK % (json.dumps(name), json.dumps(name))
+
+
+def test_a_trunk_opens_its_own_form_with_vlans_only():
+    t, b, labels = in_dom(trk() + 'editTrunk(sw, "Trk1"); [cap.t, cap.b, cap.btns.map(x => x.label)]')
+    assert t == "Trunk Trk1 bearbeiten" and labels == ["Abbrechen", "Vorschau"]
+    assert all(x in b for x in ('id="f-u"', 'data-ta="30"', 'data-tr="20"', 'id="f-expert"', 'id="f-gate-trk"'))
+    assert not any(x in b for x in ('name="f-st"', 'id="f-name"', 'id="f-poe"', 'id="f-lim"', 'id="f-guest"'))
+
+
+def test_trunk_payload():
+    assert in_dom('[trunkPayload("Trk1", "20", ["30"], [], true), trunkPayload("Trk1", "", [], ["20"], false), trunkPayload("Po1", "", [], [], 1)]') == [
+        {"mode": "ports", "ports": ["Trk1"], "change": {"untagged": "20", "tagged_add": ["30"]}, "expert": True},
+        {"mode": "ports", "ports": ["Trk1"], "change": {"tagged_remove": ["20"]}, "expert": False},
+        {"mode": "ports", "ports": ["Po1"], "change": {}, "expert": True}]
+
+
+def test_a_trunk_preview_needs_expert_mode():
+    js = (trk() + 'let got = null; previewChange = (s, p) => { got = p; }; editTrunk(sw, "Trk1"); $("#f-u").value = "20"; cap.btns[1].onClick(); '
+          'const a = [$("#toasts").children.map(t => t.textContent), got]; $("#f-expert").checked = true; cap.btns[1].onClick(); [...a, got]')
+    assert in_dom(js) == [["Für einen Trunk den Expertenmodus einschalten"], None,
+                          {"mode": "ports", "ports": ["Trk1"], "change": {"untagged": "20"}, "expert": True}]
+
+
+@pytest.mark.parametrize("port, label", [("Trk1", "Trunk bearbeiten"), ("5", "Port bearbeiten")])
+def test_the_port_panel_offers_trunk_editing(port, label):
+    js = trk() + ('const m = {n: "5", u: [], t: [], tr: "Trk1", mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
+                  'portIdx["5"] = m; sw.ports.push(m); openPort(sw, %s); $("#dr-body").innerHTML') % json.dumps(port)
+    assert f'id="dr-edit">{label}</button>' in in_dom(js)
+
+
+def test_a_trunk_form_escapes_its_name():                                               # Review Focus 5
+    b = in_dom(trk('Po"<1') + 'editTrunk(sw, \'Po"<1\'); cap.b')
+    assert "Po&quot;&lt;1" in b and 'Po"<1' not in b
+
+
+# Beyond the brief: the panel's button opens the form of its port (the brief pins the label only), "Vorschau" with nothing chosen,
+# "Zurück" from the preview brings the form back as it was (chips read through the stub's document.lists), a click toggles a chip,
+# and vlanChipButtons keeps the markup of editPorts' former local chipBtns (a member port's chips carry its gate)
+@pytest.mark.parametrize("port, title", [("Trk1", "Trunk Trk1 bearbeiten"), ("5", "Port 5 bearbeiten")])
+def test_the_panel_button_opens_the_form_of_its_port(port, title):
+    js = trk() + ('const m = {n: "5", u: [], t: [], tr: "Trk1", mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
+                  'portIdx["5"] = m; sw.ports.push(m); openPort(sw, %s); $("#dr-edit").fire("click"); '
+                  '[cap && cap.t, $("#drawer").classList.contains("open")]') % json.dumps(port)
+    assert in_dom(js) == [title, False]
+
+
+def test_a_trunk_preview_needs_a_field():
+    js = (trk() + 'let got = null; previewChange = (s, p) => { got = p; }; editTrunk(sw, "Trk1"); $("#f-expert").checked = true; '
+          'cap.btns[1].onClick(); [$("#toasts").children.map(t => t.textContent), got]')
+    assert in_dom(js) == [["Nichts ausgewählt, was sich ändern soll"], None]
+
+
+def test_back_from_the_trunk_preview_keeps_the_form():
+    js = (trk() + 'let got = null, back = null; previewChange = (s, p, b) => { got = p; back = b; }; editTrunk(sw, "Trk1"); '
+          'document.lists["[data-ta][aria-pressed=true]"] = [{dataset: {ta: "30"}}]; document.lists["[data-tr][aria-pressed=true]"] = [{dataset: {tr: "20"}}]; '
+          '$("#f-u").value = "1"; $("#f-expert").checked = true; cap.btns[1].onClick(); back(); [got, cap.t, cap.b]')
+    got, t, b = in_dom(js)
+    assert got == {"mode": "ports", "ports": ["Trk1"], "change": {"untagged": "1", "tagged_add": ["30"], "tagged_remove": ["20"]}, "expert": True}
+    assert t == "Trunk Trk1 bearbeiten"
+    assert all(x in b for x in ('<option value="1" selected>', 'data-ta="30" aria-pressed="true"', 'data-tr="20" aria-pressed="true"',
+                                'id="f-expert" checked>'))
+    assert 'data-ta="20" aria-pressed="false"' in b and '<option value="20" selected>' not in b
+
+
+def test_a_click_on_a_chip_of_the_trunk_form_toggles_it():
+    js = (trk() + 'editTrunk(sw, "Trk1"); const c = $("#chip"); c.setAttribute("aria-pressed", "false"); '
+          'const click = () => $("#m-body").onclick({target: {closest: s => s === "[data-ta],[data-tr]" ? c : null}}); '
+          'click(); const a = c.getAttribute("aria-pressed"); click(); [a, c.getAttribute("aria-pressed")]')
+    assert in_dom(js) == ["true", "false"]
+
+
+def test_vlan_chip_buttons_keep_the_markup_of_the_port_form():
+    js = (trk() + 'const m = {n: "5", u: [], t: [], tr: "Trk1", mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
+          'portIdx["5"] = m; editPorts(sw, ["5"]); [vlanChipButtons(["20"], ["20"], "ta"), vlanChipButtons([], [], "tr"), cap.b]')
+    chip, none, form = in_dom(js)
+    assert chip == ('<div class="chipset"><button type="button" class="vchip small" data-ta="20" aria-pressed="true" style="--vc:hsl(220 55% 50%)">'
+                    '<i class="sw"></i><span class="id">20</span><span class="nm">Clients</span></button></div>')
+    assert none == '<span class="muted" style="font-size:12.5px">keine</span>'
+    assert 'data-ta="30" aria-pressed="false" style="--vc:hsl(330 55% 50%)" disabled aria-describedby="f-gate-mem">' in form   # a member's gate

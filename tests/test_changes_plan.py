@@ -296,6 +296,15 @@ def test_plan_ports_expert_allows_uplink_vlan_change(cfg):
     assert plan["expert"] is True
 
 
+@pytest.mark.parametrize("change, commands", [({"untagged": "1"}, ["vlan 1 untagged Trk1"]), ({"tagged_remove": ["99"]}, ["no vlan 99 tagged Trk1"]),
+                                              ({"tagged_add": ["1"]}, ["vlan 1 tagged Trk1"])])
+def test_plan_ports_expert_allows_trunk_vlan_change(cfg, change, commands):
+    """Pin of the server rule the trunk form (Phase 5 Task 9) relies on: in expert mode a trunk takes untagged, tagged_add and
+    tagged_remove."""
+    plan = changes.plan_ports(FW, make_inv(), cfg, {"ports": ["Trk1"], "set": change, "expert": True})
+    assert (plan["blocked"], plan["commands"]) == ([], commands)
+
+
 def test_plan_ports_nac_needs_radius_ready_switch(cfg):
     """Port-level NAC changes need the switch-wide RADIUS prerequisites; plain VLAN changes do not.
 

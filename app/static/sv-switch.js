@@ -169,6 +169,9 @@
 
   /* ── Ports bearbeiten: Formular → Vorschau → Ausführen mit Fortschritt ── */
   const LIMITS = [1, 2, 4, 8, 16, 32];
+  // The VLAN chips of a form (port and trunk): one toggle button per VLAN id in ids, pressed when sel holds it; data-<attr> names the
+  // list it belongs to (ta: tagged add, tr: tagged remove), gate the attributes of a locked chip (disabled plus its reason)
+  const vlanChipButtons = (ids, sel, attr, gate = "") => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"${gate}><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
   function editPorts(s, ports, prev) {
     ports = ports.filter(n => portIdx[n]).sort((a, b) => (isNum(a) ? +a : 999) - (isNum(b) ? +b : 999));
     if (!ports.length) return;
@@ -202,7 +205,6 @@
       ${!s.snmp_write ? `<p class="note gate" id="f-gate-poe">PoE schaltet SwitchView nur per SNMP: dafür im Zugang „SNMP darf schreiben“ einschalten.</p>`
         : has(s, "cli") ? `<p class="note" style="margin:0">PoE geht immer per SNMP, auch wenn SSH geht. Zusammen mit RADIUS, Bekannte Geräte, Protected, Geräte pro Port oder Gast-VLAN geht es nicht: bitte getrennt ändern.</p>` : ""}`
       : poeCap && noPoe.length < ps.length ? `<p class="note gate">PoE nur, wenn jeder gewählte Port PoE hat (ohne PoE: ${esc(noPoe.map(p => p.n).join(", "))}).</p>` : "";
-    const chipBtns = (ids, sel, attr) => ids.length ? `<div class="chipset">${ids.map(id => `<button type="button" class="vchip small" data-${attr}="${esc(id)}" aria-pressed="${sel.includes(id)}" style="--vc:${vcol(id)}"${memGate}><i class="sw"></i><span class="id">${esc(id)}</span><span class="nm">${esc(vname(id))}</span></button>`).join("")}</div>` : `<span class="muted" style="font-size:12.5px">keine</span>`;
     const lims = LIMITS.filter(n => n <= (s.limitMax || 2));
     const body = `<p class="note" style="margin:0">${ports.length === 1 ? "Port" : ports.length + " Ports"}: <span class="mono">${esc(ports.join(", "))}</span></p>
       ${memWhy ? `<p class="note gate" id="f-gate-mem">${esc(memWhy)}</p>` : ""}
@@ -213,8 +215,8 @@
       <label class="check"><input type="checkbox" id="f-nclear" ${f.nameClear ? "checked" : ""}> Beschreibung entfernen</label>
       ${poeHtml}
       <details class="adv"><summary>Getaggte VLANs, Geräte pro Port, Gast-VLAN</summary><div style="display:grid;gap:12px;margin-top:10px">
-        <div class="field"><span>Getaggt hinzufügen</span>${chipBtns(vl, f.add, "ta")}</div>
-        <div class="field"><span>Getaggt entfernen</span>${chipBtns(tagUnion, f.rem, "tr")}</div>
+        <div class="field"><span>Getaggt hinzufügen</span>${vlanChipButtons(vl, f.add, "ta", memGate)}</div>
+        <div class="field"><span>Getaggt entfernen</span>${vlanChipButtons(tagUnion, f.rem, "tr", memGate)}</div>
         <div class="grid2"><div class="field"><label for="f-lim">Geräte pro Port</label><select id="f-lim" aria-describedby="f-lim-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="">unverändert${ps.every(p => !p.lim) ? " (Standard 1)" : ""}</option>${lims.map(n => `<option value="${n}" ${String(f.limit) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint" id="f-lim-hint">${nac ? "gilt für RADIUS und Bekannte Geräte" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div>
           <div class="field"><label for="f-guest">Gast-VLAN für Unbekannte</label><select id="f-guest" aria-describedby="f-guest-hint${mem ? " f-gate-mem" : ""}" ${nac && !mem ? "" : "disabled"}><option value="-">unverändert</option><option value="" ${f.guest === "" ? "selected" : ""}>keins (gesperrt)</option>${vl.map(id => `<option value="${esc(id)}" ${f.guest === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select><span class="hint" id="f-guest-hint">${nac ? "statt Sperre, wenn die Anmeldung scheitert" : "nur über die SSH-CLI (ProCurve mit SSH-Zugang)"}</span></div></div>
       </div></details>
@@ -245,6 +247,46 @@
     $("#f-name").addEventListener("input", () => { f.nameEdited = true; });
     const hint = () => { const st = (document.querySelector('input[name="f-st"]:checked') || {}).value; $("#f-u-hint").textContent = st === "radius" || st === "known" ? "gilt, wenn PacketFence kein VLAN vorgibt" : st === "protected" ? "jedes Gerät landet in diesem VLAN" : ""; };
     document.querySelectorAll('input[name="f-st"]').forEach(r => r.addEventListener("change", hint)); hint();
+  }
+
+  /* ── Editing a trunk: its VLANs only, in expert mode only (exclusion A2 of docs/logik-phase3.md, done in Phase 5) ── */
+  // The plan request for trunk n: change holds only the fields that are set (untagged, tagged_add, tagged_remove)
+  function trunkPayload(n, untagged, add, rem, expert) {
+    const change = {};
+    if (untagged) change.untagged = untagged;
+    if (add.length) change.tagged_add = add;
+    if (rem.length) change.tagged_remove = rem;
+    return { mode: "ports", ports: [n], change, expert: !!expert };
+  }
+  // A trunk (TrkN or a LAG) takes only VLANs: name and on / off go to its member ports, an authentication (RADIUS, known devices)
+  // never to a trunk (changes.plan_ports). The form asks for expert mode before the preview; the server stays the authority for
+  // every lock. prev: the form's state when "Zurück" comes from the preview.
+  function editTrunk(s, n, prev) {
+    const p = portIdx[n]; if (!p) return;
+    const f = prev || { untagged: "", add: [], rem: [], expert: false };
+    const vl = s.vl && s.vl.length ? s.vl : Object.keys(MAP.vlans);
+    const body = `<p class="note" style="margin:0">Trunk <span class="mono">${esc(n)}</span> aus den Ports <span class="mono">${esc(p.mb.join(", ") || "–")}</span> · ungetaggt jetzt <span class="mono">${esc(p.u.join(", ") || "keins")}</span> · getaggt jetzt <span class="mono">${esc(p.t.join(", ") || "keine")}</span></p>
+      <p class="note gate" id="f-gate-trk">Am Trunk gehen nur VLANs. Name und An/Aus an den Mitglied-Ports, eine Anmeldung (RADIUS, Bekannte Geräte) nie an Trunks.</p>
+      <div class="grid2"><label class="field"><span>VLAN ungetaggt</span><select id="f-u"><option value="">unverändert</option>${vl.map(id => `<option value="${esc(id)}" ${f.untagged === id ? "selected" : ""}>${esc(id)} · ${esc(vname(id))}</option>`).join("")}</select></label></div>
+      <div class="field"><span>Getaggt hinzufügen</span>${vlanChipButtons(vl, f.add, "ta")}</div>
+      <div class="field"><span>Getaggt entfernen</span>${vlanChipButtons(p.t, f.rem, "tr")}</div>
+      <label class="check warnbox"><input type="checkbox" id="f-expert"${f.expert ? " checked" : ""}> Expertenmodus: Trunk ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>`;
+    const collect = () => {
+      f.untagged = $("#f-u").value;
+      f.add = [...document.querySelectorAll("[data-ta][aria-pressed=true]")].map(b => b.dataset.ta);
+      f.rem = [...document.querySelectorAll("[data-tr][aria-pressed=true]")].map(b => b.dataset.tr);
+      f.expert = $("#f-expert").checked;
+      return trunkPayload(n, f.untagged, f.add, f.rem, f.expert);
+    };
+    modal(`Trunk ${n} bearbeiten`, body, [
+      { label: "Abbrechen", onClick: closeModal },
+      { label: "Vorschau", cls: "primary", onClick: () => {
+        const payload = collect();
+        if (!f.expert) { toast("Für einen Trunk den Expertenmodus einschalten"); return; }
+        if (!Object.keys(payload.change).length) { toast("Nichts ausgewählt, was sich ändern soll"); return; }
+        previewChange(s, payload, () => editTrunk(s, n, f));
+      } }]);
+    $("#m-body").onclick = e => { const b = e.target.closest("[data-ta],[data-tr]"); if (b) b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); };
   }
 
   async function previewChange(s, payload, back) {
@@ -376,13 +418,14 @@
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>` : `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>`;
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
-    const canEdit = writable(s) && !isTrunkPort(p), why = unconfirmedWhy(p);
-    $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">Port bearbeiten</button></div>` : ""}
+    // A trunk opens its own form (VLANs only, editTrunk), every other port the port form
+    const canEdit = writable(s), trunk = isTrunkPort(p), why = unconfirmedWhy(p);
+    $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">${trunk ? "Trunk bearbeiten" : "Port bearbeiten"}</button></div>` : ""}
       <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
       <dt>Trunk</dt><dd>${p.n.startsWith("Trk") ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${devs}`;
-    if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); editPorts(s, [p.n]); });
+    if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); if (trunk) editTrunk(s, p.n); else editPorts(s, [p.n]); });
     $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
     $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();
   }
