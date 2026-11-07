@@ -1,6 +1,7 @@
-"""The four-eyes routes (Phase 4a, Task 6): request a change that needs an approval (POST /api/approvals), list and read the
-requests, withdraw one's own, reject someone else's. Task 7 adds reviewing and approving, and registers the kind port_change
-(approvals.register). The mechanism itself is app/approvals.py.
+"""The four-eyes routes (Phase 4a, Tasks 6 and 7): request a change that needs an approval (POST /api/approvals), list and read the
+requests, withdraw one's own, reject someone else's (Task 6); review someone else's against a fresh plan and approve it, which starts
+the change through the change loop of /apply (api_changes.start_change, Task 7). The kind port_change (an expert-mode port change)
+is registered here at import (approvals.register). The mechanism itself is app/approvals.py.
 
 Everything of api_changes goes through the module (api_changes.X), never imported by name: the tests replace api_changes._make_plan,
 and a request is planned and checked by exactly the code of /plan and /apply."""
@@ -19,6 +20,11 @@ NO_APPROVAL_NEEDED = "Diese Änderung braucht keine Freigabe – sie lässt sich
 ONLY_OWN = "Zurückziehen kann nur, wer die Freigabe angefordert hat"
 OWN_REJECT = "Die eigene Anfrage bitte zurückziehen, nicht ablehnen"
 NOT_FOUND = "Anfrage nicht gefunden"
+SELF = "Die eigene Anfrage kann niemand selbst freigeben – auch nicht mit der Rolle „Admin“"
+EMERGENCY = "Der Notfall-Login gibt keine Anfrage frei: er ist kein persönliches Konto"
+REVIEW_AGAIN = "Diese Vorschau ist nicht die der Anfrage – bitte die Anfrage neu prüfen"
+STALE_REQUEST = "Der Switch hat sich seit der Anfrage geändert: die Anfrage ist veraltet und muss neu gestellt werden"
+DECIDED = "Anfrage #{aid} ist schon entschieden"
 
 
 class ApprovalIn(BaseModel):
@@ -28,6 +34,11 @@ class ApprovalIn(BaseModel):
 
 
 class CommentIn(BaseModel):
+    comment: str = Field(default="", max_length=500)
+
+
+class ApproveIn(BaseModel):
+    token: str = Field(max_length=32)       # the token of the preview the approver saw (POST …/preview), the request's own
     comment: str = Field(default="", max_length=500)
 
 
@@ -54,6 +65,36 @@ async def _announce(event: str, aid: int) -> None:
     a = await approvals.get(aid)
     if a is not None:
         await approvals.emit(event, a)
+
+
+def _port_change_body(a: dict, **extra) -> api_changes.PlanIn:
+    """The change request a asks for, as its requester sent it (its payload), on the write way of its preview (mechanism): planned
+    exactly so or refused, never silently over the other way."""
+    return api_changes.PlanIn(**a["payload"], mechanism=a["preview"]["mechanism"], **extra)
+
+
+async def _preview_port_change(a: dict, user: dict) -> dict:
+    """The reviewer's preview of request a: planned now, by the code of /plan (api_changes._make_plan; its errors go through) on the
+    write way of the requester's preview, answered as /plan answers, plus matches: nothing is blocked and the commands are those of
+    the requester's preview (the same token). Only then can it be approved."""
+    row = await api_changes._enabled_row(a["switch_id"])
+    plan, _, kind, summary = await api_changes._make_plan(row, _port_change_body(a))
+    answer = api_changes.preview_answer(row, plan, kind, summary)
+    return answer | {"matches": not plan["blocked"] and answer["token"] == a["preview"]["token"]}
+
+
+async def _run_port_change(a: dict, approver: dict, comment: str) -> int:
+    """Starts the change of request a, approved by approver with comment, through api_changes.start_change (the code of /apply):
+    the change is the requester's (their name and their role when they asked), approved_by names the approver, and the request is
+    claimed in the transaction that creates the change (approvals.claim). The change's id."""
+    row = await api_changes._enabled_row(a["switch_id"])
+    return await api_changes.start_change(row, _port_change_body(a, token=a["preview"]["token"]),
+                                          {"username": a["requested_by"], "role": a["requester_role"]}, approved_by=approver["username"],
+                                          claim=lambda conn, cid: approvals.claim(conn, a["id"], approver, comment, cid))
+
+
+approvals.register(approvals.Kind(approvals.PORT_CHANGE, "Port-Änderung im Expertenmodus", preview=_preview_port_change,
+                                  run=_run_port_change))
 
 
 @router.post("/api/approvals")
@@ -127,3 +168,54 @@ async def reject_approval(aid: int, body: CommentIn, user=Depends(auth.require(r
                 role=user["role"])
     await _announce("rejected", aid)
     return {"ok": True}
+
+
+@router.post("/api/approvals/{aid}/preview")
+async def preview_approval(aid: int, user=Depends(auth.require(roles.FREIGEBEN))):
+    """The reviewer's fresh preview of an open request at a switch of their zones (403 roles.zone_denial, the switch's zone of now):
+    the preview of its kind (for port_change planned now, with matches); the errors of planning go through (409 STALE, 502, …)."""
+    a = await _found(aid)
+    if a["status"] != approvals.OPEN:
+        raise not_open(a)
+    if not roles.zone_allows(user, a["switch_zone"]):
+        raise HTTPException(403, roles.zone_denial(a["switch_zone"], user["zones"]))
+    return await approvals.KINDS[a["kind"]].preview(a, user)
+
+
+@router.post("/api/approvals/{aid}/approve")
+async def approve_approval(aid: int, body: ApproveIn, user=Depends(auth.require(roles.FREIGEBEN))):
+    """Someone with Freigeben approves an open request of someone else, which starts its change at once (the run of its kind:
+    api_changes.start_change, the code of /apply). In this order: 404; not open (409 not_open); one's own (approvals.same_person,
+    403 SELF, Admin too); the emergency login (403 EMERGENCY: a shared account, not a person); the switch disabled (409 DISABLED) or
+    outside the approver's zones (403); body.token not the request's preview (409 REVIEW_AGAIN: the approver saw another preview).
+    Then the run: a plan that is no longer the preview (api_changes.PreviewOutdated) sends nothing and makes the request stale (409
+    STALE_REQUEST with the reason; audited and announced when this call made it so); a request decided meanwhile (the claim in the
+    change's transaction, approvals.AlreadyDecided) is 409 DECIDED and leaves no change; every other refusal (busy, unreadable, a
+    write way no longer possible) goes through and leaves it open. The comment is trimmed and stored with the approval."""
+    a = await _found(aid)
+    if a["status"] != approvals.OPEN:
+        raise not_open(a)
+    if approvals.same_person(user, a):
+        raise HTTPException(403, SELF)
+    if user["method"] == "local":
+        raise HTTPException(403, EMERGENCY)
+    row = await api_changes._enabled_row(a["switch_id"])
+    if not roles.zone_allows(user, row["zone"]):
+        raise HTTPException(403, roles.zone_denial(row["zone"], user["zones"]))
+    if body.token != a["preview"]["token"]:
+        raise HTTPException(409, REVIEW_AGAIN)
+    comment = body.comment.strip()
+    try:
+        cid = await approvals.KINDS[a["kind"]].run(a, user, comment)
+    except api_changes.PreviewOutdated as e:
+        if await approvals.set_status(aid, approvals.STALE, user, reason=e.detail):
+            await audit(user["username"], "approval_stale", _target(a), f"#{aid} {a['summary']}: {e.detail}", role=user["role"])
+            await _announce("stale", aid)
+        raise HTTPException(409, f"{STALE_REQUEST} ({e.detail})")
+    except approvals.AlreadyDecided:
+        raise HTTPException(409, DECIDED.format(aid=aid))    # the change's INSERT was rolled back with the claim
+    await audit(user["username"], "approval_approved", _target(a), f"#{aid} {a['summary']} → Änderung #{cid}" + (f": {comment}" if comment else ""),
+                role=user["role"])
+    await audit(user["username"], "approval_run", _target(a), f"#{aid} → Änderung #{cid}", role=user["role"])
+    await _announce("approved", aid)
+    return {"id": cid, "approval": aid}

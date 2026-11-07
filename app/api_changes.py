@@ -1,6 +1,7 @@
 """The changes API: plan a port change, a RADIUS preparation, a revert or a save (choosing SSH or SNMP), apply it as a background task
 of changes.run_change, and list the changes. Split from main.py (Phase 3, Task 11), the code as it was. With the four-eyes principle
-on (Phase 4a, Task 6) an expert-mode change is not applied here but requested (api_approvals), from the same checked plan."""
+on (Phase 4a, Task 6) an expert-mode change is not applied here but requested (api_approvals), from the same checked plan; once a
+second person approves it, it starts through start_change, the one start of every change, /apply's included (Task 7)."""
 import asyncio
 import json
 import re
@@ -495,16 +496,15 @@ async def plan_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AE
     return preview_answer(row, plan, kind, summary) | {"approval": approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes)}
 
 
-@router.post("/api/switches/{sid}/apply")
-async def apply_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
-    """A change that needs a four-eyes approval is refused first (409 APPROVAL_NEEDED), whoever sends it. The early check for a queued
-    or running change spares the read and the plan; the binding one is changes.create_change's, in one transaction with the INSERT
-    (two requests can both pass this one while they plan): either way 409 changes.BUSY."""
-    row = await _enabled_row(sid)
-    four_eyes = (await approvals.policy())["four_eyes"]
-    await _mode_rights(user, row, body, four_eyes)
-    if approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes):
-        raise HTTPException(409, APPROVAL_NEEDED)
+async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | None = None, claim=None) -> int:
+    """Starts the change body at switch row once its rights are checked: the one start of a change, for /apply and for a four-eyes
+    approval (api_approvals). The early check for a queued or running change spares the read and the plan; then the plan of now is
+    held against the preview (checked_plan: PreviewOutdated, 422); the binding busy check is changes.create_change's, in one
+    transaction with the INSERT (two requests can both pass the early one while they plan): either way 409 changes.BUSY. The change
+    is maker's (maker["username"], maker["role"]: whoever wanted it), approved_by the approver's name, claim runs in create_change's
+    transaction (approvals.claim; its AlreadyDecided goes through, nothing stored). Then changes.run_change as a background task,
+    which reads, plans and compares once more in the switch's lock before anything goes out. The change's id."""
+    sid = row["id"]
     async with db() as conn:
         async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND status IN ('queued', 'running')", (sid,)) as cur:
             if await cur.fetchone():
@@ -512,14 +512,27 @@ async def apply_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.A
     plan, req, kind, summary = await checked_plan(row, body)
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     try:
-        cid = await changes.create_change(sid, user["username"], kind, summary, req, plan,
-                                          revert_of=body.of if body.mode == "revert" else None, role=user["role"])
+        cid = await changes.create_change(sid, maker["username"], kind, summary, req, plan,
+                                          revert_of=body.of if body.mode == "revert" else None, role=maker["role"],
+                                          approved_by=approved_by, claim=claim)
     except changes.Busy:
         raise HTTPException(409, changes.BUSY)
     t = asyncio.create_task(changes.run_change(cid))
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
-    return {"id": cid}
+    return cid
+
+
+@router.post("/api/switches/{sid}/apply")
+async def apply_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
+    """A change that needs a four-eyes approval is refused first (409 APPROVAL_NEEDED), whoever sends it; everything else starts
+    through start_change, under the user who sent it."""
+    row = await _enabled_row(sid)
+    four_eyes = (await approvals.policy())["four_eyes"]
+    await _mode_rights(user, row, body, four_eyes)
+    if approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes):
+        raise HTTPException(409, APPROVAL_NEEDED)
+    return {"id": await start_change(row, body, user)}
 
 
 def _change_out(r, secrets: list[str]) -> dict:

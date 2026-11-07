@@ -526,15 +526,19 @@ class Busy(RuntimeError):
 
 
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None, *,
-                        role: str | None = None) -> int:
+                        role: str | None = None, approved_by: str | None = None, claim=None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
     ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
     and _run_snmp set it to 1 right before anything does). role is the role of whoever starts it (Phase 4a): its change_* audit entry
-    names it, whenever the change ends (run_change, _close).
+    names it, whenever the change ends (run_change, _close). approved_by is whoever approved it under the four-eyes principle (Phase
+    4a, Task 7; None for a change without an approval).
 
     One change at a time per switch (Phase 1, review §2): the check for a queued or running change of the switch and the INSERT are one
     write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed api_changes.apply_change's early check the second
-    waits for the first's commit and then raises Busy(BUSY), nothing inserted."""
+    waits for the first's commit and then raises Busy(BUSY), nothing inserted. claim, if given, is `async (conn, cid) -> None` and runs
+    after the INSERT on the same connection, in the same transaction, before the commit (approvals.claim marks the request approved
+    there): an exception from it goes through and nothing is stored, the change row included, so of two approvals of one request at
+    once exactly one starts a change."""
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
         async with conn.execute("SELECT 1 FROM changes WHERE switch_id = ? AND status IN ('queued', 'running') LIMIT 1", (sid,)) as cur:
@@ -542,10 +546,12 @@ async def create_change(sid: int, user: str, kind: str, summary: str, req: dict,
                 raise Busy(BUSY)    # closing the connection rolls the transaction back
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
-            "mechanism, sent, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+            "mechanism, sent, role, approved_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
-             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role))
+             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role, approved_by))
+        if claim is not None:
+            await claim(conn, cur.lastrowid)    # its exception: closing the connection rolls the INSERT back, as for Busy
         await conn.commit()
         return cur.lastrowid
 

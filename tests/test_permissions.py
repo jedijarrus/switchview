@@ -82,6 +82,8 @@ MATRIX = {
     ("GET", "/api/approvals/{aid}"): "lesen",
     ("POST", "/api/approvals/{aid}/withdraw"): "aendern",
     ("POST", "/api/approvals/{aid}/reject"): "freigeben",
+    ("POST", "/api/approvals/{aid}/preview"): "freigeben",
+    ("POST", "/api/approvals/{aid}/approve"): "freigeben",
 }
 
 

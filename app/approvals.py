@@ -2,9 +2,10 @@
 api_approvals). A request has a kind (KINDS, filled by register: each kind brings its own preview and its own run; Task 7 registers
 port_change, 4c a bulk change), a payload (exactly the desired state its requester sent) and the preview they saw, stored in the table
 approvals. needs_approval is the one predicate that says which request needs an approval, policy the setting (off by default). A
-request is open until it is approved, rejected, withdrawn, goes stale (Task 7) or expires (expire_due: every 10 minutes from the
-scheduler, and before every read of a request). Every step is announced to the listeners (subscribe, emit), where 4b's alerting
-hangs on. KINDS and _listeners are registries filled at import, the same in every process."""
+request is open until it is approved (claim, in the one write that also creates its change, Task 7), rejected, withdrawn, goes stale
+(its plan is no longer the preview, Task 7) or expires (expire_due: every 10 minutes from the scheduler, and before every read of a
+request). Every step is announced to the listeners (subscribe, emit), where 4b's alerting hangs on. KINDS and _listeners are
+registries filled at import, the same in every process."""
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -142,6 +143,20 @@ async def set_status(aid: int, status: str, user: dict | None, *, comment: str =
              comment or None, reason or None, aid, OPEN))
         await conn.commit()
     return cur.rowcount == 1
+
+
+async def claim(conn, aid: int, approver: dict, comment: str, cid: int) -> None:
+    """Marks request aid approved by approver (auth.current_user) for change cid, with comment ("" stores none), on conn and without a
+    commit: changes.create_change runs it in the transaction of the change's INSERT, so the approval and the change are stored
+    together or not at all. Only an open request that has not run out yet (its expires_at, whatever expire_due has marked so far);
+    otherwise AlreadyDecided, and the transaction is rolled back by its caller."""
+    now = datetime.now(timezone.utc).isoformat()
+    cur = await conn.execute(
+        "UPDATE approvals SET status = ?, decided_by = ?, decided_subject = ?, decided_at = ?, comment = ?, change_id = ? "
+        "WHERE id = ? AND status = ? AND expires_at >= ?",
+        (APPROVED, approver["username"], approver["subject"], now, comment or None, cid, aid, OPEN, now))
+    if cur.rowcount != 1:
+        raise AlreadyDecided()
 
 
 async def expire_due() -> int:
