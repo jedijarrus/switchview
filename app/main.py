@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 import api_approvals
 import api_changes
 import api_devices
+import api_history
 import api_settings
 import api_switches
 import approvals
@@ -361,3 +362,4 @@ app.include_router(api_changes.router)
 app.include_router(api_devices.router)
 app.include_router(topology.router)
 app.include_router(api_approvals.router)    # Phase 4a, Task 6
+app.include_router(api_history.router)    # Phase 4b

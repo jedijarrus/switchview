@@ -88,7 +88,10 @@ MATRIX_4A = {
     ("POST", "/api/approvals/{aid}/preview"): "freigeben",
     ("POST", "/api/approvals/{aid}/approve"): "freigeben",
 }
-MATRIX_4B: dict = {}
+MATRIX_4B: dict = {
+    ("GET", "/api/history"): "lesen",
+    ("GET", "/api/history.csv"): "lesen",
+}
 MATRIX = MATRIX_4A | MATRIX_4B
 
 

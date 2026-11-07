@@ -19,11 +19,18 @@ member, no confirmed uplink); a row at a possible uplink (topology.suspect_port)
 switches are never recorded.
 
 purge deletes what is older than HISTORY_DAYS from every table of RETAINED, nightly at 04:00 (jobs._schedule).
+
+search answers "where was device X" (Task 3, GET /api/history): by a MAC in any usual spelling, an IP address (exact) or a part of a
+name or MAC, or by a switch and a port; newest first by last_seen (the place of now on top, even when an old row lives again), paged
+by the cursor "<last_seen>|<id>" of the last row shown. export gives the same rows for the CSV (at most EXPORT_MAX).
 """
+import ipaddress
 import logging
+import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
+import names
 import topology
 from config import settings
 from db import db, get_setting
@@ -179,3 +186,87 @@ async def purge(days: int | None = None) -> dict[str, int]:
     if out:
         log.info("Verlauf älter als %d %s gelöscht: %s", days, "Tag" if days == 1 else "Tage", ", ".join(f"{t} {n}" for t, n in out.items()))
     return out
+
+
+# ── Search (Task 3) ──────────────────────────────────────────────────────────
+QUERY_HELP = "Bitte nach MAC, IP oder Name suchen (mindestens 2 Zeichen) oder Switch und Port angeben"
+BAD_CURSOR = "Blättermarke ungültig"
+EXPORT_MAX = 10_000    # rows of one CSV export; more need a narrower search
+# A cursor: the last_seen and the id of the last row shown; at most 18 digits, so the id always fits an SQLite INTEGER
+CURSOR = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\|([0-9]{1,18})")
+COLUMNS = "id, mac, ip, name, switch_id, switch_name, port, vlan, first_seen, last_seen, suspect"
+
+
+def parse_query(q: str) -> tuple[str, str]:
+    """The kind of search q asks for and its value: ("ip", the address as ipaddress writes it) for an IP address, ("mac",
+    "aa:bb:cc:dd:ee:ff") for 12 hex digits once ":", "-", "." and spaces are gone, else ("text", q); q trimmed first. The IP comes
+    before the MAC: an IPv4 address with three digits in each part (192.168.178.100) is 12 digits without its dots. A text stays as
+    typed: LIKE ignores the case of A-Z by itself, and SQLite folds no other letter, so a text in lower case would never find a
+    capital umlaut ("ähren" misses "Ähren", "Ähren" finds it). ValueError(QUERY_HELP) for fewer than 2 characters."""
+    q = q.strip()
+    if len(q) < 2:
+        raise ValueError(QUERY_HELP)
+    try:
+        return "ip", str(ipaddress.ip_address(q))
+    except ValueError:
+        pass
+    digits = re.sub(r"[:.\- ]", "", q)
+    if re.fullmatch(r"[0-9a-fA-F]{12}", digits):
+        digits = digits.lower()
+        return "mac", ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+    return "text", q
+
+
+def _question(q: str | None, switch_id: int | None, port: str | None) -> tuple[str, list]:
+    """The WHERE condition and its arguments for exactly one question: q, or switch_id and port together; ValueError(QUERY_HELP)
+    otherwise. Each kind runs on its index: idx_sightings_mac, idx_sightings_ip (a partial index: SQLite takes it only with its own
+    condition ip <> '' in the query), idx_sightings_port; a part of a name or MAC has none and walks idx_sightings_seen from the
+    newest row."""
+    if q is not None:
+        if switch_id is not None or port is not None:
+            raise ValueError(QUERY_HELP)
+        kind, value = parse_query(q)
+        if kind == "mac":
+            return "mac = ?", [value]
+        if kind == "ip":
+            return "ip = ? AND ip <> ''", [value]
+        like = "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"    # the text as text, not as a pattern
+        return "(name LIKE ? ESCAPE '\\' OR mac LIKE ? ESCAPE '\\')", [like, like]
+    if switch_id is None or not port:
+        raise ValueError(QUERY_HELP)
+    return "switch_id = ? AND port = ?", [switch_id, port]
+
+
+async def _rows(where: str, args: list, limit: int) -> list[dict]:
+    """The first limit rows of sightings under where, newest first (last_seen, then id), as search answers them."""
+    async with db() as conn:
+        async with conn.execute(f"SELECT {COLUMNS} FROM sightings WHERE {where} ORDER BY last_seen DESC, id DESC LIMIT ?",
+                                [*args, limit]) as cur:
+            got = await cur.fetchall()
+    return [{"id": r["id"], "mac": r["mac"], "vendor": names.vendor_of(r["mac"]), "ip": r["ip"], "name": r["name"],
+             "switch_id": r["switch_id"], "switch": r["switch_name"], "port": r["port"], "vlan": r["vlan"],
+             "first_seen": r["first_seen"], "last_seen": r["last_seen"], "suspect": bool(r["suspect"])} for r in got]
+
+
+async def search(*, q: str | None = None, switch_id: int | None = None, port: str | None = None, cursor: str | None = None,
+                 limit: int = 50) -> dict:
+    """One page of the sightings that answer q, or switch_id and port (_question), newest first: {"rows": [...], "next": the cursor
+    of the last row when more follow, else None}. cursor is the "next" of the page before; ValueError(BAD_CURSOR) for one that does
+    not look like it, ValueError(QUERY_HELP) for no question or two."""
+    where, args = _question(q, switch_id, port)
+    if cursor is not None:
+        m = CURSOR.fullmatch(cursor)
+        if not m:
+            raise ValueError(BAD_CURSOR)
+        where += " AND (last_seen < ? OR (last_seen = ? AND id < ?))"
+        args += [m[1], m[1], int(m[2])]
+    rows = await _rows(where, args, limit + 1)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return {"rows": rows, "next": f"{rows[-1]['last_seen']}|{rows[-1]['id']}" if more else None}
+
+
+async def export(*, q: str | None = None, switch_id: int | None = None, port: str | None = None) -> list[dict]:
+    """The rows search gives for the same question, in the same order, all on one page: at most EXPORT_MAX."""
+    where, args = _question(q, switch_id, port)
+    return await _rows(where, args, EXPORT_MAX)
