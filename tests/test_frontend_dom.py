@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_frontend_logic import AUDIT  # the audit rows of SVLogic.filterAudit's test, shown by renderAudit here (Task 8)
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
@@ -552,3 +553,84 @@ SAVE_SWITCH = ('(async () => { const shown = []; toast = (m, ms) => shown.push([
     ('$("#f-rwcomm").value = "neu";', [[["Gespeichert", None]], False, "SNMP-Schreiben prüfen: SW-HP"])], ids=["zone-only", "rw-community"])
 def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_change(typed, want):      # R44
     assert in_dom(SAVE_SWITCH % typed) == want
+
+
+# Phase 5 Task 8: the change lists offer "Trotzdem speichern" (can_save, the server's rule) and "Mehr laden" (limit doubled up to
+# 500, the maximum of GET /api/changes); a change that sent nothing reloads only the switch's change list; the audit log filters
+# its 200 entries and shows their details (AUDIT: the rows of the filter test in test_frontend_logic.py)
+
+CH = {"created_at": "2026-11-06 10:00:00", "username": "a", "switch_id": 1, "switch_name": "SW", "summary": "Port 2: VLAN 20", "reverted_by": None}
+ROWS = [{**CH, "id": 7, "status": "failed", "saved": 0, "can_revert": True, "can_save": True},
+        {**CH, "id": 6, "status": "ok", "saved": 1, "can_revert": True, "can_save": False}]
+LIST = '(async () => { const calls = []; api = async (m, u) => { calls.push(u); return %s; }; const el = $("#lst"); await renderChangesInto(el, 1, %d); %s })()'
+
+
+def test_the_change_list_offers_save_where_the_server_allows_it():
+    html = in_dom(LIST % (json.dumps(ROWS), 10, "return el.innerHTML;"))
+    assert html.count('data-cs="') == 1 and 'data-cs="7" data-sw="1">Trotzdem speichern</button>' in html and "data-more" not in html
+
+
+def test_save_in_the_list_opens_the_save_preview():
+    act = ('MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; let got = null; previewChange = (s, p) => { got = [s.id, p]; }; '
+           'await el.onclick({target: {closest: s => s === "[data-cs]" ? {dataset: {cs: "7", sw: "1"}} : null}}); return got;')
+    assert in_dom(LIST % (json.dumps(ROWS), 10, act)) == [1, {"mode": "save", "of": 7}]
+
+
+def test_a_full_list_offers_more_up_to_500():
+    assert 'data-more="4"' in in_dom(LIST % (json.dumps(ROWS), 2, "return el.innerHTML;"))
+    assert "data-more" not in in_dom(LIST % (json.dumps(ROWS * 250), 500, "return el.innerHTML;"))
+    more = 'await el.onclick({target: {closest: s => s === "[data-more]" ? {dataset: {more: "4"}} : null}}); return calls;'
+    assert in_dom(LIST % (json.dumps(ROWS), 2, more)) == ["/api/changes?limit=2&switch_id=1", "/api/changes?limit=4&switch_id=1"]
+
+
+def test_the_audit_shows_details_and_filters():
+    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); const a = [$("#au-body").innerHTML]; '
+          '$("#au-q").value = "bob"; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); return [...a, $("#view").innerHTML]; })()') % json.dumps(AUDIT)
+    full, bob, view = in_dom(js)
+    assert '<span class="cellnote">host: 10.0.0.1 → 10.0.0.2</span>' in full and full.count("<tr") == 3
+    assert bob.count("<tr") == 1 and "bob" in bob
+    assert view.count('<option value="login">Anmeldung</option>') == 1 and '<option value="">Alle Aktionen</option>' in view
+
+
+RUN = ('(async () => { const seen = []; MAP = {switches: [{id: 1, k: "SW"}], links: [], vlans: {}}; current = "switches"; selSwitch = 1; '
+       'loadMap = async () => { seen.push("map"); }; renderSwitchDetail = () => { seen.push("view"); }; syncPicked = () => {}; '
+       'renderChangesInto = async (el, id, n) => { seen.push(["list", id, n]); }; '
+       'api = async () => (%s); await runProgress({id: 1, k: "SW"}, 4); await new Promise(r => setTimeout(r, 300)); return seen; })()')
+DONE = {"id": 4, "summary": "Port 2: Aus", "steps": [], "can_revert": False, "can_save": False, "mechanism": "ssh", "error": "x"}
+
+
+@pytest.mark.parametrize("c, want", [({**DONE, "status": "failed", "sent": 0, "kind": "ports", "saved": 0}, [["list", 1, 10]]),
+                                     ({**DONE, "status": "ok", "sent": 1, "kind": "save", "saved": 1, "error": None}, ["map", "view"])])
+def test_a_change_that_sent_nothing_reloads_only_its_list(c, want):
+    assert in_dom(RUN % json.dumps(c)) == want
+
+
+# Beyond the brief: "Mehr laden" is replaced with the list it reloads, so the focus would fall to body (Review Focus 2); it moves to
+# the first row the click added, or to the last row when the API had no more. The stub's querySelectorAll answers el.kids.
+@pytest.mark.parametrize("kids, want", [('[$("#d7"), $("#d6"), $("#d5")]', "#d5"), ('[$("#d7"), $("#d6")]', "#d6")], ids=["added", "none-added"])
+def test_more_gives_the_focus_to_the_first_row_it_added(kids, want):
+    act = ('el.kids = %s; await el.onclick({target: {closest: s => s === "[data-more]" ? {dataset: {more: "4"}} : null}}); '
+           'return document.activeElement && document.activeElement.sel;') % kids
+    assert in_dom(LIST % (json.dumps(ROWS), 2, act)) == want
+
+
+# Beyond the brief: the action filter redraws on change (the text filter above on input), a filter without hits shows its row, and
+# a change that sent nothing leaves the list alone when the view shows another switch or another view
+def test_the_audit_filters_by_action_and_says_when_nothing_is_left():
+    js = ('(async () => { api = async (m, u) => u === "/api/audit" ? %s : []; await renderAudit(); const a = []; '
+          'const q = t => { $("#au-q").value = t; $("#au-q").fire("input"); a.push($("#au-body").innerHTML); }; '
+          '$("#au-act").value = "login"; $("#au-act").fire("change"); a.push($("#au-body").innerHTML); q(" BOB "); q("anna"); '
+          'return a; })()') % json.dumps(AUDIT)
+    login, bob, none = in_dom(js)
+    assert login.count("<tr") == 1 and "<td>bob</td><td>Anmeldung</td>" in login and bob == login    # the text is trimmed
+    assert none == '<tr><td colspan="4" class="muted">Keine Einträge für diesen Filter.</td></tr>'
+
+
+def test_more_never_asks_for_more_than_500():
+    assert 'data-more="500"' in in_dom(LIST % (json.dumps(ROWS * 150), 300, "return el.innerHTML;"))
+
+
+@pytest.mark.parametrize("where", ['current = "switches"; selSwitch = 2;', 'current = "audit"; selSwitch = 1;'], ids=["other-switch", "other-view"])
+def test_a_change_that_sent_nothing_leaves_another_view_alone(where):
+    c = {**DONE, "status": "failed", "sent": 0, "kind": "ports", "saved": 0}
+    assert in_dom(RUN.replace('current = "switches"; selSwitch = 1;', where) % json.dumps(c)) == []

@@ -174,3 +174,26 @@ def test_write_alert_mode(stored, payload, row, want):
 def test_write_alert_mode_sees_each_move_of_the_write_state(row):
     stored = BAD if row["snmp_write_via"] else NONE
     assert run(f"L.writeAlertMode({json.dumps(stored)}, {json.dumps({'host': '10.0.0.1'})}, {json.dumps(row)})") == "dialog"
+
+
+# Phase 5 Task 8: a change that sent nothing reloads only its change list (nothing changed at the switch); the audit filter works in
+# the browser on the 200 entries of GET /api/audit, over user, action (its label), target and details
+@pytest.mark.parametrize("c, want", [({"sent": 0, "kind": "ports"}, {"reload": "list", "delay": 0}),
+                                     ({"sent": 0, "kind": "save"}, {"reload": "list", "delay": 0}),
+                                     ({"sent": 1, "kind": "ports"}, {"reload": "map", "delay": 4500}),
+                                     ({"sent": None, "kind": "ports"}, {"reload": "map", "delay": 4500}),
+                                     ({"sent": 1, "kind": "save"}, {"reload": "map", "delay": 200})])
+def test_after_change(c, want):
+    assert run(f"L.afterChange({json.dumps(c)})") == want
+
+
+AUDIT = [{"username": "anna", "action": "switch_update", "target": "3", "detail": "host: 10.0.0.1 → 10.0.0.2"},
+         {"username": "bob", "action": "login", "target": "local", "detail": ""},
+         {"username": "anna", "action": "login_failed", "target": "local", "detail": None}]
+LABELS = {"switch_update": "Switch geändert", "login": "Anmeldung", "login_failed": "Anmeldung fehlgeschlagen"}
+
+
+@pytest.mark.parametrize("text, action, want", [("", "", [0, 1, 2]), ("anna", "", [0, 2]), ("ANMELDUNG", "", [1, 2]), ("10.0.0.2", "", [0]),
+                                                ("", "login", [1]), ("anna", "login", []), ("geändert", "", [0])])
+def test_filter_audit(text, action, want):
+    assert run(f"(A => L.filterAudit(A, {json.dumps(text)}, {json.dumps(action)}, {json.dumps(LABELS)}).map(r => A.indexOf(r)))({json.dumps(AUDIT)})") == want

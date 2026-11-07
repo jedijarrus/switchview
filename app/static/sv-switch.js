@@ -322,23 +322,30 @@
         const foot = $("#m-foot"); foot.innerHTML = "";
         btns.forEach(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); });
         if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
-        setTimeout(async () => { try { await loadMap(true); if (current === "switches") { const keep = picked; renderSwitchDetail(); picked = c.status === "ok" ? new Set() : keep; syncPicked(); } } catch (e) { /* egal */ } }, c.kind === "save" ? 200 : 4500);
+        // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
+        const next = SVLogic.afterChange(c);
+        if (next.reload === "list") setTimeout(() => { if (current === "switches" && selSwitch === s.id) renderChangesInto($("#sw-changes"), s.id, 10); }, next.delay);
+        else setTimeout(async () => { try { await loadMap(true); if (current === "switches") { const keep = picked; renderSwitchDetail(); picked = c.status === "ok" ? new Set() : keep; syncPicked(); } } catch (e) { /* egal */ } }, next.delay);
         return;
       }
       await new Promise(res => setTimeout(res, 1200));
     }
   }
 
-  async function renderChangesInto(el, switchId, limit) {
+  // The changes (newest first) of one switch, or of all with switchId null, into el: limit rows (default 100). The follow-up
+  // actions are the server's rule (can_revert / can_save, changes.actions_of); a list the API filled to limit offers "Mehr laden",
+  // which doubles limit up to 500, the maximum of GET /api/changes.
+  async function renderChangesInto(el, switchId, limit = 100) {
     if (!el) return;
     let rows;
-    try { rows = await api("GET", `/api/changes?limit=${limit || 100}${switchId ? "&switch_id=" + switchId : ""}`); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    try { rows = await api("GET", `/api/changes?limit=${limit}${switchId ? "&switch_id=" + switchId : ""}`); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     if (!rows.length) { el.innerHTML = `<div class="empty">Noch keine Änderungen.</div>`; return; }
+    const more = rows.length >= limit && limit < 500 ? `<div class="more-row"><button class="btn small" type="button" data-more="${Math.min(500, limit * 2)}">Mehr laden</button></div>` : "";
     el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Zeit</th><th>Benutzer</th>${switchId ? "" : "<th>Switch</th>"}<th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(c =>
       `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}</td><td>${chPill(c)}</td>
-        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${c.can_revert ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>`;
+        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${c.can_revert ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${c.can_save ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
     el.onclick = async e => {
-      const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]");
+      const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]"), sv = e.target.closest("[data-cs]"), m = e.target.closest("[data-more]");
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
       if (d) {
         const c = await api("GET", `/api/changes/${d.dataset.cd}`);
@@ -348,6 +355,12 @@
           [{ label: "Schließen", onClick: closeModal }]);
       }
       if (r) { if (!MAP) await loadMap(false); const s = swOf(+r.dataset.sw); if (s) previewChange(s, { mode: "revert", of: +r.dataset.cr }); }
+      if (sv) { if (!MAP) await loadMap(false); const s = swOf(+sv.dataset.sw); if (s) previewChange(s, { mode: "save", of: +sv.dataset.cs }); }
+      if (m) {
+        // "Mehr laden" goes with the old list: the focus moves to the first row the click added (the last row, if none came), not body
+        const shown = rows.length; await renderChangesInto(el, switchId, +m.dataset.more);
+        const ds = el.querySelectorAll("[data-cd]"), f = ds[shown] || ds[ds.length - 1]; if (f) f.focus();
+      }
     };
   }
 

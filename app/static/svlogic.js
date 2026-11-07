@@ -115,5 +115,20 @@ const SVLogic = {
       || !same(stored.snmp_write_error, row.snmp_write_error);
     return touched || moved ? "dialog" : "hint";
   },
+  // What the UI reloads once change c (GET /api/changes/<id>) has ended, and after how many ms: a change that sent nothing
+  // (sent 0) changed nothing at the switch, so only its change list ("list", at once); any other the netmap and the view ("map"),
+  // 200 ms after a save, 4.5 s after any other change (the server polls its switch again 3 s after one, changes._repoll). sent
+  // null (a row from before the column) counts as sent, as changes.may_have_sent.
+  afterChange(c) {
+    if (c.sent === 0) return { reload: "list", delay: 0 };
+    return { reload: "map", delay: c.kind === "save" ? 200 : 4500 };
+  },
+  // The audit rows (GET /api/audit) that show action (""/null: every action) and hold text (lower or upper case alike; "" holds
+  // every row) in their user, action label (labels, else the action key), target or details
+  filterAudit(rows, text, action, labels) {
+    const t = String(text || "").toLowerCase();
+    return rows.filter(r => (!action || r.action === action)
+      && (!t || [r.username, labels[r.action] || r.action, r.target, r.detail].some(v => String(v || "").toLowerCase().includes(t))));
+  },
 };
 if (typeof module === "object" && module.exports) module.exports = SVLogic; else globalThis.SVLogic = SVLogic;

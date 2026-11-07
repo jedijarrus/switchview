@@ -400,14 +400,27 @@
   }
 
   /* ── Protokoll ── */
+  // The text of each audit action (api_*.audit / changes.audit); an action without one shows its key
+  const AUDIT_LABELS = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", switch_hostkey_reset: "SSH-Hostschlüssel vergessen", backup: "Sicherung", settings_update: "Einstellungen geändert",
+    change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
+    device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
+  // The audit log: the 200 entries of GET /api/audit, filtered in the browser by action and by text (SVLogic.filterAudit over user,
+  // action, target and details); each action shows its detail below it (it never names a secret, Phase 2)
   async function renderAudit() {
     const v = $("#view"); const rows = await api("GET", "/api/audit").catch(() => []);
-    const lbl = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", switch_hostkey_reset: "SSH-Hostschlüssel vergessen", backup: "Sicherung", settings_update: "Einstellungen geändert",
-      change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
-      device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich" };
-    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">letzte 100</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge</span></div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody>` +
-      rows.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(lbl[r.action] || r.action)}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("") + `</tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
+    const actions = [...new Set(rows.map(r => r.action))];
+    const filter = `<div class="right toolrow"><select id="au-act" aria-label="Aktion"><option value="">Alle Aktionen</option>${actions.map(a => `<option value="${esc(a)}">${esc(AUDIT_LABELS[a] || a)}</option>`).join("")}</select>
+        <input type="search" id="au-q" placeholder="Benutzer, Aktion, Ziel, Details" aria-label="Protokoll durchsuchen"></div>`;
+    v.innerHTML = `<section class="card"><div class="card-h"><h2>Änderungen an Switches</h2><span class="sub">neueste zuerst</span></div><div id="all-changes"><div class="empty">Lade …</div></div></section><section class="card"><div class="card-h"><h2>Protokoll</h2><span class="sub">letzte 200 Einträge · der Filter wirkt auf diese</span>${rows.length ? filter : ""}</div>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Zeit</th><th>Benutzer</th><th>Aktion</th><th>Ziel</th></tr></thead><tbody id="au-body"></tbody></table></div>` : `<div class="empty">Noch keine Einträge.</div>`}</section>`;
     v.style.display = ""; renderChangesInto($("#all-changes"), null, 100);
+    if (!rows.length) return;
+    const draw = () => {
+      const f = SVLogic.filterAudit(rows, $("#au-q").value.trim(), $("#au-act").value, AUDIT_LABELS);
+      $("#au-body").innerHTML = f.length ? f.map(r => `<tr><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`).join("")
+        : `<tr><td colspan="4" class="muted">Keine Einträge für diesen Filter.</td></tr>`;
+    };
+    draw();
+    $("#au-q").addEventListener("input", draw); $("#au-act").addEventListener("change", draw);
   }
 
   /* ── Einstellungen ── */
