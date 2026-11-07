@@ -669,16 +669,21 @@ def test_a_trunk_preview_needs_expert_mode():
                           {"mode": "ports", "ports": ["Trk1"], "change": {"untagged": "20"}, "expert": True}]
 
 
-@pytest.mark.parametrize("port, label", [("Trk1", "Trunk bearbeiten"), ("5", "Port bearbeiten")])
-def test_the_port_panel_offers_trunk_editing(port, label):
-    js = trk() + ('const m = {n: "5", u: [], t: [], tr: "Trk1", mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
-                  'portIdx["5"] = m; sw.ports.push(m); openPort(sw, %s); $("#dr-body").innerHTML') % json.dumps(port)
+@pytest.mark.parametrize("trunk, port, label", [("Trk1", "Trk1", "Trunk bearbeiten"), ("Trk1", "5", "Port bearbeiten"),
+                                                ("Po1", "Po1", "Trunk bearbeiten"), ("Po1", "5", "Port bearbeiten")],
+                         ids=["trk", "trk-member", "lag", "lag-member"])
+def test_the_port_panel_offers_trunk_editing(trunk, port, label):
+    """A ProCurve trunk by its name (TrkN), a LAG (Po1, ae0, ...) by its trunk being itself (isTrunkPort); a member port keeps the port form."""
+    js = trk(trunk) + ('const m = {n: "5", u: [], t: [], tr: %s, mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
+                       'portIdx["5"] = m; sw.ports.push(m); openPort(sw, %s); $("#dr-body").innerHTML') % (json.dumps(trunk), json.dumps(port))
     assert f'id="dr-edit">{label}</button>' in in_dom(js)
 
 
 def test_a_trunk_form_escapes_its_name():                                               # Review Focus 5
-    b = in_dom(trk('Po"<1') + 'editTrunk(sw, \'Po"<1\'); cap.b')
+    """The trunk's name and its members' names (a LAG member is named by the switch, Gi1/0/1 or anything else)."""
+    b = in_dom(trk('Po"<1') + 'trk.mb = ["Gi1/0/1", "x\\"<y"]; editTrunk(sw, \'Po"<1\'); cap.b')
     assert "Po&quot;&lt;1" in b and 'Po"<1' not in b
+    assert "Gi1/0/1, x&quot;&lt;y" in b and 'x"<y' not in b
 
 
 # Beyond the brief: the panel's button opens the form of its port (the brief pins the label only), "Vorschau" with nothing chosen,

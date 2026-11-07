@@ -107,10 +107,11 @@ async def test_a_change_that_fails_before_sending_records_that(ssh_env):
 
 async def test_a_rejected_command_stays_failed_but_counts_as_sent(ssh_env):
     """ConfigInvalidException: the switch refused one line, the ones before it can be in effect; "failed" as before, with sent = 1, so
-    revert and save stay on offer."""
+    revert and save stay on offer, and the switch is polled again (changes._repolls_after: failed after sending)."""
     ssh_env.on_send = ConfigInvalidException("Invalid input: disable")
     row = ssh_env.change(await run_ports(ssh_env, {"ports": ["2"], "set": {"status": "off"}}))
     assert (row["status"], row["sent"]) == ("failed", 1) and changes.actions_of(row) == {"can_revert": True, "can_save": True}
+    assert ssh_env.repolls == [ssh_env.sid]
 
 
 async def test_a_change_that_ends_ok_has_sent(ssh_env, monkeypatch):

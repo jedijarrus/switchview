@@ -114,3 +114,13 @@ def test_a_german_quote_closes_with_its_own_mark():
         text = (STATIC / n).read_text(encoding="utf-8")
         assert not re.findall(r'„[^“"\n]*\\?"', text), n
         assert text.count("„") == text.count("“"), n
+
+
+def test_the_layers_can_take_the_focus():                                              # Review Focus 2
+    """A browser focuses a container only with tabindex: restoreFocus's last fallback ($("#view").focus()), modal() without a control
+    and trapTab with nothing to tab to focus #view, .modal and #drawer; #drawer is a modal dialog for screen readers like .modal.
+    The DOM stub's focus() always succeeds, so only this pin holds the attributes."""
+    assert '<main class="wrap" id="view" tabindex="-1">' in INDEX
+    assert '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title" tabindex="-1">' in INDEX
+    drawer = re.search(r'<aside\b[^>]*\bid="drawer"[^>]*>', INDEX).group(0)
+    assert all(a in drawer for a in ('role="dialog"', 'aria-modal="true"', 'tabindex="-1"', 'aria-labelledby="dr-title"')), drawer

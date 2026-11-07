@@ -232,3 +232,29 @@ async def test_a_device_behind_a_base_mac_only_uplink_is_flagged_and_listed_last
     m = await main.build_map()
     assert m["links"] == [] and port(m, "SW-A", "3")["bm"] and not port(m, "SW-A", "3").get("up")
     assert [(e["mac"], e["port"], e["flags"]) for e in await unknown()] == [(MAC2, "2", []), (MAC1, "3", ["uplink_bm"])]
+
+
+async def test_a_port_with_a_switch_as_lldp_neighbour_and_its_base_mac_is_flagged_once(net):    # Phase 5 final review
+    """SW-A port 3 sees SW-B by LLDP without naming a port of it (PortId a MAC address) and learns SW-B's base MAC, which SW-B never
+    returns: no link, an unconfirmed uplink by both. The device behind it is flagged "uplink_lldp" (the switch-named neighbour wins,
+    as in sv-core.js unconfirmedWhy), not also "uplink_bm"."""
+    await add(net, "SW-A", "10.0.0.3", "procurve", W_SAMPLE, lldp("3", "SW-B", "00 1A 2B 3C 4D 5E", "to-core"), fdb(bp("3"), B_BASE),
+              fdb(bp("3"), MAC1), base_mac=A_BASE)
+    await add(net, "SW-B", "10.0.0.4", "procurve", W_SAMPLE, base_mac=B_BASE)
+    m = await main.build_map()
+    assert m["links"] == [] and port(m, "SW-A", "3")["bm"] and not port(m, "SW-A", "3").get("up")
+    assert entry(await unknown(), MAC1)["flags"] == ["uplink_lldp", "lldp"]
+
+
+async def test_a_port_on_an_unconfirmed_link_that_learns_a_base_mac_is_flagged_once(net):         # Phase 5 final review
+    """SW-A learns SW-B's base MAC on port 6 (VLAN 1) and again on port 3 (VLAN 20), SW-B learns SW-A's on port 6: a MAC link on
+    port 6, unconfirmed because SW-A sees SW-B's base MAC on two ports (T6-RR1c, Phase 3 Task 9). The device on port 6 is flagged
+    "uplink_lldp" (the unconfirmed link wins), not also "uplink_bm"; the one on port 3, an uplink by the base MAC alone, "uplink_bm"."""
+    await add(net, "SW-A", "10.0.0.3", "procurve", W_SAMPLE, fdb(bp("6"), B_BASE), fdb(bp("3"), B_BASE, vlan="20"), fdb(bp("3"), MAC1, vlan="20"),
+              fdb(bp("6"), MAC2), base_mac=A_BASE)
+    await add(net, "SW-B", "10.0.0.4", "procurve", W_SAMPLE, fdb(bp("6"), A_BASE), base_mac=B_BASE)
+    m = await main.build_map()
+    ab = link(m, "SW-A", "SW-B")
+    assert (ab["src"], ab["A"]["ports"], ab["confirmed"]) == ("mac", ["6"], False) and port(m, "SW-A", "6")["bm"]
+    out = await unknown()
+    assert (entry(out, MAC2)["flags"], entry(out, MAC1)["flags"]) == (["uplink_lldp"], ["uplink_bm"])
