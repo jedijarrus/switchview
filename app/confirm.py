@@ -1,0 +1,173 @@
+"""A change with confirmation (Phase 4c, Task 4): "Bestätigen" of a change that run_change left waiting (changes.PENDING), and its
+route. Task 5 adds the watch here (deadline, reachability, the automatic revert).
+
+The waiting change is the change's own row: "Bestätigen" takes it from pending over running to ok (saved) or unclear, one change with
+one history in its steps. Who may confirm it: who started it or approved it, else anyone with Freigeben, always in their zones (an
+API token too: a script with a health check of its own may confirm). Of two confirms at once exactly one wins, and one after the
+deadline is too late: one UPDATE takes the row from pending to running only before confirm_until. Over SSH the confirm reads the
+running-config afresh in the switch's lock and saves (write memory) only when verify_ports still finds the change there - minutes
+pass between the check and the save, and write memory saves everything that runs then; that save is the one place outside
+changes.run_change that writes to a switch. Over SNMP it ends ok and unsaved, as every SNMP change of a driver without snmp_autosave
+(the only driver that waits): SwitchView never saves over SNMP.
+
+Everything of api_changes and changes goes through the module (api_changes.spawn, changes._step, ...), never imported by name."""
+import asyncio
+import json
+
+from fastapi import APIRouter, Depends, HTTPException
+
+import alerts
+import api_changes
+import auth
+import cfgparse
+import changes
+import roles
+import sshcli
+from db import audit, db
+
+router = APIRouter()
+
+NOT_FOUND = "Änderung nicht gefunden"
+NOT_PENDING = "Änderung #{cid} wartet nicht auf Bestätigung"
+TOO_LATE = "Zu spät: die Frist von Änderung #{cid} ist abgelaufen, SwitchView nimmt sie zurück"
+WHO = "Bestätigen kann, wer die Änderung gestartet oder freigegeben hat, oder jemand mit der Rolle „Freigeben“"
+CONFIRMED_STEP = "Bestätigt von {user}"
+DRIFT = "Nicht gespeichert: der Switch passt nicht mehr zur geprüften Änderung: "
+# A change row with the zone and the state of its switch (confirm_change checks both)
+_JOINED = ("SELECT c.*, s.zone AS switch_zone, s.enabled AS switch_enabled FROM changes c JOIN switches s ON s.id = c.switch_id "
+           "WHERE c.id = ?")
+
+
+def may_confirm(user: dict, ch) -> bool:
+    """Whether user (auth.current_user) may confirm change ch: who started it (changes.username) or approved it (approved_by), the
+    case aside, else anyone with Freigeben. The zone is the caller's check (confirm_change)."""
+    name = user["username"].casefold()
+    return (name in ((ch["username"] or "").casefold(), (ch["approved_by"] or "").casefold())
+            or roles.at_least(user["role"], roles.FREIGEBEN))
+
+
+async def _change(cid: int):
+    async with db() as conn:
+        async with conn.execute("SELECT * FROM changes WHERE id = ?", (cid,)) as cur:
+            return await cur.fetchone()
+
+
+async def confirm_change(cid: int, user: dict) -> dict:
+    """The "Bestätigen" of change cid by user, checked in this order: the change is there (404 NOT_FOUND), its switch is in user's zones
+    (403 roles.zone_denial), user may confirm it (403 WHO), it waits for its confirmation (409 NOT_PENDING), its switch is enabled (409
+    api_changes.DISABLED, as in every mode of /plan and /apply; the change keeps waiting). Then one UPDATE takes it from pending to
+    running, only before its deadline: if it changes nothing, 409 TOO_LATE while it still waits (the watch takes it back), else
+    NOT_PENDING (another confirm or its revert came first). Audits change_confirm (user, the switch, "#<cid> <summary>"); over SNMP the
+    change ends here (_confirm_snmp), over SSH the save runs as a tracked task (_confirm_ssh). {"ok": True, "id": cid}; Task 7 calls
+    it for each change of a bulk change."""
+    async with db() as conn:
+        async with conn.execute(_JOINED, (cid,)) as cur:
+            ch = await cur.fetchone()
+        if ch is None:
+            raise HTTPException(404, NOT_FOUND)
+        if not roles.zone_allows(user, ch["switch_zone"]):
+            raise HTTPException(403, roles.zone_denial(ch["switch_zone"], user["zones"]))
+        if not may_confirm(user, ch):
+            raise HTTPException(403, WHO)
+        if ch["status"] != changes.PENDING:
+            raise HTTPException(409, NOT_PENDING.format(cid=cid))
+        if not ch["switch_enabled"]:
+            raise HTTPException(409, api_changes.DISABLED)
+        taken = await conn.execute("UPDATE changes SET status = 'running', confirmed_by = ? WHERE id = ? AND status = 'pending' "
+                                   "AND confirm_until >= ?", (user["username"], cid, changes._now()))
+        await conn.commit()
+        if taken.rowcount != 1:
+            async with conn.execute("SELECT status FROM changes WHERE id = ?", (cid,)) as cur:
+                now = await cur.fetchone()
+            raise HTTPException(409, (TOO_LATE if now is not None and now["status"] == changes.PENDING else NOT_PENDING).format(cid=cid))
+    await audit(user["username"], "change_confirm", str(ch["switch_id"]), f"#{cid} {ch['summary']}", role=user["role"])
+    if (ch["mechanism"] or "ssh") == "snmp":
+        await _confirm_snmp(cid, user["username"])
+    else:
+        api_changes.spawn(_confirm_ssh(cid, user["username"]))
+    return {"ok": True, "id": cid}
+
+
+async def _confirm_snmp(cid: int, by: str) -> None:
+    """The end of confirmed change cid over SNMP: nothing read, nothing sent, nothing saved (a driver that waits has no snmp_autosave,
+    and SwitchView never saves over SNMP): the steps CONFIRMED_STEP and changes.SNMP_UNSAVED (warn), ok with saved 0, the audit
+    change_ok of its starter as changes._close writes it, and the alerts. Its row is read after confirm_change's UPDATE, with every
+    step written until then."""
+    ch = await _change(cid)
+    now = changes._now()
+    steps = json.loads(ch["steps"] or "[]") + [[now, CONFIRMED_STEP.format(user=by), "info"], [now, changes.SNMP_UNSAVED, "warn"]]
+    await changes._upd(cid, status="ok", saved=0, finished_at=now, steps=json.dumps(steps))
+    await audit(ch["username"], "change_ok", str(ch["switch_id"]), f"#{cid} {ch['summary']}, mechanism: {ch['mechanism']}", role=ch["role"])
+    await changes._logged(cid, "Benachrichtigung", alerts.change_ended(ch, cid, "ok", None))
+
+
+async def _confirm_ssh(cid: int, by: str) -> None:
+    """The save of confirmed change cid over SSH, in the switch's lock (a tracked task, api_changes.spawn): the step CONFIRMED_STEP,
+    then the switch row of now - gone or disabled meanwhile (changes.DISABLED_RUN) or without an SSH CLI (sshcli.cli_refusal): unclear
+    "Nicht gespeichert: <reason>", no session. Else the running-config read afresh: if verify_ports no longer finds the change there,
+    unclear with DRIFT and the first eight differences, nothing saved; else write memory, ok with saved 1. Any exception is unclear
+    (changes._error_text, masked as in run_change; after write memory went out its step says the save is open, changes.SSH_KEPT). At
+    the end the read as the backup "bestätigt #<cid>" and the cached read (changes.store_cfg), the audit change_<status> of the
+    starter and the alerts, each on its own (changes._logged), and last the row (status, error, saved, finished_at): whoever waits for
+    the change to leave running finds everything of its end; no re-poll (write memory changes no port)."""
+    ch = await _change(cid)
+    if ch is None:    # deleted with its switch meanwhile
+        return
+    sid = ch["switch_id"]
+    steps = json.loads(ch["steps"] or "[]")
+    rs = await changes.radius_settings()
+    secrets = changes._secrets_of(await changes._switch_row(sid), rs)
+
+    def mask(text: str) -> str:
+        return cfgparse.mask_secrets(text, secrets)
+
+    async def step(text: str, level: str = "info"):
+        await changes._step(cid, steps, mask(text), level)
+
+    status, error, saved, post, saving = None, None, 0, None, False
+    try:
+        await step(CONFIRMED_STEP.format(user=by))
+        async with sshcli.lock(sid):
+            row = await changes._switch_row(sid)
+            reason = changes.DISABLED_RUN if row is None or not row["enabled"] else sshcli.cli_refusal(row)
+            if reason:
+                status, error = "unclear", f"Nicht gespeichert: {reason}"
+                await step(error, "error")
+                return
+            secrets.extend(changes._secrets_of(row, rs))
+            conn = await asyncio.to_thread(sshcli.connect, row)
+            try:
+                post = sshcli.clean(await asyncio.to_thread(conn.send_command, "show running-config", read_timeout=90))
+                bad = changes.verify_ports(cfgparse.parse_config(post), json.loads(ch["desired"] or "{}"))
+                if bad:
+                    status, error = "unclear", DRIFT + "; ".join(bad[:8])
+                    await step(error, "error")
+                    return
+                await step("Speichere (write memory)")
+                saving = True
+                await asyncio.to_thread(conn.save_config)
+                saved, status = 1, "ok"
+                await step("Gespeichert", "ok")
+            finally:
+                await asyncio.to_thread(sshcli.disconnect, conn)
+    except Exception as e:  # noqa: BLE001
+        status, error = "unclear", changes._error_text(e, mask)
+        changes._log_masked(cid, e, mask)
+        await step(f"{error}. {changes.SSH_KEPT['save']}" if saving else error, "error")
+    finally:
+        if status is None:    # cancelled (the app shut down): the change is in effect, its save is open or never ran
+            status, error = "unclear", changes.CANCELLED
+            await changes._logged(cid, "Abbruch vermerken", step(f"{error}. {changes.SSH_KEPT['save']}" if saving else error, "error"))
+        if post:
+            await changes._logged(cid, "Sicherung bestätigt", sshcli.store_backup(sid, post, f"bestätigt #{cid}"))
+            if not await changes._logged(cid, "Konfiguration auswerten", changes.store_cfg(sid, post)):
+                changes.invalidate_cfg(sid)
+        await changes._logged(cid, "Protokoll", audit(ch["username"], "change_" + status, str(sid), f"#{cid} {ch['summary']}", role=ch["role"]))
+        await changes._logged(cid, "Benachrichtigung", alerts.change_ended(ch, cid, status, error and mask(error)))
+        await changes._upd(cid, status=status, error=error and mask(error), saved=saved, finished_at=changes._now())
+
+
+@router.post("/api/changes/{cid}/confirm")
+async def confirm_route(cid: int, user=Depends(auth.require(roles.AENDERN))):
+    """The "Bestätigen" of a change that waits for its confirmation: confirm_change."""
+    return await confirm_change(cid, user)

@@ -138,6 +138,12 @@
 ]
 ],
 [
+"/api/changes/{cid}/confirm",
+[
+"POST"
+]
+],
+[
 "/api/compliance",
 [
 "GET"

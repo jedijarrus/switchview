@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS changes (
     reverted_by INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_changes_sw ON changes(switch_id, id);
+-- Phase 4c, Task 4: the one-change-per-switch check (changes.busy_reason) and the watch of the changes waiting for their
+-- confirmation (Task 5) ask by status. Only a column of the original table: SCHEMA runs before migrate on an existing database.
+CREATE INDEX IF NOT EXISTS idx_changes_status ON changes(status);
 CREATE TABLE IF NOT EXISTS devices (
     mac TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -328,6 +331,12 @@ ADDED_COLUMNS = (
     # context of its request (AUDIT_TOKEN). NULL for an entry of a session, of the scheduler, without a user, and for every row of
     # before.
     ("audit", "token", "TEXT"),
+    # Phase 4c, Task 4: a change with confirmation. confirm_minutes the minutes it waits for "Bestätigen" (changes.create_change; NULL:
+    # without confirmation, every row of before), confirm_until its deadline (UTC, "YYYY-MM-DD HH:MM:SS"), written when run_change
+    # leaves it waiting (status pending), and confirmed_by who confirmed it (confirm.confirm_change). Existing rows have NULL.
+    ("changes", "confirm_minutes", "INTEGER"),
+    ("changes", "confirm_until", "TEXT"),
+    ("changes", "confirmed_by", "TEXT"),
 )
 
 

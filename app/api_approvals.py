@@ -108,19 +108,27 @@ async def request_approval(body: ApprovalIn, user=Depends(auth.require(roles.AEN
     (api_changes._enabled_row); the zone and the rights of its mode (api_changes._mode_rights, the 403 of /plan); the change needs an
     approval (approvals.needs_approval, else 409 NO_APPROVAL_NEEDED: a prepare, a revert, a save and a change without expert mode go
     directly, as does everything with the four-eyes principle off); the plan of now is the preview's (api_changes.checked_plan, the
-    errors of /apply). The rights come before the 409 since Phase 4c (4a R6-b): with the REST API the answer is a contract, and "sie
-    lässt sich direkt ausführen" is true only for whoever has the rights. Stores exactly the desired state the requester sent
-    (without the empty defaults of PortChange: PlanIn(**payload) restores the request) and the preview they saw
-    (api_changes.preview_answer); audits approval_requested and tells the listeners."""
+    errors of /apply); with confirm_minutes, the change can run with confirmation (api_changes.confirm_refusal, 409 as in
+    start_change: a request whose approval would have to fail is never stored). The rights come before the 409 since Phase 4c (4a
+    R6-b): with the REST API the answer is a contract, and "sie lässt sich direkt ausführen" is true only for whoever has the rights.
+    Stores exactly the desired state the requester sent (without the empty defaults of PortChange: PlanIn(**payload) restores the
+    request, confirm_minutes too when it is set) and the preview they saw (api_changes.preview_answer); audits approval_requested and
+    tells the listeners."""
     row = await api_changes._enabled_row(body.switch_id)
     four_eyes = (await approvals.policy())["four_eyes"]
     await api_changes._mode_rights(user, row, body.plan, four_eyes)
     if not approvals.needs_approval(approvals.PORT_CHANGE, body.plan.model_dump(), four_eyes):
         raise HTTPException(409, NO_APPROVAL_NEEDED)
     plan, _, kind, summary = await api_changes.checked_plan(row, body.plan)
+    if body.plan.confirm_minutes is not None:
+        refusal = api_changes.confirm_refusal(row, plan, body.plan)
+        if refusal:
+            raise HTTPException(409, refusal)
     preview = api_changes.preview_answer(row, plan, kind, summary)
     payload = {"mode": body.plan.mode, "ports": body.plan.ports, "change": body.plan.change.model_dump(exclude_defaults=True),
                "expert": body.plan.expert}
+    if body.plan.confirm_minutes is not None:
+        payload["confirm_minutes"] = body.plan.confirm_minutes
     aid = await approvals.create(approvals.PORT_CHANGE, body.switch_id, summary, payload, preview, user)
     await audit(user["username"], "approval_requested", str(body.switch_id), f"#{aid} {summary}", role=user["role"])
     await _announce("requested", aid)

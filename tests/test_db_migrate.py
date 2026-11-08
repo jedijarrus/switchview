@@ -53,6 +53,9 @@ NEW_COLUMNS = {
         "sent": ("INTEGER", 0, None),    # Phase 3 appends sent
         "role": ("TEXT", 0, None),       # Phase 4a appends role and approved_by
         "approved_by": ("TEXT", 0, None),
+        "confirm_minutes": ("INTEGER", 0, None),    # Phase 4c appends the confirmation (Task 4)
+        "confirm_until": ("TEXT", 0, None),
+        "confirmed_by": ("TEXT", 0, None),
     },
 }
 # config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by test_migration_adds_the_phase3_columns.
@@ -374,9 +377,11 @@ PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switch
                                          ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
                                          ("switches", "compliance_snmp_at")}
 # The tables and the columns Phase 4c adds (Tasks 4 and 7 extend both): Task 2 the API tokens (with idx_api_tokens_subject) and the
-# API token an audit entry was made with. A database as Phase 4b left it has none of them, and its audit entries read NULL there.
+# API token an audit entry was made with, Task 4 the confirmation of a change (its minutes, its deadline, who confirmed it). A
+# database as Phase 4b left it has none of them, and its audit entries and changes read NULL there.
 PHASE4C_TABLES = {"api_tokens"}
-PHASE4C_COLUMNS: set[tuple[str, str]] = {("audit", "token")}
+PHASE4C_COLUMNS: set[tuple[str, str]] = {("audit", "token"), ("changes", "confirm_minutes"), ("changes", "confirm_until"),
+                                         ("changes", "confirmed_by")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:
@@ -397,8 +402,8 @@ async def _default_of(conn, table: str, column: str):
 @pytest.mark.parametrize("tables, columns", [(PHASE4B_TABLES, PHASE4B_COLUMNS), (PHASE4C_TABLES, PHASE4C_COLUMNS)], ids=["4b", "4c"])
 async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables, columns):
     """A database as the phase before left it (db.SCHEMA without the tables of tables, every column of db.ADDED_COLUMNS but those of
-    columns, one switch, one backup and one audit entry) gets the tables (empty, with their indexes) and the columns (the rows: the
-    column's default) from init_db, the rows keep what they held; a second init_db changes nothing."""
+    columns, one switch, one backup, one audit entry and one change) gets the tables (empty, with their indexes) and the columns (the
+    rows: the column's default) from init_db, the rows keep what they held; a second init_db changes nothing."""
     path = data_dir / "switchview.db"
     async with aiosqlite.connect(path) as conn:
         await conn.executescript(db.SCHEMA)
@@ -411,11 +416,13 @@ async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables
         await conn.execute("INSERT INTO switches (name, host) VALUES ('SW-EK-01', '203.0.113.21')")
         await conn.execute("INSERT INTO config_backups (switch_id, taken_at, sha, content) VALUES (1, '2026-11-01 02:30:00', 'abc', 'x')")
         await conn.execute("INSERT INTO audit (username, action, target, detail, role) VALUES ('anna', 'login', 'entra', '', 'aendern')")
+        await conn.execute("INSERT INTO changes (switch_id, username, kind, summary, status, mechanism, sent) VALUES "
+                           "(1, 'anna', 'ports', 'Port 2: VLAN 20', 'ok', 'ssh', 1)")
         await conn.commit()
         # the premise: none of the tables, their indexes or the columns is there yet
         assert not await _table_names(conn) & tables and not await _index_names(conn, tables)
         assert set((await _added_state(conn, columns)).values()) <= {(None, None)}
-        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups", "audit")}
+        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups", "audit", "changes")}
 
     await db.init_db()
 

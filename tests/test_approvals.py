@@ -58,11 +58,12 @@ def four_eyes(on=True):
 class STATE:                                # what fake_plan plans against; a test sets it to "change the switch"
     shown = ["vlan 20 untagged 6"]
     blocked = []
+    mechanism = "ssh"                       # the write way fake_plan names
 
 
 async def fake_plan(row, body):
-    plan = {"shown": list(STATE.shown), "commands": list(STATE.shown), "blocked": list(STATE.blocked), "mechanism": "ssh", "warnings": [],
-            "desired": {"6": {"u": "20"}}, "before": {"6": {"u": "1"}}, "expert": body.expert}
+    plan = {"shown": list(STATE.shown), "commands": list(STATE.shown), "blocked": list(STATE.blocked), "mechanism": STATE.mechanism,
+            "warnings": [], "desired": {"6": {"u": "20"}}, "before": {"6": {"u": "1"}}, "expert": body.expert}
     return plan, {"ports": body.ports, "set": body.change.model_dump(), "expert": body.expert}, "ports", api_changes._summary(body)
 
 
@@ -74,6 +75,7 @@ def world(tmp_path, monkeypatch):
     sid = dbfix.insert_switch(name="SW", host="10.0.0.1", zone="EK")
     STATE.shown = ["vlan 20 untagged 6"]
     STATE.blocked = []
+    STATE.mechanism = "ssh"
     ran.clear()
     monkeypatch.setattr(api_changes, "_make_plan", fake_plan)
 
@@ -627,3 +629,19 @@ def test_a_stale_request_keeps_who_found_it_and_a_neutral_reason(world, client):
     assert dbfix.query("SELECT status, decided_by, reason, change_id FROM approvals") == [("stale", "ben", api_approvals.OTHER_COMMANDS, None)]
     assert dbfix.query("SELECT username, target, detail, role FROM audit WHERE action = 'approval_stale'") == [
         ("ben", str(world), f"#{aid} Port 6: VLAN 20: {api_approvals.OTHER_COMMANDS}", "freigeben")]
+
+
+# ── Phase 4c, Task 4: a request with confirmation ─────────────────────────────────────────────────────────────────────────────────
+def test_a_request_keeps_its_confirmation(world, client):
+    four_eyes()
+    aid = ask(client, world, plan={**PLAN, "confirm_minutes": 5})[1].json()["id"]
+    assert client.get(f"/api/approvals/{aid}", headers=H("ben")).json()["payload"]["confirm_minutes"] == 5
+    cid = approve(client, aid, "ben").json()["id"]
+    assert dbfix.query("SELECT confirm_minutes FROM changes WHERE id = ?", (cid,)) == [(5,)]
+
+
+def test_a_request_with_confirmation_where_the_switch_saves_by_itself_is_refused(world, client):
+    four_eyes()
+    STATE.mechanism = "snmp"                                          # SW is a ProCurve: an SNMP SET saves by itself
+    r = ask(client, world, plan={**PLAN, "confirm_minutes": 5})[1]
+    assert (r.status_code, r.json()["detail"]) == (409, api_changes.CONFIRM_AUTOSAVE) and dbfix.query("SELECT count(*) FROM approvals") == [(0,)]

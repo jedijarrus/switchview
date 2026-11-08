@@ -27,9 +27,11 @@ from datetime import datetime, timezone
 import pytest
 from netmiko.exceptions import NetmikoTimeoutException, ReadTimeout
 
+import apifix
 import cfgparse
 import changes
 import config
+import confirm
 import crypto
 import db
 import dbfix
@@ -1194,6 +1196,35 @@ async def test_an_erroring_set_the_read_back_does_not_confirm_marks_nothing(env,
     assert (ch["status"], ch["saved"]) == ("unclear", 0)
     assert (await change(old))["saved"] == 0 and len((await change(old))["steps"]) == 1
     assert not any(ALSO_SAVED in text for text, _ in steps(ch))
+
+
+# ── Phase 4c, Task 4: a change with confirmation over SNMP ──────────────────────────────────────────────────────────────────────────
+async def test_a_change_with_confirmation_waits_over_snmp_without_autosave(env):
+    sid = await env.switch("generic")
+    cid, _ = await apply(sid, GI_PROBE)
+    await sql("UPDATE changes SET confirm_minutes = 5 WHERE id = ?", (cid,))
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"], steps(ch)[-1][1]) == ("pending", 0, "warn") and steps(ch)[-1][0].startswith("Geprüft, aber nicht gespeichert")
+
+
+async def test_confirm_over_snmp_ends_ok_without_a_save_or_a_set(env):
+    sid = await env.switch("generic")
+    cid, _ = await apply(sid, GI_PROBE)
+    await sql("UPDATE changes SET confirm_minutes = 5 WHERE id = ?", (cid,))
+    await run(env, cid)
+    sets = len(env.agent.sets)
+    await confirm.confirm_change(cid, apifix.user("aendern", USER))
+    ch = await change(cid)
+    assert (ch["status"], ch["saved"], ch["confirmed_by"], len(env.agent.sets)) == ("ok", 0, USER, sets)
+    assert steps(ch)[-2:] == [(confirm.CONFIRMED_STEP.format(user=USER), "info"), (UNSAVED, "warn")]
+
+
+async def test_a_driver_that_saves_by_itself_skips_the_confirmation(env):
+    sid = await env.switch("procurve")
+    cid, _ = await apply(sid, PC_PROBE)
+    await sql("UPDATE changes SET confirm_minutes = 5 WHERE id = ?", (cid,))
+    ch = await run(env, cid)
+    assert (ch["status"], ch["saved"]) == ("ok", 1) and steps(ch)[-2:] == [(changes.CONFIRM_SKIPPED, "warn"), (AUTOSAVED, "ok")]
 
 
 # ── R43: status "on" ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────

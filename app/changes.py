@@ -16,7 +16,7 @@ import logging
 import re
 import traceback
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from netmiko.exceptions import ConfigInvalidException
 
@@ -69,6 +69,13 @@ CANCELLED = "Abgebrochen (Prozess beendet)"
 CANCELLED_UNSENT = f"{CANCELLED}, nichts gesendet"
 # The error of a change whose switch was disabled while it waited for the lock (run_change, _run_snmp)
 DISABLED_RUN = "Switch ist deaktiviert: nichts gesendet"
+# Phase 4c, Task 4: a change with confirmation (confirm_minutes) is verified as every change, but instead of being saved it waits in
+# PENDING, no end state (neither queued / running nor TERMINAL), until "Bestätigen" (app/confirm.py) or its revert ends the waiting
+PENDING = "pending"
+PENDING_BUSY = "An diesem Switch wartet Änderung #{cid} auf Bestätigung – erst bestätigen oder zurücknehmen"
+PENDING_STEP = "Geprüft, aber nicht gespeichert: wartet bis {until} UTC auf „Bestätigen“, sonst nimmt SwitchView die Änderung zurück"
+REVERT_STARTED = "Nicht bestätigt: Rücknahme #{rid} gestartet"
+CONFIRM_SKIPPED = "Bestätigung entfällt: der Switch hat die Änderung schon selbst gespeichert"
 
 
 def _now() -> str:
@@ -523,42 +530,88 @@ BUSY = "An diesem Switch läuft gerade eine Änderung"
 
 
 class Busy(RuntimeError):
-    """create_change: the switch already has a change that is queued or running (BUSY)."""
+    """create_change: the switch already has a change that is queued or running (BUSY), or one waiting for its confirmation that this
+    change does not take back (PENDING_BUSY); the text is the reason."""
+
+
+async def busy_reason(conn, sid: int, revert_of: int | None) -> str | None:
+    """Why switch sid takes no new change now (read on conn, inside the caller's transaction if one is open): BUSY while a change of it
+    is queued or running, else PENDING_BUSY while one waits for its confirmation (PENDING) and it is not revert_of - its revert is the
+    one change it takes then: every write memory, and every SNMP SET of a driver with snmp_autosave, would save the waiting change
+    too, and its revert would plan against a state that is not the change's; None when it is free."""
+    async with conn.execute("SELECT id, status FROM changes WHERE switch_id = ? AND status IN ('queued', 'running', 'pending') "
+                            "ORDER BY id", (sid,)) as cur:
+        rows = await cur.fetchall()
+    if any(r["status"] != PENDING for r in rows):
+        return BUSY
+    waiting = [r["id"] for r in rows if r["id"] != revert_of]
+    return PENDING_BUSY.format(cid=waiting[0]) if waiting else None
 
 
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None, *,
-                        role: str | None = None, approved_by: str | None = None, claim=None) -> int:
+                        role: str | None = None, approved_by: str | None = None, claim=None, confirm_minutes: int | None = None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
     ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
     and _run_snmp set it to 1 right before anything does). role is the role of whoever starts it (Phase 4a): its change_* audit entry
     names it, whenever the change ends (run_change, _close). approved_by is whoever approved it under the four-eyes principle (Phase
-    4a, Task 7; None for a change without an approval).
+    4a, Task 7; None for a change without an approval). confirm_minutes (Phase 4c, Task 4; None: without confirmation): run_change
+    leaves the change waiting that long for "Bestätigen" (PENDING) instead of saving it; api_changes.start_change offers it only for a
+    port change on a write way that can hold a change unsaved.
 
-    One change at a time per switch (Phase 1, review §2): the check for a queued or running change of the switch and the INSERT are one
-    write transaction (BEGIN IMMEDIATE), so of two concurrent requests that both passed api_changes.apply_change's early check the second
-    waits for the first's commit and then raises Busy(BUSY), nothing inserted. claim, if given, is `async (conn, cid) -> None` and runs
-    after the INSERT on the same connection, in the same transaction, before the commit (approvals.claim marks the request approved
-    there): an exception from it goes through and nothing is stored, the change row included, so of two approvals of one request at
-    once exactly one starts a change."""
+    One change at a time per switch (Phase 1, review §2): busy_reason and the INSERT are one write transaction (BEGIN IMMEDIATE), so of
+    two concurrent requests that both passed api_changes.start_change's early check the second waits for the first's commit and then
+    raises Busy with the reason (BUSY, or PENDING_BUSY while a change of the switch waits for its confirmation), nothing inserted. The
+    revert of a waiting change ends the waiting in the same transaction (_leave_pending): the waiting change is unclear with
+    REVERT_STARTED, so a "Bestätigen" at the same time no longer finds it pending. claim, if given, is `async (conn, cid) -> None` and
+    runs after the INSERT on the same connection, in the same transaction, before the commit (approvals.claim marks the request
+    approved there): an exception from it goes through and nothing is stored, the change row included, so of two approvals of one
+    request at once exactly one starts a change."""
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
-        async with conn.execute("SELECT 1 FROM changes WHERE switch_id = ? AND status IN ('queued', 'running') LIMIT 1", (sid,)) as cur:
-            if await cur.fetchone():
-                raise Busy(BUSY)    # closing the connection rolls the transaction back
+        reason = await busy_reason(conn, sid, revert_of)
+        if reason:
+            raise Busy(reason)    # closing the connection rolls the transaction back
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
-            "mechanism, sent, role, approved_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
+            "mechanism, sent, role, approved_by, confirm_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
-             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role, approved_by))
+             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role, approved_by, confirm_minutes))
+        await _leave_pending(conn, revert_of, cur.lastrowid)
         if claim is not None:
             await claim(conn, cur.lastrowid)    # its exception: closing the connection rolls the INSERT back, as for Busy
         await conn.commit()
         return cur.lastrowid
 
 
+async def _leave_pending(conn, of: int | None, rid: int) -> None:
+    """The revert rid of change `of` was just inserted on conn (create_change's transaction, no commit here): if `of` waits for its
+    confirmation, its waiting ends now - unclear, with REVERT_STARTED as its error and as a step (warn), finished now. The revert marks
+    it reverted_by like any other change once it ends ok (_mark_reverted). Any other change `of` stays as it is."""
+    if of is None:
+        return
+    async with conn.execute("SELECT steps FROM changes WHERE id = ? AND status = 'pending'", (of,)) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return
+    text = REVERT_STARTED.format(rid=rid)
+    steps = json.loads(row["steps"] or "[]") + [[_now(), text, "warn"]]
+    await conn.execute("UPDATE changes SET status = 'unclear', error = ?, steps = ?, finished_at = ? WHERE id = ? AND status = 'pending'",
+                       (text, json.dumps(steps), _now(), of))
+
+
+async def _wait_for_confirm(cid: int, minutes: int, step) -> None:
+    """Change cid, verified and not saved, waits for its confirmation: its deadline (now + minutes, UTC) into confirm_until, then the
+    step PENDING_STEP (warn) through step, the run's own (masking) step function. The caller ends the run as PENDING."""
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    await _upd(cid, confirm_until=until.strftime("%Y-%m-%d %H:%M:%S"))
+    await step(PENDING_STEP.format(until=until.strftime("%H:%M")), "warn")
+
+
 async def run_change(cid: int):
-    """Hintergrund-Task. Status: queued -> running -> ok | unclear | failed | aborted.
+    """Hintergrund-Task. Status: queued -> running -> ok | unclear | failed | aborted, or pending (Phase 4c, Task 4): a port change with
+    confirm_minutes stops after "Prüfung ok", without write memory, waiting for "Bestätigen" until confirm_until (_wait_for_confirm);
+    its end (status, backups, switch_cfg, the audit change_pending, the re-poll) is written as for every other end.
 
     Auf dem Schreibweg der Vorschau (changes.mechanism; NULL heisst ssh, eine Zeile von vor der Spalte): "snmp" faehrt _run_snmp, ein
     unbekannter bricht ab, ohne den Switch anzufassen (nie still per SSH). Der Rest hier ist der SSH-Weg; ab dem Lock gilt die Switch-Zeile
@@ -686,6 +739,10 @@ async def run_change(cid: int):
                         await step(f"{error}. {kept}", "error")
                         return
                     await step("Prüfung ok")
+                if kind == "ports" and ch["confirm_minutes"]:
+                    await _wait_for_confirm(cid, ch["confirm_minutes"], step)
+                    status = PENDING
+                    return
                 await step("Speichere (write memory)")
                 await going_out("save")
                 await asyncio.to_thread(conn.save_config)
@@ -773,6 +830,8 @@ async def _run_snmp(cid: int, ch, row):
          Ein SET mit Fehler, das das Zuruecklesen nicht bestaetigt, markiert nichts.
       5. Zuruecklesen und pruefen (verify_snmp, die ganze VLAN-Zugehoerigkeit, R32): scheitert der Read oder weicht etwas ab, unclear.
          Sonst ok, saved=1 nur bei einem Treiber, der jeden SET selbst speichert (snmp_autosave, R26), sonst saved=0 mit Hinweis.
+         With confirm_minutes (Phase 4c, Task 4) a driver without snmp_autosave leaves the change pending instead, waiting for
+         "Bestätigen" (_wait_for_confirm); one with it has saved the change already: the step CONFIRM_SKIPPED, then ok as before.
     Was ab dem Uebergeben des SET schiefgeht, ist unclear (der Schritt sagt, ob es schon gespeichert waere), davor failed (without a
     re-poll: nothing went out, _close, _repolls_after). A cancelled task (the app shut down, say) ends unclear with CANCELLED once the
     SET was handed over, before that "aborted" with CANCELLED_UNSENT, as after a restart (mark_interrupted). The row gets sent = 1 right
@@ -878,6 +937,12 @@ async def _run_snmp(cid: int, ch, row):
                 # R42b: die Antwort auf das SET fehlte, das Zuruecklesen bestaetigt aber jeden Wert: der Switch hat das SET verarbeitet
                 # und dabei (wie bei jedem SET) seine gesamte laufende Konfiguration gespeichert (unsaved gibt es nur mit snmp_autosave)
                 await _also_saved(cid, steps, unsaved)
+            if ch["confirm_minutes"]:
+                if not autosave:
+                    await _wait_for_confirm(cid, ch["confirm_minutes"], step)
+                    status = PENDING
+                    return
+                await step(CONFIRM_SKIPPED, "warn")
             status = "ok"
             if autosave:
                 saved = 1
@@ -974,10 +1039,10 @@ async def _close(cid: int, ch, status: str, error: str | None, saved: int, outpu
 
 
 def _repolls_after(status: str, kind: str, sent: bool) -> bool:
-    """Whether a change that ended with status re-polls its switch (run_change, _close): after ok or unclear, and after failed only
-    when something went out (sent; a change that failed before that left the switch as it was, which may just have been disabled,
-    DISABLED_RUN); never after aborted (nothing went out) or a save (write memory changes no port)."""
-    return status in ("ok", "unclear", "failed") and kind != "save" and (status != "failed" or sent)
+    """Whether a change that ended with status re-polls its switch (run_change, _close): after ok, unclear or pending (its lines are in
+    effect), and after failed only when something went out (sent; a change that failed before that left the switch as it was, which
+    may just have been disabled, DISABLED_RUN); never after aborted (nothing went out) or a save (write memory changes no port)."""
+    return status in ("ok", "unclear", "failed", PENDING) and kind != "save" and (status != "failed" or sent)
 
 
 async def _mark_reverted(ch, cid: int, status: str):
@@ -994,11 +1059,12 @@ def may_have_sent(ch) -> bool:
 
 def actions_of(ch) -> dict[str, bool]:
     """The follow-up actions of change ch, as the UI offers them (main._change_out serves both): "Rückgängig" (can_revert) for a port
-    change that ended ok / unclear / failed, is not reverted yet and may have sent something; "Trotzdem speichern" (can_save, write
-    memory) for an SSH change (NULL = ssh) that ended unclear / failed, is not saved and may have sent something. The same rules as
+    change that ended ok / unclear / failed or waits for its confirmation (PENDING: taking it back ends the waiting), is not reverted
+    yet and may have sent something; "Trotzdem speichern" (can_save, write memory) for an SSH change (NULL = ssh) that ended unclear /
+    failed, is not saved and may have sent something - never for a waiting one, which "Bestätigen" saves. The same rules as
     api_changes._plan_revert and api_changes._plan_save, which refuse the rest."""
     sent = may_have_sent(ch)
-    return {"can_revert": ch["kind"] == "ports" and not ch["reverted_by"] and ch["status"] in ("ok", "unclear", "failed") and sent,
+    return {"can_revert": ch["kind"] == "ports" and not ch["reverted_by"] and ch["status"] in ("ok", "unclear", "failed", PENDING) and sent,
             "can_save": (ch["mechanism"] or "ssh") == "ssh" and ch["status"] in ("unclear", "failed") and not ch["saved"] and sent}
 
 

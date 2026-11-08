@@ -31,6 +31,7 @@ import sqlite3
 
 import pytest
 
+import api_changes
 import apifix
 import auth
 import cfgparse
@@ -129,6 +130,14 @@ BARE = Driver("bare", frozenset(), "qbridge", dict(GENERIC.oids), "")
 def token(shown: list[str]) -> str:
     """changes.cmd_token, written out: the first 16 hex digits of the SHA-256 of the shown lines."""
     return hashlib.sha256("\n".join(shown).encode()).hexdigest()[:16]
+
+
+# The key confirm of a /plan answer (Phase 4c, Task 4: api_changes.confirm_info): whether the change can run with a confirmation
+CONFIRM_POSSIBLE = {"possible": True, "why": None, "default_minutes": 5, "max_minutes": 30}
+
+
+def confirm_refused(why: str) -> dict:
+    return {"possible": False, "why": why, "default_minutes": 5, "max_minutes": 30}
 
 
 def inv_of(cfg: dict) -> dict:
@@ -293,7 +302,8 @@ def test_cisco_routes_snmp(api, fake):
     assert r.json() == {"kind": "ports", "summary": "Port Gi1/0/2: VLAN 10", "mechanism": "snmp",
                         "commands": ["Port Gi1/0/2: Access-VLAN 1 → 10"], "warnings": [], "blocked": [],
                         "before": {"Gi1/0/2": {"u": "1"}}, "desired": {"Gi1/0/2": {"u": "10"}},
-                        "token": token(["Port Gi1/0/2: Access-VLAN 1 → 10"]), "autosave": False, "insecure_write": "v2c", "approval": False}
+                        "token": token(["Port Gi1/0/2: Access-VLAN 1 → 10"]), "autosave": False, "insecure_write": "v2c", "approval": False,
+                        "confirm": CONFIRM_POSSIBLE}
     assert fake.calls == [("snmp", "cisco", True), ("plan", "snmp")]
 
 
@@ -304,7 +314,8 @@ def test_procurve_prefers_ssh(api, fake):
     assert r.status_code == 200, r.text
     assert r.json() == {"kind": "ports", "summary": "Port 2: VLAN 20", "mechanism": "ssh", "commands": ["vlan 20 untagged 2"],
                         "warnings": [], "blocked": [], "before": {"2": {"u": "99"}}, "desired": {"2": {"u": "20"}},
-                        "token": token(["vlan 20 untagged 2"]), "autosave": True, "insecure_write": None, "approval": False}
+                        "token": token(["vlan 20 untagged 2"]), "autosave": True, "insecure_write": None, "approval": False,
+                        "confirm": CONFIRM_POSSIBLE}
     assert fake.calls == [("ssh", sid), ("plan", "ssh")]
 
 
@@ -981,7 +992,8 @@ def test_save_of_an_ssh_change_is_unchanged(api, fake, tmp_path):
     got = preview(api, sid, {"mode": "save", "of": cid})
     assert got == {"kind": "save", "summary": f"Speichern nach #{cid}", "mechanism": "ssh", "commands": [],
                    "warnings": ["Speichert den aktuellen Stand des Switches dauerhaft (write memory)."], "blocked": [], "before": {},
-                   "desired": {}, "token": token([]), "autosave": True, "insecure_write": None, "approval": False}
+                   "desired": {}, "token": token([]), "autosave": True, "insecure_write": None, "approval": False,
+                   "confirm": confirm_refused(api_changes.CONFIRM_ONLY_PORTS)}
     assert fake.calls == [("ssh", sid)]      # the SSH read stays the pre-flight of a save
     refused(plan(api, sid, {"mode": "save", "of": add_change(tmp_path, sid, before={}, mechanism=None, status="ok")}), 409,
             "Diese Änderung muss nicht gespeichert werden")
@@ -1076,7 +1088,7 @@ def test_poe_preview_and_apply_go_snmp_on_a_procurve_with_ssh(api, fake):
     assert got == {"kind": "ports", "summary": "Port 1: PoE aus", "mechanism": "snmp", "commands": ["Port 1: PoE an → aus"],
                    "warnings": ["Port 1: versorgt gerade ein Gerät mit Strom (PoE), es verliert die Stromversorgung"], "blocked": [],
                    "before": {"1": {"poe": True}}, "desired": {"1": {"poe": False}}, "token": token(["Port 1: PoE an → aus"]),
-                   "autosave": True, "insecure_write": "v2c", "approval": False}
+                   "autosave": True, "insecure_write": "v2c", "approval": False, "confirm": confirm_refused(api_changes.CONFIRM_AUTOSAVE)}
     assert fake.calls == [("snmp", "procurve", True), ("plan", "snmp")]
     r = apply(api, sid, POE_OFF, got["token"], mechanism="snmp")
     assert r.status_code == 200, r.text

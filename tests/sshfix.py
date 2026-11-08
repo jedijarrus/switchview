@@ -86,7 +86,8 @@ def procurve(**cols) -> dict:
 
 
 class FakeSSH:
-    """A netmiko session to a ProCurve: show commands answer with env.running, send_config_set raises env.on_send if set."""
+    """A netmiko session to a ProCurve: show commands answer with env.running, send_config_set raises env.on_send if set, save_config
+    counts in env.saves."""
 
     def __init__(self, env):
         self.env = env
@@ -101,7 +102,7 @@ class FakeSSH:
         return ""
 
     def save_config(self):
-        pass
+        self.env.saves += 1
 
     def disconnect(self):
         pass
@@ -116,6 +117,7 @@ class SshEnv:
         self.on_send: BaseException | None = None
         self.on_connect: BaseException | None = None
         self.sent: list[list[str]] = []
+        self.saves = 0    # every write memory (FakeSSH.save_config)
         self.repolls: list[int] = []
 
     def connect(self, row):

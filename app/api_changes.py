@@ -42,6 +42,12 @@ SSH_NEEDED = "Für Änderungen braucht der Switch einen SSH-Zugang (Zugang bearb
 NO_SSH = "für diesen Switch ist kein SSH-Zugang hinterlegt (Zugang bearbeiten)"
 # /apply of a change that needs a four-eyes approval (approvals.needs_approval): it is requested instead (POST /api/approvals)
 APPROVAL_NEEDED = "Diese Änderung braucht eine Freigabe (Vier-Augen-Prinzip): bitte „Freigabe anfordern“"
+# Phase 4c, Task 4: a change with confirmation (PlanIn.confirm_minutes, changes.PENDING): the minutes it waits for "Bestätigen", by
+# default and at most, and why it is not possible (confirm_refusal)
+CONFIRM_DEFAULT = 5
+CONFIRM_MAX = 30
+CONFIRM_ONLY_PORTS = "Mit Bestätigung geht nur eine Port-Änderung (kein Speichern, keine Rücknahme, kein „RADIUS vorbereiten“)"
+CONFIRM_AUTOSAVE = "Mit Bestätigung geht hier nicht: der Switch speichert jede SNMP-Änderung sofort selbst"
 _tasks: set = set()
 
 
@@ -68,6 +74,9 @@ class PlanIn(BaseModel):
     # Der Schreibweg der Vorschau (die Antwort von /plan nennt ihn), von /apply mitgeschickt: dann plant _make_plan genau so oder lehnt
     # ab, nie still ueber den anderen Weg. Ohne ihn waehlt _make_plan selbst; /plan beachtet ihn nie, die Vorschau waehlt immer (R28).
     mechanism: str | None = Field(default=None, pattern=r"^(ssh|snmp)$")
+    # Phase 4c, Task 4: run with confirmation, waiting that many minutes for "Bestätigen" instead of saving (None: without). strict:
+    # only a JSON number, no "5" and no true; /plan ignores it (its key confirm says whether it is possible), /apply checks it there
+    confirm_minutes: int | None = Field(default=None, ge=1, le=CONFIRM_MAX, strict=True)
 
 
 def _port_list(ports: list[str]) -> str:
@@ -462,6 +471,25 @@ class PreviewOutdated(HTTPException):
         super().__init__(409, detail)
 
 
+def confirm_refusal(row, plan: dict, body: PlanIn) -> str | None:
+    """Why the change body (planned as plan at switch row) cannot run with confirmation, else None: only a port change can
+    (CONFIRM_ONLY_PORTS: a save and a RADIUS preparation have nothing to take back, and a revert restores a state that ran before), and
+    not over SNMP at a driver that saves every SET by itself (CONFIRM_AUTOSAVE: snmp_autosave, a ProCurve over SNMP). Says it for
+    every body; start_change and api_approvals.request_approval ask only when confirm_minutes is set."""
+    if body.mode != "ports":
+        return CONFIRM_ONLY_PORTS
+    if plan["mechanism"] == "snmp" and drivers.can(drivers.driver_for(row), "snmp_autosave"):
+        return CONFIRM_AUTOSAVE
+    return None
+
+
+def confirm_info(row, plan: dict, body: PlanIn) -> dict:
+    """The key confirm of the /plan answer: whether the change can run with confirmation (confirm_refusal), why not, and the minutes
+    the preview offers (CONFIRM_DEFAULT, at most CONFIRM_MAX)."""
+    why = confirm_refusal(row, plan, body)
+    return {"possible": why is None, "why": why, "default_minutes": CONFIRM_DEFAULT, "max_minutes": CONFIRM_MAX}
+
+
 def preview_answer(row, plan: dict, kind: str, summary: str) -> dict:
     """The preview of plan as /plan answers it (and a four-eyes request stores it, POST /api/approvals): what goes out, the warnings
     and blocked ports, before and desired, the token of the commands, and what the preview says about the SNMP way, as the server sees
@@ -489,39 +517,54 @@ async def checked_plan(row, body: PlanIn) -> tuple[dict, dict, str, str]:
 
 @router.post("/api/switches/{sid}/plan")
 async def plan_change(sid: int, body: PlanIn, user=Depends(auth.require(roles.AENDERN))):
-    """The preview, and whether the change needs a four-eyes approval (approval: then it is requested, not applied)."""
+    """The preview, whether the change needs a four-eyes approval (approval: then it is requested, not applied) and whether it can run
+    with confirmation (confirm, Phase 4c: confirm_info)."""
     row = await _enabled_row(sid)
     four_eyes = (await approvals.policy())["four_eyes"]
     await _mode_rights(user, row, body, four_eyes)
     # Die Vorschau waehlt den Schreibweg immer selbst (R28): einen mitgeschickten mechanism beachtet nur /apply.
     plan, _, kind, summary = await _make_plan(row, body.model_copy(update={"mechanism": None}))
-    return preview_answer(row, plan, kind, summary) | {"approval": approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes)}
+    return preview_answer(row, plan, kind, summary) | {"approval": approvals.needs_approval(approvals.PORT_CHANGE, body.model_dump(), four_eyes),
+                                                       "confirm": confirm_info(row, plan, body)}
+
+
+def spawn(coro) -> asyncio.Task:
+    """The one start of a tracked background task in the process (single worker): coro as an asyncio task, held in _tasks until it
+    ends, so it is never collected half-way. Every change run (start_change) and every save of a "Bestätigen" (confirm) goes here."""
+    t = asyncio.create_task(coro)
+    _tasks.add(t)
+    t.add_done_callback(_tasks.discard)
+    return t
 
 
 async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | None = None, claim=None) -> int:
     """Starts the change body at switch row once its rights are checked: the one start of a change, for /apply and for a four-eyes
-    approval (api_approvals). The early check for a queued or running change spares the read and the plan; then the plan of now is
-    held against the preview (checked_plan: PreviewOutdated, 422); the binding busy check is changes.create_change's, in one
-    transaction with the INSERT (two requests can both pass the early one while they plan): either way 409 changes.BUSY. The change
-    is maker's (maker["username"], maker["role"]: whoever wanted it), approved_by the approver's name, claim runs in create_change's
-    transaction (approvals.claim; its AlreadyDecided goes through, nothing stored). Then changes.run_change as a background task,
-    which reads, plans and compares once more in the switch's lock before anything goes out. The change's id."""
+    approval (api_approvals). The early check (changes.busy_reason: a queued or running change, or one waiting for its confirmation
+    that body does not take back) spares the read and the plan; then the plan of now is held against the preview (checked_plan:
+    PreviewOutdated, 422) and, only when body.confirm_minutes is set, whether it can run with confirmation (confirm_refusal, 409); the
+    binding busy check is changes.create_change's, in one transaction with the INSERT (two requests can both pass the early one while
+    they plan): either way 409 with the reason (changes.BUSY or changes.PENDING_BUSY). The change is maker's (maker["username"],
+    maker["role"]: whoever wanted it), approved_by the approver's name, claim runs in create_change's transaction (approvals.claim;
+    its AlreadyDecided goes through, nothing stored), confirm_minutes goes with it. Then changes.run_change as a background task
+    (spawn), which reads, plans and compares once more in the switch's lock before anything goes out. The change's id."""
     sid = row["id"]
+    revert_of = body.of if body.mode == "revert" else None
     async with db() as conn:
-        async with conn.execute("SELECT id FROM changes WHERE switch_id = ? AND status IN ('queued', 'running')", (sid,)) as cur:
-            if await cur.fetchone():
-                raise HTTPException(409, changes.BUSY)
+        reason = await changes.busy_reason(conn, sid, revert_of)
+    if reason:
+        raise HTTPException(409, reason)
     plan, req, kind, summary = await checked_plan(row, body)
+    if body.confirm_minutes is not None:
+        refusal = confirm_refusal(row, plan, body)
+        if refusal:
+            raise HTTPException(409, refusal)
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     try:
-        cid = await changes.create_change(sid, maker["username"], kind, summary, req, plan,
-                                          revert_of=body.of if body.mode == "revert" else None, role=maker["role"],
-                                          approved_by=approved_by, claim=claim)
-    except changes.Busy:
-        raise HTTPException(409, changes.BUSY)
-    t = asyncio.create_task(changes.run_change(cid))
-    _tasks.add(t)
-    t.add_done_callback(_tasks.discard)
+        cid = await changes.create_change(sid, maker["username"], kind, summary, req, plan, revert_of=revert_of, role=maker["role"],
+                                          approved_by=approved_by, claim=claim, confirm_minutes=body.confirm_minutes)
+    except changes.Busy as e:
+        raise HTTPException(409, str(e))
+    spawn(changes.run_change(cid))
     return cid
 
 
