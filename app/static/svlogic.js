@@ -123,6 +123,12 @@ const SVLogic = {
     if (c.sent === 0) return { reload: "list", delay: 0 };
     return { reload: "map", delay: c.kind === "save" ? 200 : 4500 };
   },
+  // The whole minutes left until `until` (UTC text "YYYY-MM-DD HH:MM:SS", as changes.confirm_until) at now (milliseconds), rounded up
+  // and never below 0: "noch N Minuten" of a change that waits for its confirmation; text that is no time counts as 0
+  minutesLeft(until, now) {
+    const t = Date.parse(String(until || "").replace(" ", "T") + "Z");
+    return isNaN(t) ? 0 : Math.max(0, Math.ceil((t - now) / 60000));
+  },
   // The query string of params for GET /api/history, /api/events and the audit: "?" and k=v (both encoded) for every value but "",
   // null and undefined (no filter), joined with "&" in the order of params; "" when none is left
   query(params) {

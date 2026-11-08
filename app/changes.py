@@ -1073,13 +1073,21 @@ INTERRUPTED = "Abgebrochen durch Neustart von SwitchView"
 
 async def mark_interrupted() -> int:
     """At start: every change the last process left queued or running ends now. One that never sent anything (sent 0) is "aborted"
-    (INTERRUPTED + ", nichts gesendet"), every other one "unclear" as before (sent 1, or NULL from before the column). Returns how many."""
+    (INTERRUPTED + ", nichts gesendet"), every other one "unclear" as before (sent 1, or NULL from before the column). After the commit
+    each of them goes to the alerts (alerts.change_ended, Phase 4c) with its status and error of now (its row read again), wrapped by
+    _logged as in run_change; a change waiting for its confirmation (PENDING) is left to the watch (confirm.watch). Returns how many."""
     async with db() as conn:
+        async with conn.execute("SELECT id FROM changes WHERE status IN ('queued', 'running')") as cur:
+            ids = [r["id"] for r in await cur.fetchall()]
         aborted = await conn.execute("UPDATE changes SET status = 'aborted', error = ?, finished_at = datetime('now') "
                                      "WHERE status IN ('queued', 'running') AND sent = 0", (f"{INTERRUPTED}, nichts gesendet",))
         unclear = await conn.execute("UPDATE changes SET status = 'unclear', error = ?, finished_at = datetime('now') "
                                      "WHERE status IN ('queued', 'running')", (INTERRUPTED,))
         await conn.commit()
+        async with conn.execute(f"SELECT * FROM changes WHERE id IN ({', '.join('?' * len(ids))}) ORDER BY id", ids) as cur:
+            ended = await cur.fetchall()
+    for row in ended:
+        await _logged(row["id"], "Benachrichtigung", alerts.change_ended(row, row["id"], row["status"], row["error"]))
     return aborted.rowcount + unclear.rowcount
 
 

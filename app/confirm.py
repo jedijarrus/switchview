@@ -1,5 +1,5 @@
 """A change with confirmation (Phase 4c, Task 4): "Bestätigen" of a change that run_change left waiting (changes.PENDING), and its
-route. Task 5 adds the watch here (deadline, reachability, the automatic revert).
+route; and (Task 5) the watch over the waiting changes - their deadline, the reachability of their switch, the automatic revert.
 
 The waiting change is the change's own row: "Bestätigen" takes it from pending over running to ok (saved) or unclear, one change with
 one history in its steps. Who may confirm it: who started it or approved it, else anyone with Freigeben, always in their zones (an
@@ -10,9 +10,18 @@ pass between the check and the save, and write memory saves everything that runs
 changes.run_change that writes to a switch. Over SNMP it ends ok and unsaved, as every SNMP change of a driver without snmp_autosave
 (the only driver that waits): SwitchView never saves over SNMP.
 
+The watch (watch, a job of the one scheduler every CHECK_S seconds, its first run at the start; jobs._schedule) reads the waiting
+changes from the database: a change past its deadline (confirm_until) is due at once, any other one is due when its switch did not
+answer UNREACHABLE_AFTER checks in a row (reachable: sysUpTime over SNMP with the read identity; the misses are counted in the
+process, _misses - a restart loses at most a miss, never a deadline). A due change is taken back as a normal revert (auto_revert):
+_make_plan of the revert for its preview token, then start_change as AUTO_USER without a role, without a check of rights or four
+eyes; planning, the fresh read in the lock, the check and the save are those of the guided loop. A revert that cannot start ends the
+waiting unclear with a clear text, an audit and an alert, and is not tried again (_give_up).
+
 Everything of api_changes and changes goes through the module (api_changes.spawn, changes._step, ...), never imported by name."""
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -21,9 +30,13 @@ import api_changes
 import auth
 import cfgparse
 import changes
+import poller
 import roles
+import snmp
 import sshcli
-from db import audit, db
+from db import AUDIT_TOKEN, audit, db
+
+log = logging.getLogger("switchview.confirm")
 
 router = APIRouter()
 
@@ -171,3 +184,150 @@ async def _confirm_ssh(cid: int, by: str) -> None:
 async def confirm_route(cid: int, user=Depends(auth.require(roles.AENDERN))):
     """The "Bestätigen" of a change that waits for its confirmation: confirm_change."""
     return await confirm_change(cid, user)
+
+
+# ── The watch over the waiting changes (Task 5) ─────────────────────────────────────────────────────────────────────────────────
+CHECK_S = 15              # the watch runs every CHECK_S seconds (jobs._schedule), its first run at the start
+UNREACHABLE_AFTER = 2     # misses in a row (about 30 s) after which a waiting change is taken back before its deadline
+REACH_TIMEOUT_S = 8       # how long reachable waits for the switch's answer
+PARALLEL = 5              # at most that many switches are asked at once
+AUTO_USER = "SwitchView"  # the user of an automatic revert (no role: it is no person's request)
+SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
+TIMED_OUT = "Frist abgelaufen ({until} UTC)"
+NO_ANSWER = "Switch antwortet nicht"
+REVERTING_STEP = "{why}: SwitchView nimmt die Änderung zurück"
+UNREACHABLE = ("Nicht bestätigt und nicht zurückgenommen: Switch nicht erreichbar – ungespeichert; ein Neustart des Switches lädt die "
+               "gespeicherte Konfiguration")
+NOT_TAKEN_BACK = "Nicht bestätigt und nicht zurückgenommen – ungespeichert; ein Neustart des Switches lädt die gespeicherte Konfiguration"
+NOTHING_BACK = "Nicht bestätigt: am Switch ist nichts mehr zurückzunehmen"
+# The misses in a row of each waiting change (its id): in the process like the locks (single worker, main.py); a restart starts at 0
+_misses: dict[int, int] = {}
+# A change row with the name of its switch (auto_revert, _give_up and their alerts)
+_NAMED = "SELECT c.*, s.name AS switch_name FROM changes c JOIN switches s ON s.id = c.switch_id WHERE c.id = ?"
+
+
+async def reachable(row) -> bool:
+    """Whether switch row answers: sysUpTime over SNMP with its read identity (poller.creds_of) within REACH_TIMEOUT_S. Any exception
+    (the identity included) and an empty answer are False. Every switch is polled over SNMP anyway; an SSH login every 15 s would hold
+    one of its at most five sessions and write a login into its log."""
+    try:
+        return bool(await snmp.get(row["host"], poller.creds_of(row), [SYS_UPTIME], timeout=REACH_TIMEOUT_S))
+    except Exception:  # noqa: BLE001 - whatever fails, the switch did not answer
+        return False
+
+
+async def watch() -> int:
+    """The job: every waiting change (status pending) whose deadline has passed is due with TIMED_OUT (its time HH:MM), without a
+    check; every other one is checked by reachable with its switch row, at most PARALLEL at once: an answer clears its misses, a miss
+    counts up, and at UNREACHABLE_AFTER it is due with NO_ANSWER. The misses of changes that no longer wait go. Then auto_revert of
+    each due change in turn, each on its own (an exception is logged, the next one runs). First of all the context's API token goes
+    (db.AUDIT_TOKEN): APScheduler runs a job in the context of whoever woke it, and no entry of the watch names a token. How many
+    reverts it started."""
+    AUDIT_TOKEN.set(None)
+    now = changes._now()
+    async with db() as conn:
+        async with conn.execute("SELECT c.id AS cid, c.confirm_until, s.* FROM changes c JOIN switches s ON s.id = c.switch_id "
+                                "WHERE c.status = 'pending' ORDER BY c.id") as cur:
+            waiting = await cur.fetchall()
+    for cid in set(_misses) - {w["cid"] for w in waiting}:
+        del _misses[cid]
+    # (a waiting change without a deadline - no code writes one - is due as well: nothing waits without an end)
+    due = [(w["cid"], TIMED_OUT.format(until=w["confirm_until"][11:16] if w["confirm_until"] else "–")) for w in waiting
+           if not w["confirm_until"] or w["confirm_until"] <= now]
+    gate = asyncio.Semaphore(PARALLEL)
+
+    async def check(w):
+        async with gate:
+            answered = await reachable(w)
+        _misses[w["cid"]] = 0 if answered else _misses.get(w["cid"], 0) + 1
+        if _misses[w["cid"]] >= UNREACHABLE_AFTER:
+            due.append((w["cid"], NO_ANSWER))
+
+    await asyncio.gather(*(check(w) for w in waiting if w["confirm_until"] and w["confirm_until"] > now))
+    started = 0
+    for cid, why in due:
+        try:
+            if await auto_revert(cid, why) is not None:
+                started += 1
+        except Exception:  # noqa: BLE001 - one change that cannot be handled costs the others nothing
+            log.exception("Rücknahme von Änderung %s", cid)
+    return started
+
+
+async def _named(cid: int):
+    async with db() as conn:
+        async with conn.execute(_NAMED, (cid,)) as cur:
+            return await cur.fetchone()
+
+
+async def _add_step(cid: int, text: str, level: str, end: dict | None = None) -> bool:
+    """The step text (level) at the end of the steps of change cid, only while it waits (one write transaction: no step of another
+    writer is lost, and none lands in the run of a confirm that came first); with end ({column: value}) the same UPDATE ends the
+    waiting. Whether the change still waited."""
+    async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT steps FROM changes WHERE id = ? AND status = 'pending'", (cid,)) as cur:
+            got = await cur.fetchone()
+        if got is None:
+            return False    # closing the connection ends the transaction
+        cols = {"steps": json.dumps(json.loads(got["steps"] or "[]") + [[changes._now(), text, level]])} | (end or {})
+        await conn.execute(f"UPDATE changes SET {', '.join(f'{k} = ?' for k in cols)} WHERE id = ? AND status = 'pending'",
+                           (*cols.values(), cid))
+        await conn.commit()
+        return True
+
+
+async def _tell(ch, title: str, text: str) -> None:
+    """The alert confirm_revert about change ch (a _NAMED row), its title and text; one key per change."""
+    await alerts.emit("confirm_revert", title, text, switch_id=ch["switch_id"], switch_name=ch["switch_name"], key=f"confirm:{ch['id']}",
+                      facts={"Switch": ch["switch_name"]})
+
+
+async def auto_revert(cid: int, why: str) -> int | None:
+    """Takes back waiting change cid because of why (TIMED_OUT or NO_ANSWER) as a normal revert; the number of the revert, or None.
+    Nothing when cid no longer waits; else first the step REVERTING_STEP, only while it waits (a confirm that won the race: None).
+    The cached SSH read of its switch is dropped (changes.invalidate_cfg): run_change stored its read-back moments ago, and a switch
+    that stopped answering must show in this plan, not only in the revert's run. Then the revert's plan (api_changes._make_plan of
+    PlanIn(mode="revert", of=cid)): nothing to send and nothing blocked ends the waiting with NOTHING_BACK, without an alert; else
+    start_change with the plan's preview token and write way as AUTO_USER without a role (a blocked port is its 409 "Nicht
+    ausführbar: …", as checked_plan says it), and the alert confirm_revert „… wird zurückgenommen“. Any HTTPException ends the waiting
+    (_give_up, only while it still waits): UNREACHABLE for a switch that cannot be read (502), else NOT_TAKEN_BACK, each with the
+    reason; it is not tried again - a retry would hold the switch's lock without end, and the change is unsaved anyway."""
+    ch = await _named(cid)
+    if ch is None or ch["status"] != changes.PENDING:
+        return None
+    if not await _add_step(cid, REVERTING_STEP.format(why=why), "warn"):
+        return None
+    sid = ch["switch_id"]
+    changes.invalidate_cfg(sid)
+    body = api_changes.PlanIn(mode="revert", of=cid)
+    try:
+        row = await changes._switch_row(sid)
+        plan, *_ = await api_changes._make_plan(row, body)
+        if not plan["shown"] and not plan["blocked"]:
+            await _give_up(ch, NOTHING_BACK, alert=False)
+            return None
+        rid = await api_changes.start_change(row, body.model_copy(update={"token": changes.cmd_token(plan["shown"]),
+                                                                          "mechanism": plan["mechanism"]}),
+                                             {"username": AUTO_USER, "role": None})
+    except HTTPException as e:    # _give_up does nothing to a change that no longer waits (a confirm or a revert came first)
+        await _give_up(ch, f"{UNREACHABLE if e.status_code == 502 else NOT_TAKEN_BACK} ({e.detail})")
+        return None
+    await _tell(ch, f"Änderung #{cid} an {ch['switch_name']} wird zurückgenommen",
+                f"{ch['summary']} (von {ch['username']}): {why}. Rücknahme #{rid}.")
+    return rid
+
+
+async def _give_up(ch, error: str, alert: bool = True) -> None:
+    """The waiting of change ch (a _NAMED row) ends without a revert: unclear with error (masked with the secrets of its switch, as
+    every stored text of a change) as its error and its last step, finished now, only while it still waits. Then the audit
+    change_unclear of its starter (with their role) and, with alert, the alert confirm_revert „… nicht zurückgenommen“."""
+    cid = ch["id"]
+    error = cfgparse.mask_secrets(error, changes._secrets_of(await changes._switch_row(ch["switch_id"]), await changes.radius_settings()))
+    if not await _add_step(cid, error, "error" if alert else "warn",
+                           {"status": "unclear", "error": error, "finished_at": changes._now()}):
+        return
+    await changes._logged(cid, "Protokoll", audit(ch["username"], "change_unclear", str(ch["switch_id"]), f"#{cid} {ch['summary']}",
+                                                  role=ch["role"]))
+    if alert:
+        await _tell(ch, f"Änderung #{cid} an {ch['switch_name']} nicht zurückgenommen", f"{ch['summary']} (von {ch['username']}): {error}")

@@ -60,6 +60,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 # The used SSO nonces are in-process as well (auth._used_nonces): another worker would accept a nonce this one has seen.
 # The alert queue (alert_outbox) is delivered by a scheduler job: a second worker would send every message twice.
 # The throttle of invalid API tokens is in-process as well (auth._TOKENS): each worker would count its own failures.
+# The misses of the watch over changes waiting for confirmation count per process (confirm._misses): a second worker would check and take back twice.
 
 
 # The start warnings about SSO (check_startup_config): an open login gate, without and with the role mapping, and SSO without it

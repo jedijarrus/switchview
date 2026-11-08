@@ -343,15 +343,17 @@
     // stores exactly this payload and this preview, on its write way and with its token, for a second person to approve
     // (sv-approvals.js); /apply would refuse it
     const can = runnable(r), ask = can && !!r.approval;
+    // With confirmation (Phase 4c, sv-confirm.js): the choice under the preview, its minutes go with either button only when ticked
     const body = (ask ? `<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Änderung im Expertenmodus wird erst ausgeführt, wenn eine zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>` : "")
-      + previewBody(s, r, payload);
+      + previewBody(s, r, payload) + (can ? confirmOptionHtml(r, payload) : "");
+    const withMinutes = p => { const m = confirmMinutes(); return m === null ? p : { ...p, confirm_minutes: m }; };
     const btns = [];
     if (back) btns.push({ label: "Zurück", onClick: back });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     if (ask) btns.push({ label: "Freigabe anfordern", cls: "primary", onClick: async b => {
       b.disabled = true;
       try {
-        const res = await api("POST", "/api/approvals", { kind: "port_change", switch_id: s.id, plan: { ...payload, mechanism: r.mechanism, token: r.token } });
+        const res = await api("POST", "/api/approvals", { kind: "port_change", switch_id: s.id, plan: withMinutes({ ...payload, mechanism: r.mechanism, token: r.token }) });
         if (modalShown(shown)) closeModal();
         toast(`Freigabe angefordert (Anfrage #${res.id})`);
         refreshApprovals(); if (current === "approvals") renderApprovals();
@@ -360,14 +362,17 @@
     else if (can) btns.push({ label: r.kind === "save" ? "Speichern" : "Ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
       // genau der Schreibweg dieser Vorschau (nie eine eigene Wahl): geht er nicht mehr, lehnt der Server ab statt still den anderen zu nehmen
-      try { const res = await api("POST", `/api/switches/${s.id}/apply`, { ...payload, mechanism: r.mechanism, token: r.token }); runProgress(s, res.id); }
+      try { const res = await api("POST", `/api/switches/${s.id}/apply`, withMinutes({ ...payload, mechanism: r.mechanism, token: r.token })); runProgress(s, res.id); }
       catch (e) { toast(e.message); b.disabled = false; }
     } });
     const shown = modal(title, body, btns);
   }
 
-  const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"] };
-  const chPill = c => `<span class="pill ${CH[c.status] ? CH[c.status][1] : "neutral"}">${CH[c.status] ? CH[c.status][0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
+  const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"],
+    pending: ["wartet auf Bestätigung", "warn"] };
+  // A change with confirmation that ended unclear without a confirm (taken back, or the watch gave up) reads "nicht bestätigt"
+  const chState = c => c.status === "unclear" && c.confirm_minutes && !c.confirmed_by ? ["nicht bestätigt", "warn"] : CH[c.status];
+  const chPill = c => `<span class="pill ${chState(c) ? chState(c)[1] : "neutral"}">${chState(c) ? chState(c)[0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
   const stepsHtml = c => `<ul class="steps">${(c.steps || []).map(x => `<li class="${esc(x[2])}"><span class="t">${esc(fmtTime(x[0]).split(", ").pop())}</span><span>${esc(x[1])}</span></li>`).join("")}</ul>`;
   // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. "unklar" in den Worten des Servers: sein letzter Fehlerschritt ist der Fehler
   // plus, was offen ist (per SNMP, ob das Übernommene schon gespeichert ist, nach dem Treiber zur Laufzeit; per SSH changes.SSH_KEPT: was
@@ -375,6 +380,7 @@
   // Änderung (etwa nach einem Neustart, der nur den Fehler setzt), gilt per SNMP der Fehler allein, per SSH mit dem Satz für Befehle. Eine
   // SSH-Änderung, die danach gespeichert wurde („Trotzdem speichern“, R42), heißt gespeichert.
   function resultHead(c) {
+    if (c.status === "pending") return pendingHtml(c);    // waits for its confirmation (Phase 4c, sv-confirm.js)
     const lastErr = [...(c.steps || [])].reverse().find(x => x[2] === "error"), err = c.error || "";
     const told = lastErr && lastErr[1].startsWith(err) ? lastErr[1] : "";
     const unclear = c.mechanism === "snmp" ? (told || err)
@@ -390,9 +396,26 @@
   }
   // The progress of change id in its own dialog. A dialog closed meanwhile (Back, Escape, ✕) or replaced by a newer one (the next
   // change's progress, a preview) is asked on to the end, but nothing is written into it: #prog and the footer then belong to the
-  // dialog shown now (modalShown). The toast and the reload come either way, an error of the fetch as a toast then.
+  // dialog shown now (modalShown). The toast and the reload come either way, an error of the fetch as a toast then. A change that
+  // waits for its confirmation (pending, Phase 4c) is a resting state: its banner (pendingHtml) and the footer "Bestätigen"
+  // (mayConfirm), "Jetzt zurücknehmen" (mayRevert, the revert's preview) and "Schließen", set once; it is asked every 3 s while its
+  // dialog is open (each request keeps the session awake: whoever is to confirm sits in front of it), until its status changes.
   async function runProgress(s, id) {
     const shown = modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
+    let waiting = false;    // the footer of the waiting change is set
+    const setFoot = btns => {
+      const foot = $("#m-foot"); foot.innerHTML = "";
+      const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
+      // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
+      // new "Schließen"; a focus still in the dialog (the ✕) stays
+      if (!$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
+    };
+    // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
+    const reload = c => {
+      const next = SVLogic.afterChange(c);
+      if (next.reload === "list") setTimeout(() => { if (current === "switches" && selSwitch === s.id) renderChangesInto($("#sw-changes"), s.id, 10); }, next.delay);
+      else setTimeout(async () => { try { await loadMap(true); if (current === "switches") { const keep = picked; renderSwitchDetail(); picked = c.status === "ok" ? new Set() : keep; syncPicked(); } } catch (e) { /* egal */ } }, next.delay);
+    };
     for (;;) {
       let c; try { c = await api("GET", `/api/changes/${id}`); }
       catch (e) { if (modalShown(shown)) $("#prog").innerHTML = `<div class="error">${esc(e.message)}</div>`; else toast(e.message); return; }
@@ -407,19 +430,26 @@
           if (["unclear", "failed"].includes(c.status) && mayRevert(c)) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
           if (maySave(c)) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
           btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
-          const foot = $("#m-foot"); foot.innerHTML = "";
-          const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
-          // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
-          // new "Schließen"; a focus still in the dialog (the ✕) stays
-          if (!$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
+          setFoot(btns);
         }
         if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
-        // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
-        const next = SVLogic.afterChange(c);
-        if (next.reload === "list") setTimeout(() => { if (current === "switches" && selSwitch === s.id) renderChangesInto($("#sw-changes"), s.id, 10); }, next.delay);
-        else setTimeout(async () => { try { await loadMap(true); if (current === "switches") { const keep = picked; renderSwitchDetail(); picked = c.status === "ok" ? new Set() : keep; syncPicked(); } } catch (e) { /* egal */ } }, next.delay);
+        reload(c);
         return;
       }
+      if (c.status === "pending") {
+        // In effect at the switch: the view reloads once, as after an end
+        if (!waiting) {
+          waiting = true; reload(c);
+          const confirmBtn = { label: "Bestätigen", cls: "primary", onClick: async b => { b.disabled = true; if (!(await confirmChange(id))) b.disabled = false; } };
+          const backBtn = { label: "Jetzt zurücknehmen", onClick: () => previewChange(s, { mode: "revert", of: id }) };
+          if (modalShown(shown)) setFoot([...(mayConfirm(c) ? [confirmBtn] : []), ...(mayRevert(c) ? [backBtn] : []), { label: "Schließen", onClick: closeModal }]);
+        }
+        if (!modalShown(shown)) return;
+        await new Promise(res => setTimeout(res, 3000));
+        continue;
+      }
+      // Confirmed: it runs again (the save), its actions go
+      if (waiting) { waiting = false; if (modalShown(shown)) setFoot([{ label: "Schließen", onClick: closeModal }]); }
       await new Promise(res => setTimeout(res, 1200));
     }
   }
@@ -430,8 +460,8 @@
   const mayRevert = c => !!c.can_revert && roleOk(c.expert ? "freigeben" : "aendern") && inZone({ zone: c.switch_zone });
   const maySave = c => !!c.can_save && roleOk("aendern") && inZone({ zone: c.switch_zone });
   // The changes (newest first) of one switch, or of all with switchId null, into el: limit rows (default 100). The follow-up
-  // actions are mayRevert / maySave; a list the API filled to limit offers "Mehr laden", which doubles limit up to 500, the maximum
-  // of GET /api/changes.
+  // actions are mayConfirm ("Bestätigen", then the change's progress), mayRevert / maySave; a list the API filled to limit offers
+  // "Mehr laden", which doubles limit up to 500, the maximum of GET /api/changes.
   async function renderChangesInto(el, switchId, limit = 100) {
     if (!el) return;
     let rows;
@@ -440,9 +470,9 @@
     const more = rows.length >= limit && limit < 500 ? `<div class="more-row"><button class="btn small" type="button" data-more="${Math.min(500, limit * 2)}">Mehr laden</button></div>` : "";
     el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Zeit</th><th>Benutzer</th>${switchId ? "" : "<th>Switch</th>"}<th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(c =>
       `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}</td><td>${chPill(c)}</td>
-        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${mayRevert(c) ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${maySave(c) ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
+        <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${mayConfirm(c) ? `<button class="btn small" type="button" data-cc="${c.id}" data-sw="${c.switch_id}">Bestätigen</button>` : ""}${mayRevert(c) ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${maySave(c) ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
     el.onclick = async e => {
-      const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]"), sv = e.target.closest("[data-cs]"), m = e.target.closest("[data-more]");
+      const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]"), sv = e.target.closest("[data-cs]"), m = e.target.closest("[data-more]"), cc = e.target.closest("[data-cc]");
       const swOf = id => MAP && MAP.switches.find(x => x.id === id);
       if (d) {
         const c = await api("GET", `/api/changes/${d.dataset.cd}`);
@@ -454,6 +484,7 @@
       }
       if (r) { if (!MAP) await loadMap(false); const s = swOf(+r.dataset.sw); if (s) previewChange(s, { mode: "revert", of: +r.dataset.cr }); }
       if (sv) { if (!MAP) await loadMap(false); const s = swOf(+sv.dataset.sw); if (s) previewChange(s, { mode: "save", of: +sv.dataset.cs }); }
+      if (cc && await confirmChange(+cc.dataset.cc)) { if (!MAP) await loadMap(false); const s = swOf(+cc.dataset.sw); if (s) runProgress(s, +cc.dataset.cc); else renderChangesInto(el, switchId, limit); }
       if (m) {
         // "Mehr laden" goes with the old list: the focus moves to the first row the click added (the last row, if none came), not body;
         // a list that could not load (its message only, no row) takes the focus itself

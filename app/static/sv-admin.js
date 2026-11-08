@@ -426,7 +426,7 @@
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
     zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet",
-    token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen" };
+    token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen", change_pending: "Änderung wartet auf Bestätigung", change_confirm: "Änderung bestätigt" };
   // The audit log asks the server at every change of a filter (GET /api/audit, SVLogic.auditParams; 100 a page, "Mehr laden" by
   // the cursor, loadPaged): text and user AUDIT_DELAY ms after the last key, which drops the answer to the filter before, the
   // choices at once; "Als CSV" carries what the fields say. Each entry names its user's role then ("–" before Phase 4a) and its

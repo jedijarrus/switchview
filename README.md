@@ -393,6 +393,20 @@ again, verified). `"approval": true` in the preview means the change needs a fou
 `POST /api/approvals` with `{"kind": "port_change", "switch_id": 3, "plan": <the body of /apply>}` requests it, and a second
 person approves it signed in in the UI.
 
+A port change can also run with confirmation, where the preview says so (`"confirm": {"possible": true, ...}`; not over SNMP at a
+switch that saves every SNMP change by itself): `/apply` gets `"confirm_minutes": N` (1 to 30). The change runs and is verified as
+any other, but it is not saved: it waits, unsaved, in the status `pending` until `confirm_until` (UTC) for its confirmation, which
+saves it (over SSH after a fresh read still finds it). Without a confirmation SwitchView takes it back after the deadline, or
+earlier when the switch does not answer twice in a row (checked every 15 seconds over SNMP). Who started or approved the change may
+confirm it, else anyone with "Freigeben", a token too; so a script checks the network itself first:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d "$(jq -c '{ports: ["5"], change: {untagged: "30"}, token, mechanism, "confirm_minutes": 5}' plan.json)" "$SV/api/switches/3/apply"
+curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41" | jq '{status, confirm_until}'
+ping -c 3 198.51.100.15 && curl -s -X POST -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41/confirm"
+```
+
 ## ProCurve notes
 
 Collected in [docs/procurve-cli-referenz.md](docs/procurve-cli-referenz.md) (German), including:

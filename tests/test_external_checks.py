@@ -25,6 +25,7 @@ import alerts
 import apifix
 import approvals
 import auth
+import confirm
 import crypto
 import db
 import dbfix
@@ -300,6 +301,17 @@ def test_the_scheduler_delivers_alerts_every_30_seconds(api, monkeypatch):
     asyncio.run(main._schedule())
     assert jobs["alerts"][0] is alerts.deliver_due and jobs["alerts"][1] == "interval" and jobs["alerts"][2]["seconds"] == 30
     assert (jobs["alerts"][2]["max_instances"], jobs["alerts"][2]["coalesce"]) == (1, True)
+
+
+def test_the_scheduler_watches_confirmations_every_15_seconds(api, monkeypatch):
+    """Phase 4c, Task 5: the changes waiting for their confirmation are watched every 15 seconds (confirm.watch), one run at a time,
+    the first run right at the start (next_run_time now, in UTC)."""
+    jobs = {}
+    monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))
+    asyncio.run(main._schedule())
+    func, trigger, kw = jobs["confirm"]
+    assert (func, trigger, kw["seconds"], kw["max_instances"], kw["coalesce"]) == (confirm.watch, "interval", 15, 1, True)
+    assert kw["next_run_time"].tzinfo is not None
 
 
 async def test_the_start_prunes_sessions(database, monkeypatch):

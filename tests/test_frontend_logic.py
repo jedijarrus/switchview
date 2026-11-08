@@ -297,3 +297,11 @@ def test_audit_params_send_every_filter_in_order():
     assert run(f"L.auditParams({f}, false)", tz="Europe/Berlin") == ("?q=bob&action=login&user=Anna&role=aendern&switch_id=3"
                                                                      "&since=2026-06-30T22%3A00%3A00.000Z&until=2026-07-31T22%3A00%3A00.000Z")
     assert run('[L.auditParams({}), L.auditParams({from: "kein Datum", to: "2026-13-45"}), L.auditParams({}, false)]') == ["?limit=100", "?limit=100", ""]
+
+
+# Phase 4c, Task 5: the minutes a change waiting for its confirmation has left (its confirm_until is UTC text), rounded up, never
+# below 0
+@pytest.mark.parametrize("now, want", [("Date.UTC(2026, 10, 8, 10, 0, 30)", 5), ("Date.UTC(2026, 10, 8, 10, 5, 0)", 0),
+                                       ("Date.UTC(2026, 10, 8, 10, 6, 0)", 0), ("Date.UTC(2026, 10, 8, 10, 4, 59)", 1)])
+def test_minutes_left_rounds_up_and_never_goes_below_zero(now, want):
+    assert run(f'L.minutesLeft("2026-11-08 10:05:00", {now})') == want
