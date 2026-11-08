@@ -347,8 +347,9 @@ def error_text(e: BaseException, secrets: list[str]) -> str:
 def _send_mail(cfg: dict, msg: email.message.EmailMessage) -> None:
     """One mail over SMTP (in a thread: smtplib blocks): SMTP_SSL for "tls", else SMTP and, for "starttls", STARTTLS; the login only
     with a user. timeout=TIMEOUT_S is the socket's: it bounds connecting and each single read, not an answer or the attempt, and a
-    thread cannot be cancelled. A server that answers each step just within it holds an attempt about a minute (six steps); one that
-    trickles a byte at a time within it holds it, and the run of deliver_due with it, for as long as it trickles (Bekannte Grenzen).
+    thread cannot be cancelled. A server that answers each step just within it holds an attempt about two minutes (connecting and at
+    least eleven answers; one more for each further recipient); one that trickles a byte at a time within it holds it, and the run of
+    deliver_due with it, for as long as it trickles (Bekannte Grenzen).
     Without the certificate check the context verifies nothing (an internal relay)."""
     context = ssl.create_default_context()
     if not cfg["verify_tls"]:

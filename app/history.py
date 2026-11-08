@@ -13,10 +13,12 @@ is overtaken when the device left it - its switch has a recorded poll after the 
 row there) - and a place of the same MAC that is not seen now began after that last sighting (first_seen there after last_seen
 here). The times are each switch's own poll times, which differ within a round: a place seen now never overtakes, and a row seen at
 its switch's last recorded poll is never overtaken - the device is at both places. So a device at two places at once (two VLANs, an
-unconfirmed uplink on another switch, whatever the order of the polls) grows nothing, a move there and back gives three rows, and a
-quiet device keeps its row. The ports are those of the list of unknown devices (topology.device_port: no Trk port, no trunk or LAG
-member, no confirmed uplink); a row at a possible uplink (topology.suspect_port) is marked suspect, and the base MACs of the managed
-switches are never recorded.
+unconfirmed uplink on another switch) grows nothing, whatever the order of the polls - except after a move followed by one round in
+which the device is seen nowhere: then the row at such an uplink can, by the order of the polls, split in two with a "moved"
+(Bekannte Grenzen, T2-n; the rows at the access ports stay exact). A move there and back gives three rows, and a quiet device keeps
+its row. The ports are those of the list of unknown devices (topology.device_port: no Trk port, no trunk or LAG member, no confirmed
+uplink); a row at a possible uplink (topology.suspect_port) is marked suspect, and the base MACs of the managed switches are never
+recorded.
 
 purge deletes what is older than HISTORY_DAYS from every table of RETAINED, nightly at 04:00 (jobs._schedule).
 
