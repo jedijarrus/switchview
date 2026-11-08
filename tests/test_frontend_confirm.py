@@ -81,11 +81,13 @@ def waiting(minutes=4, **k) -> dict:
 # runProgress of change 7 against an api stub that answers GET with c, and a POST (the confirm) with {ok: true} - from then on c is
 # running; every call recorded as [method, url]. setTimeout of 3000 ms (the wait of a waiting change) takes 5 ms here, and every
 # delay asked for is recorded; the map and the views are stubs. The stub's innerHTML = "" keeps the first footer's "Schließen"
-# (modal()), so a footer set later stands after it
+# (modal()), so a footer set later stands after it. waitFor(ok) waits (real timers, 2 ms steps) until ok() holds, at most 5 s - a
+# condition, not a fixed window, so a loaded machine only makes it slower; the statements run once runProgress waited twice
 PROGRESS = ('(async () => { %s current = "audit"; loadMap = async () => {}; const calls = [], delays = []; let c = %s; '
             'const st = setTimeout; setTimeout = (f, ms) => { delays.push(ms); return st(f, ms === 3000 ? 5 : ms); }; '
+            'const waitFor = async ok => { const end = Date.now() + 5000; while (!ok() && Date.now() < end) await new Promise(r => st(r, 2)); }; '
             'api = async (m, u) => { calls.push([m, u]); if (m === "POST") { c = {...c, status: "running"}; return {ok: true, id: 7}; } return c; }; '
-            'runProgress({id: 1, k: "SW"}, 7); await new Promise(r => st(r, 40)); %s })()')
+            'runProgress({id: 1, k: "SW"}, 7); await waitFor(() => delays.filter(d => d === 3000).length >= 2); %s })()')
 FOOT = '$("#m-foot").children.slice(1).map(b => b.textContent)'
 
 
@@ -112,7 +114,8 @@ def test_the_deadline_counts_down_to_its_end(minutes, want):
     assert want in html
 
 
-# Beyond the brief: a waiting change is asked only while its dialog is open (T5-f); closed, the asking stops
+# Beyond the brief: a waiting change is asked only while its dialog is open (T5-f); closed, the asking stops (a window for an
+# absence: a loaded machine fits fewer 5 ms polls into it, which can only let it pass, never fail)
 def test_a_closed_dialog_stops_asking():
     then = 'closeModal(); const n = calls.length; await new Promise(r => st(r, 40)); return [n, calls.length];'
     n, after = in_dom(PROGRESS % (ADMIN_ME, json.dumps(waiting()), then))
@@ -120,8 +123,9 @@ def test_a_closed_dialog_stops_asking():
 
 
 def test_confirm_posts_and_keeps_watching():
-    then = (CLICK % "Bestätigen" + 'await new Promise(r => st(r, 40)); '
-            f'return [calls, {TOASTS}, {FOOT}, $("#prog").innerHTML];')
+    # until the change was asked again after the confirm and its footer is set back (or 5 s)
+    then = (CLICK % "Bestätigen" + 'await waitFor(() => calls.slice(calls.findIndex(x => x[0] === "POST") + 1).some(x => x[0] === "GET") '
+            f'&& {FOOT}.length === 4); return [calls, {TOASTS}, {FOOT}, $("#prog").innerHTML];')
     calls, toasts, foot, html = in_dom(PROGRESS % (role_me("aendern", username="anna"), json.dumps(waiting()), then))
     i = calls.index(["POST", "/api/changes/7/confirm"])
     assert calls[:i] and set(map(tuple, calls[:i])) == {("GET", "/api/changes/7")} and ["GET", "/api/changes/7"] in calls[i + 1:]
@@ -138,7 +142,7 @@ def test_take_back_now_opens_the_preview_of_the_revert():
 def test_a_refused_confirm_is_a_message():
     then = ('const real = api; api = async (m, u) => { if (m === "POST") throw new Error("Zu spät"); return real(m, u); }; '
             'const b = $("#m-foot").children.find(x => x.textContent === "Bestätigen"); b.fire("click"); '
-            f'await new Promise(r => st(r, 20)); return [{TOASTS}, b.disabled];')
+            f'await waitFor(() => {TOASTS}.length > 0 && !b.disabled); return [{TOASTS}, b.disabled];')
     assert in_dom(PROGRESS % (ADMIN_ME, json.dumps(waiting()), then)) == [["Zu spät"], False]
 
 
@@ -149,10 +153,14 @@ ROW = {"created_at": "2026-11-08 10:00:00", "switch_id": 1, "switch_name": "SW",
 
 
 def test_the_change_list_names_the_waiting_and_the_unconfirmed():
-    pills = in_dom('[chPill({status: "pending"}), chPill({status: "unclear", confirm_minutes: 5, confirmed_by: null}), '
-                   'chPill({status: "unclear", confirm_minutes: 5, confirmed_by: "anna"}), chPill({status: "unclear"})]')
+    # "nicht bestätigt" only for a change that waited (confirm_until, written only by changes._wait_for_confirm); one with
+    # confirmation that ended unclear in its own run, before it waited, is "unklar" (review round 1)
+    until = '"2026-11-08 10:05:00"'
+    pills = in_dom(f'[chPill({{status: "pending"}}), chPill({{status: "unclear", confirm_minutes: 5, confirm_until: {until}, confirmed_by: null}}), '
+                   f'chPill({{status: "unclear", confirm_minutes: 5, confirm_until: {until}, confirmed_by: "anna"}}), chPill({{status: "unclear"}}), '
+                   'chPill({status: "unclear", confirm_minutes: 5, confirm_until: null, confirmed_by: null})]')
     assert pills == ['<span class="pill warn">wartet auf Bestätigung</span>', '<span class="pill warn">nicht bestätigt</span>',
-                     '<span class="pill warn">unklar</span>', '<span class="pill warn">unklar</span>']
+                     '<span class="pill warn">unklar</span>', '<span class="pill warn">unklar</span>', '<span class="pill warn">unklar</span>']
     rows = [waiting(id=8), waiting(id=9, username="ben"), {**waiting(id=10), "status": "ok", "saved": 1}]
     html = in_dom(LIST % (role_me("aendern", username="anna"), json.dumps([{**ROW, **r} for r in rows]), "return el.innerHTML;"))
     assert '<button class="btn small" type="button" data-cc="8" data-sw="1">Bestätigen</button>' in html

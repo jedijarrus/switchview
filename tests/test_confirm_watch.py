@@ -277,6 +277,62 @@ async def test_a_confirm_between_the_read_and_the_step_gets_no_step(world, monke
     assert (planned, world.ran, told()) == ([], [], [])
 
 
+# Review round 1: a confirm (over SNMP it ends inside its request) or a revert by hand that ends while the watch plans its revert -
+# after the step, before the INSERT - is not taken back: the revert's INSERT is rolled back unless it is what ended the waiting
+@pytest.mark.parametrize("meanwhile", [
+    "status = 'ok', saved = 0, confirmed_by = 'anna'",                                   # confirmed over SNMP (_confirm_snmp)
+    "status = 'unclear', error = 'Nicht bestätigt: Rücknahme #99 gestartet'"],           # taken back by hand, that revert ended
+    ids=["confirmed", "taken-back-by-hand"])
+async def test_a_wait_that_ends_while_the_revert_plans_is_not_taken_back(world, meanwhile):   # Review Focus 1
+    cid, world.answer, real = pending(world.sid, at(4)), False, world.plan
+
+    async def ends_meanwhile(r, body):
+        dbfix.query(f"UPDATE changes SET {meanwhile} WHERE id = ?", (cid,))
+        world.plan = real
+        return await api_changes._make_plan(r, body)
+
+    assert await confirm.watch() == 0
+    world.plan = ends_meanwhile
+    assert await confirm.watch() == 0
+    assert dbfix.query("SELECT id, username FROM changes WHERE id <> ?", (cid,)) == [] and (world.ran, told()) == ([], [])
+    assert row(cid)["status"] == meanwhile.split("'")[1] and dbfix.query("SELECT action FROM audit") == []
+
+
+# Review round 1: a disabled switch is not asked (the poller does not poll it either) and not read for a revert; at its deadline
+# the waiting ends with NOT_TAKEN_BACK and the reason of /apply
+async def test_a_disabled_switch_is_not_asked_and_not_taken_back(world):
+    cid, world.answer = pending(world.sid, at(4)), False
+    assert await confirm.watch() == 0 and confirm._misses == {cid: 1}           # one miss while it was enabled
+    dbfix.query("UPDATE switches SET enabled = 0 WHERE id = ?", (world.sid,))
+
+    async def no_plan(r, body):
+        raise AssertionError("no read of a disabled switch")
+
+    world.plan = no_plan
+    for _ in range(3):
+        assert await confirm.watch() == 0
+    assert (row(cid)["status"], world.gets, confirm._misses) == ("pending", 1, {})      # not asked again, its count gone
+    dbfix.query("UPDATE changes SET confirm_until = ? WHERE id = ?", (at(-1), cid))
+    assert await confirm.watch() == 0
+    error = f"{confirm.NOT_TAKEN_BACK} ({api_changes.DISABLED})"
+    assert (row(cid)["status"], row(cid)["error"], json.loads(row(cid)["steps"])[-1][1:]) == ("unclear", error, [error, "error"])
+    assert world.ran == [] and told() == [("confirm_revert", f"Änderung #{cid} an SW-EK-01 nicht zurückgenommen")]
+
+
+# Review round 1: an error that is no HTTPException (a database error, a bug) ends the waiting once, as a give-up with its type and
+# masked text, and is logged masked; the next watch finds nothing to do (no step per run without end, no lasting PENDING_BUSY)
+async def test_an_unexpected_error_ends_the_wait_once(world, caplog):
+    cid = pending(world.sid, at(-1))
+    world.plan_error = RuntimeError("kaputt: manager/ssh-s3cret")
+    assert await confirm.watch() == 0
+    error = f"{confirm.NOT_TAKEN_BACK} (RuntimeError: kaputt: manager/***)"
+    steps = json.loads(row(cid)["steps"])
+    assert (row(cid)["status"], row(cid)["error"], [s[1] for s in steps][1:]) == ("unclear", error, [error])
+    assert await confirm.watch() == 0 and json.loads(row(cid)["steps"]) == steps
+    assert "RuntimeError" in caplog.text and "s3cret" not in caplog.text
+    assert told() == [("confirm_revert", f"Änderung #{cid} an SW-EK-01 nicht zurückgenommen")]
+
+
 async def test_the_first_watch_after_a_restart_takes_back_what_ran_out(world, monkeypatch):   # Review Focus 1
     cid, jobs = pending(world.sid, at(-10)), {}
     monkeypatch.setattr(main.scheduler, "add_job", lambda func, trigger, **kw: jobs.__setitem__(kw["id"], (func, trigger, kw)))

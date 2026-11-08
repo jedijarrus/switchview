@@ -370,8 +370,9 @@
 
   const CH = { queued: ["wartet", "neutral"], running: ["läuft", "neutral"], ok: ["erledigt", "ok"], unclear: ["unklar", "warn"], failed: ["fehlgeschlagen", "crit"], aborted: ["abgebrochen", "neutral"],
     pending: ["wartet auf Bestätigung", "warn"] };
-  // A change with confirmation that ended unclear without a confirm (taken back, or the watch gave up) reads "nicht bestätigt"
-  const chState = c => c.status === "unclear" && c.confirm_minutes && !c.confirmed_by ? ["nicht bestätigt", "warn"] : CH[c.status];
+  // A change that waited for its confirmation (confirm_until, written only when the wait begins) and ended unclear without a confirm
+  // (taken back, or the watch gave up) reads "nicht bestätigt"; one that ended unclear in its own run, before it waited, "unklar"
+  const chState = c => c.status === "unclear" && c.confirm_until && !c.confirmed_by ? ["nicht bestätigt", "warn"] : CH[c.status];
   const chPill = c => `<span class="pill ${chState(c) ? chState(c)[1] : "neutral"}">${chState(c) ? chState(c)[0] : esc(c.status)}</span>${c.status !== "ok" && c.saved ? ` <span class="pill ok">gespeichert</span>` : ""}${c.status === "ok" && !c.saved ? ` <span class="pill warn">nicht gespeichert</span>` : ""}${c.reverted_by ? ` <span class="pill neutral">zurückgenommen</span>` : ""}`;
   const stepsHtml = c => `<ul class="steps">${(c.steps || []).map(x => `<li class="${esc(x[2])}"><span class="t">${esc(fmtTime(x[0]).split(", ").pop())}</span><span>${esc(x[1])}</span></li>`).join("")}</ul>`;
   // Ergebnis einer Änderung. Gespeichert heißt nur saved=1. "unklar" in den Worten des Servers: sein letzter Fehlerschritt ist der Fehler

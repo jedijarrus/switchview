@@ -107,6 +107,17 @@ async def test_a_confirm_after_the_deadline_is_too_late(ssh_env, monkeypatch):  
     assert (ssh_env.change(cid)["status"], ssh_env.saves) == ("pending", 0)
 
 
+# Review round 1 (Task 5): the deadline's own second belongs to the watch (confirm.watch: due at confirm_until <= now), a confirm
+# takes the change only before it - so no confirm wins a change the watch already takes back
+async def test_a_confirm_in_the_deadline_second_is_too_late(ssh_env, monkeypatch):
+    cid = await pending_change(ssh_env, monkeypatch)
+    dbfix.query("UPDATE changes SET confirm_until = '2026-11-08 10:00:00' WHERE id = ?", (cid,))
+    monkeypatch.setattr(changes, "_now", lambda: "2026-11-08 10:00:00")
+    with pytest.raises(HTTPException) as e:
+        await confirm.confirm_change(cid, ANNA)
+    assert (e.value.status_code, e.value.detail, ssh_env.change(cid)["status"]) == (409, confirm.TOO_LATE.format(cid=cid), "pending")
+
+
 @pytest.mark.parametrize("who, ok", [
     (apifix.user("aendern", "anna"), True), (apifix.user("aendern", "Anna"), True),       # who started it, in any case
     (apifix.user("aendern", "ben"), False), (apifix.user("freigeben", "ben"), True),
