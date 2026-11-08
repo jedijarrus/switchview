@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 import api_alerts
 import api_approvals
+import api_bulk
 import api_changes
 import api_devices
 import api_history
@@ -377,3 +378,4 @@ app.include_router(api_history.router)    # Phase 4b
 app.include_router(api_alerts.router)    # Phase 4b, Task 6
 app.include_router(api_tokens.router)    # Phase 4c, Task 2
 app.include_router(confirm.router)    # Phase 4c, Task 4
+app.include_router(api_bulk.router)    # Phase 4c, Task 6

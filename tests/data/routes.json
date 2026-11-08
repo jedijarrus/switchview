@@ -126,6 +126,12 @@
 ]
 ],
 [
+"/api/bulk/plan",
+[
+"POST"
+]
+],
+[
 "/api/changes",
 [
 "GET"

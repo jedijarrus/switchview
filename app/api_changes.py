@@ -93,8 +93,10 @@ def _listing(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " und " + items[-1]
 
 
-def _summary(body: PlanIn) -> str:
-    c, parts = body.change, []
+def _change_parts(change: PortChange) -> list[str]:
+    """The parts of a change's summary without "Port …: " ("VLAN 30", "getaggt +40", "PoE aus", …): _summary of one switch, and
+    bulk.summary of a bulk change (Phase 4c, Task 6)."""
+    c, parts = change, []
     if c.status:
         parts.append(STATUS_LABEL[c.status])
     if c.untagged:
@@ -111,7 +113,11 @@ def _summary(body: PlanIn) -> str:
         parts.append(f"Gast-VLAN {c.guest}" if c.guest else "ohne Gast-VLAN")
     if c.poe is not None:
         parts.append("PoE an" if c.poe else "PoE aus")
-    return f"Port {_port_list(body.ports)}: " + (", ".join(parts) or "–")
+    return parts
+
+
+def _summary(body: PlanIn) -> str:
+    return f"Port {_port_list(body.ports)}: " + (", ".join(_change_parts(body.change)) or "–")
 
 
 # ── Schreibweg waehlen: SSH-CLI oder SNMP ─────────────────────────────────────────────────────────────────────────────────────────────
