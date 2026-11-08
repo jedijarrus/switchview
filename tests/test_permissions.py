@@ -113,6 +113,7 @@ MATRIX_4C: dict = {
     ("GET", "/api/tokens"): "lesen",
     ("DELETE", "/api/tokens/{tid}"): "lesen",
     ("GET", "/api/settings/tokens"): "admin",
+    ("GET", "/api/openapi.json"): "lesen",
 }
 MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C
 

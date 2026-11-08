@@ -223,3 +223,13 @@ def test_the_readme_describes_history_drift_and_alerts():
     for text in ("HISTORY_DAYS", "Verlauf", "outside SwitchView", "security rules", "SMTP", "Teams", "webhook", "watch list", "CSV",
                  "PUBLIC_URL", "off until"):
         assert text in block, text
+
+
+def test_the_readme_shows_the_rest_flow():
+    rest = README.split("\n## REST API\n", 1)[1].split("\n## ", 1)[0]
+    for text in ("Authorization: Bearer", "/api/openapi.json", "/plan", "/apply", "preview token", "curl", "jq", "Settings → \"API-Tokens\"",
+                 "shown once", "approving", "emergency login"):
+        assert text in rest, text
+    note = (ROOT / "docs" / "sammel-api-phase4c.md").read_text(encoding="utf-8").split("\n## REST-API\n", 1)[1].split("\n## ", 1)[0]
+    for text in ("Authorization: Bearer", "Vorschau-Token", "API-Token", "curl", "/api/openapi.json"):
+        assert text in note, text

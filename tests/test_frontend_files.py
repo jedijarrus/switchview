@@ -16,7 +16,7 @@ import pytest
 STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
 SCRIPTS = ["msal-browser.min.js", "svlogic.js", "sv-core.js", "sv-overview.js", "sv-switch.js", "sv-admin.js", "sv-approvals.js",
-           "sv-history.js", "sv-alerts.js", "sv-main.js"]
+           "sv-history.js", "sv-alerts.js", "sv-tokens.js", "sv-main.js"]
 
 
 def test_index_loads_every_script_in_order():

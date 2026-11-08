@@ -425,14 +425,15 @@
     device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich",
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
-    zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet" };
+    zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet",
+    token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen" };
   // The audit log asks the server at every change of a filter (GET /api/audit, SVLogic.auditParams; 100 a page, "Mehr laden" by
   // the cursor, loadPaged): text and user AUDIT_DELAY ms after the last key, which drops the answer to the filter before, the
   // choices at once; "Als CSV" carries what the fields say. Each entry names its user's role then ("–" before Phase 4a) and its
   // detail (never a secret). The filters outlive a new render, like devText; a switch the netmap no longer has is dropped
   let auditText = "", auditAction = "", auditUser = "", auditRole = "", auditSw = "", auditFrom = "", auditTo = "", auditTimer = null; const AUDIT_DELAY = 300;
   const auditFilter = () => ({ text: auditText, action: auditAction, user: auditUser, role: auditRole, sw: auditSw, from: auditFrom, to: auditTo });
-  const auditRow = r => `<tr><td class="num time">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}</td><td>${esc(SVLogic.roleLabel(r.role))}</td>`
+  const auditRow = r => `<tr><td class="num time">${esc(fmtTime(r.ts))}</td><td>${esc(r.username || "")}${r.token ? `<span class="cellnote">API-Token „${esc(r.token)}“</span>` : ""}</td><td>${esc(SVLogic.roleLabel(r.role))}</td>`
     + `<td>${esc(AUDIT_LABELS[r.action] || r.action)}${r.detail ? `<span class="cellnote">${esc(r.detail)}</span>` : ""}</td><td class="mono">${esc(r.target || "")}</td></tr>`;
   async function renderAudit() {
     const v = $("#view");
@@ -476,7 +477,8 @@
   // The settings and the zone list (GET /api/zone-scopes, kept in a textarea: SVLogic.formatScopes / parseScopes). Changing them is
   // Admin: below it every field is locked and the save buttons are gone, the card says why; what only reads (names, PacketFence test)
   // and ending the own sessions stay. The cards of sv-alerts.js ask beside them, each on its own (a failure is its card's text):
-  // "Sicherheitsregeln" for everyone, "Benachrichtigungen" only for an Admin
+  // "Sicherheitsregeln" for everyone, "Benachrichtigungen" only for an Admin; so do those of sv-tokens.js, which no one waits for:
+  // "API-Tokens" for everyone, "Alle API-Tokens" only for an Admin
   async function renderSettings() {
     const v = $("#view"), failed = e => ({ error: e.message });
     const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), roleOk("admin") ? api("GET", "/api/settings/alerts").catch(failed) : null]);
@@ -525,7 +527,8 @@
       <section class="card" id="alert-card">${alertCardHtml(alertSet, admin)}</section><section class="card" id="rules-card">${rulesCardHtml(rules, admin)}</section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
-        <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>`;
+        <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>
+      ${tokenCardsHtml(admin)}`;
     // A new address deletes the secret bound to it unless it is entered anew in the same save (F2, api_settings.DESTINATION_SECRETS)
     [["s-url", s.opnsense_url, s.opnsense_key_set || s.opnsense_secret_set], ["s-rs", s.radius_server, s.radius_key_set], ["s-pfu", s.pf_url, s.pf_pass_set]].forEach(([id, was, set]) => {
       const sync = () => syncNote(id, id + "-note", !!set && destTxt($("#" + id).value) !== destTxt(was));
@@ -579,5 +582,5 @@
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });
     $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${SVLogic.plural(r.entries, "Eintrag", "Einträge")} aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
-    bindRulesCard(rules); await bindAlertCard(alertSet);
+    bindTokenCards(admin); bindRulesCard(rules); await bindAlertCard(alertSet);
   }

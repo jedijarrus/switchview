@@ -340,8 +340,10 @@ def test_the_history_tab_follows_the_devices_and_its_script_the_approvals():
     tabs = re.findall(r'<button type="button" data-view="(\w+)"', INDEX)
     assert tabs[tabs.index("devices") + 1] == "verlauf" and '<button type="button" data-view="verlauf">Verlauf</button>' in INDEX
     scripts = re.findall(r'<script src="/static/([\w.\-]+)"></script>', INDEX)
-    # Task 10 loads sv-alerts.js between them (its cards, then the router)
-    assert scripts[scripts.index("sv-approvals.js") + 1:] == ["sv-history.js", "sv-alerts.js", "sv-main.js"]
+    # Task 10 loads sv-alerts.js between them (its cards, then the router); since Phase 4c the scripts of its views follow sv-alerts.js,
+    # and SCRIPTS of tests/test_frontend_files.py pins the whole order
+    after = scripts[scripts.index("sv-approvals.js") + 1:]
+    assert after[:2] == ["sv-history.js", "sv-alerts.js"] and after[-1] == "sv-main.js"
     assert in_dom('[VIEWS.verlauf === renderVerlauf, SVLogic.parseHash("#verlauf").view]') == [True, "verlauf"]
 
 

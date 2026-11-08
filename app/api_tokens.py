@@ -7,6 +7,10 @@ resolved).
 Managing tokens works only signed in in the browser, never with an API token (_signed_in, 403 VIA_TOKEN): a leaked token must not
 breed more tokens nor outlive its own revocation through a new one. The emergency login gets none (403 EMERGENCY): it is a shared
 account, not a person, and an Admin token without a person would outlive every new ADMIN_PASSWORD.
+
+Task 3 adds GET /api/openapi.json: the schema FastAPI generates from the routes, as JSON for any client that reads it. main.app keeps
+docs_url, redoc_url and openapi_url at None, so /docs, /redoc and /openapi.json stay 404: no Swagger or ReDoc page (both load scripts
+from a CDN, which the CSP forbids), and under /api/ the schema is behind the sign-in like every other route.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -92,3 +96,10 @@ async def list_all_tokens(user=Depends(auth.require(roles.ADMIN))):
     """Every API token with its user (auth.list_tokens), newest first, without the tokens: Admin, not with a token."""
     _signed_in(user)
     return await auth.list_tokens(None)
+
+
+@router.get("/api/openapi.json", include_in_schema=False)
+async def openapi_schema(request: Request, user=Depends(auth.require(roles.LESEN))):
+    """The OpenAPI schema of the app's routes (request.app.openapi(), generated once and cached by FastAPI), any role, also with an
+    API token: it names routes, parameters and limits, no secret. Not in the schema itself."""
+    return request.app.openapi()

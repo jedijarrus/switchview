@@ -228,6 +228,12 @@
 ]
 ],
 [
+"/api/openapi.json",
+[
+"GET"
+]
+],
+[
 "/api/pf/roles",
 [
 "GET"
