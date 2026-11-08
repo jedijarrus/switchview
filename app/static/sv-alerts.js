@@ -6,6 +6,8 @@
      renderDevices draw the shells and call these. An answer without the fields a card expects draws it empty (the stubs of older
      tests answer every URL with {ok: true, …} or a list), a failed request shows the server's text in its card. ── */
   const ALERT_WAYS = { mail: "Mail", webhook: "Webhook" };
+  // The error of a queued message an Admin's switch-off dropped (alerts.SWITCHED_OFF, alerts.drop_queued): no delivery that failed
+  const ALERT_SWITCHED_OFF = "Kanal ausgeschaltet";
   const SMTP_SECURITY = [["starttls", "STARTTLS (Port 587)"], ["tls", "TLS (Port 465)"], ["none", "Ohne Verschlüsselung (Port 25, ohne Anmeldung)"]];
   const HOOK_FORMATS = [["teams", "Microsoft Teams (Workflow)"], ["json", "JSON"]];
   const RULE_MODES = [["must_not", "keine Zeile enthält"], ["must", "eine Zeile enthält"]];

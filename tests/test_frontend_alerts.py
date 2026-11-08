@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from test_frontend_dom import SETTINGS_ANSWER, STATIC, in_dom, role_me
 
+import alerts
+
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 EVENTS = {"reachability": "Switch nicht erreichbar oder wieder erreichbar", "drift": "Änderung außerhalb von SwitchView",
@@ -349,6 +351,29 @@ def test_undelivered_alerts_only_for_an_admin_and_only_of_a_day(role, answer, gr
     html, calls, _ = in_dom(OVERVIEW % (role_me(role), json.dumps(NETMAP), answer if isinstance(answer, str) else json.dumps(answer)))
     assert ("Benachrichtigungen nicht zugestellt" in html) == bool(group) and (group is None or f'<span class="d">{group}</span>' in html)
     assert ("/api/alerts/deliveries?status=failed&limit=20" in calls) == (role == "admin") and ("Nichts auffällig." in html) == (group is None)
+
+
+# Final review: a message an Admin's own switch-off dropped (alerts.drop_queued, "Kanal ausgeschaltet") is no delivery that failed - a
+# channel switched off during setup put a red group into "Zu prüfen" for a day; a channel found not set up at delivery still counts
+def test_messages_dropped_by_switching_a_channel_off_are_not_undelivered():
+    failed = {"rows": [{**DELIVERIES[3], "id": 9, "created_at": utc(1), "title": "Verworfen", "error": alerts.SWITCHED_OFF},
+                       {**DELIVERIES[3], "id": 8, "created_at": utc(2), "title": "Gescheitert"},
+                       {**DELIVERIES[3], "id": 7, "created_at": utc(3), "channel": "mail", "title": "Ohne Kennwort", "error": alerts.NOT_SET_UP}],
+              "next": None}
+    html, _, _ = in_dom(OVERVIEW % (role_me("admin"), json.dumps(NETMAP), json.dumps(failed)))
+    assert ('<span class="t">Benachrichtigungen nicht zugestellt</span><span class="cnt">2</span>' in html
+            and '<span class="d">2 Meldungen in den letzten 24 Stunden</span>' in html)
+    assert "Gescheitert" in html and "Ohne Kennwort" in html and "Verworfen" not in html
+
+
+@pytest.mark.parametrize("dropped, group", [(1, None), (20, None), (0, "mehr als 20 Meldungen in den letzten 24 Stunden"),
+                                            (5, "mehr als 15 Meldungen in den letzten 24 Stunden")])
+def test_only_dropped_messages_give_no_group_and_more_behind_still_says_so(dropped, group):
+    rows = [{**DELIVERIES[3], "id": 50 - i, "created_at": utc(1), "error": alerts.SWITCHED_OFF if i < dropped else "HTTP 500"}
+            for i in range(dropped if dropped == 1 else 20)]
+    answer = {"rows": rows, "next": 31 if len(rows) == 20 else None}
+    html, _, _ = in_dom(OVERVIEW % (role_me("admin"), json.dumps(NETMAP), json.dumps(answer)))
+    assert ("Benachrichtigungen nicht zugestellt" in html) == bool(group) and (group is None or f'<span class="d">{group}</span>' in html)
 
 
 def test_the_css_of_the_cards_takes_only_existing_tokens():

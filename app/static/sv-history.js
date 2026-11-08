@@ -175,7 +175,8 @@
   // The overview's groups beyond issueGroups() (same shape: sev, t, sum, items with t, d, go), each only with content and each on its
   // own: a failed request or an answer without the expected fields gives no group (the stubs of older tests answer every URL with the
   // netmap, a list or {}). For an Admin (the route is Admin) "Benachrichtigungen nicht zugestellt" first, crit: the messages that
-  // failed in the last 24 hours, of the newest 20 (Task 10), each with its title, way and error, "Öffnen" to the settings;
+  // failed in the last 24 hours, of the newest 20 (Task 10), each with its title, way and error, "Öffnen" to the settings - not those
+  // an Admin's switch-off dropped (ALERT_SWITCHED_OFF), which failed no delivery; "mehr als" when the day fills the page and more follow;
   // "Sicherheitsbefunde": the open findings per switch (GET /api/compliance), crit when one is critical; "Änderungen außerhalb von
   // SwitchView": the drift events of the last 7 days, at most 20 ("mehr als 20" when the server has more)
   async function extraIssueGroups() {
@@ -184,9 +185,10 @@
       api("GET", "/api/compliance").catch(() => null), api("GET", "/api/events" + SVLogic.query({ kind: "drift", since, limit: 20 })).catch(() => null)]);
     const g = [];
     try {
-      const all = failed && Array.isArray(failed.rows) ? failed.rows : [], rows = all.filter(r => String(r.created_at) >= day);
+      const all = failed && Array.isArray(failed.rows) ? failed.rows : [], recent = all.filter(r => String(r.created_at) >= day);
+      const rows = recent.filter(r => r.error !== ALERT_SWITCHED_OFF);
       if (rows.length) g.push({ sev: "crit", t: "Benachrichtigungen nicht zugestellt",
-        sum: `${failed.next != null && rows.length === all.length ? "mehr als " : ""}${SVLogic.plural(rows.length, "Meldung", "Meldungen")} in den letzten 24 Stunden`,
+        sum: `${failed.next != null && recent.length === all.length ? "mehr als " : ""}${SVLogic.plural(rows.length, "Meldung", "Meldungen")} in den letzten 24 Stunden`,
         items: rows.map(r => ({ t: r.title, d: `${ALERT_WAYS[r.channel] || r.channel}: ${r.error || "–"}`, go: () => go("settings") })) });
     } catch (e) { /* no group */ }
     try {
