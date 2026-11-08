@@ -543,7 +543,7 @@ def spawn(coro) -> asyncio.Task:
     return t
 
 
-async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | None = None, claim=None) -> int:
+async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | None = None, claim=None, bulk_id: int | None = None) -> int:
     """Starts the change body at switch row once its rights are checked: the one start of a change, for /apply and for a four-eyes
     approval (api_approvals). The early check (changes.busy_reason: a queued or running change, or one waiting for its confirmation
     that body does not take back) spares the read and the plan; then the plan of now is held against the preview (checked_plan:
@@ -551,8 +551,9 @@ async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | Non
     binding busy check is changes.create_change's, in one transaction with the INSERT (two requests can both pass the early one while
     they plan): either way 409 with the reason (changes.BUSY or changes.PENDING_BUSY). The change is maker's (maker["username"],
     maker["role"]: whoever wanted it), approved_by the approver's name, claim runs in create_change's transaction (approvals.claim;
-    its AlreadyDecided goes through, nothing stored), confirm_minutes goes with it. Then changes.run_change as a background task
-    (spawn), which reads, plans and compares once more in the switch's lock before anything goes out. The change's id."""
+    its AlreadyDecided goes through, nothing stored), confirm_minutes goes with it, and so does bulk_id, the bulk change whose run
+    starts it (Phase 4c, Task 7: bulk.run). Then changes.run_change as a background task (spawn), which reads, plans and compares once
+    more in the switch's lock before anything goes out. The change's id."""
     sid = row["id"]
     revert_of = body.of if body.mode == "revert" else None
     async with db() as conn:
@@ -567,7 +568,7 @@ async def start_change(row, body: PlanIn, maker: dict, *, approved_by: str | Non
     # A revert marks the change it takes back (reverted_by) only when it ends ok (changes._mark_reverted), not here
     try:
         cid = await changes.create_change(sid, maker["username"], kind, summary, req, plan, revert_of=revert_of, role=maker["role"],
-                                          approved_by=approved_by, claim=claim, confirm_minutes=body.confirm_minutes)
+                                          approved_by=approved_by, claim=claim, confirm_minutes=body.confirm_minutes, bulk_id=bulk_id)
     except changes.Busy as e:
         raise HTTPException(409, str(e))
     spawn(changes.run_change(cid))

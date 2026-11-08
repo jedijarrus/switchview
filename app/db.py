@@ -252,6 +252,27 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     method TEXT NOT NULL, subject TEXT NOT NULL, claims TEXT NOT NULL DEFAULT '{}', max_role TEXT, created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL, last_used_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_subject ON api_tokens(subject);
+-- Phase 4c, Task 7: the bulk changes (app/bulk.py), one row per bulk change started by POST /api/bulk (bulk.create): created_at
+-- (UTC), who started it (username, role, the API token they used as "<name> (#<id>)", NULL for a session; approved_by NULL without
+-- a four-eyes approval), summary ("VLAN 30 · 3 Ports an 2 Switches"), change (the PortChange as JSON), expert, on_error (stop |
+-- continue), confirm_minutes (NULL: without confirmation), status (queued, running, done, failed, cancelled, interrupted),
+-- cancel_requested (1 once POST /api/bulk/{blk}/cancel asked; the run stops before its next switch) and finished_at. Written by
+-- bulk.create, bulk.run, bulk.cancel and bulk.mark_interrupted (a restart); read by GET /api/bulk and GET /api/bulk/{blk}. Never
+-- deleted: a bulk change outlives its switches.
+CREATE TABLE IF NOT EXISTS bulks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, username TEXT NOT NULL, role TEXT, api_token TEXT, approved_by TEXT,
+    summary TEXT NOT NULL, change TEXT NOT NULL, expert INTEGER NOT NULL DEFAULT 0, on_error TEXT NOT NULL, confirm_minutes INTEGER,
+    status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, finished_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_bulks_status ON bulks(status);
+-- Phase 4c, Task 7: the switches of a bulk change in their order (pos): the switch (NULL once it is deleted; switch_name keeps its
+-- name), its ports (JSON), the write way and the preview token of its preview (NULL for a skipped switch), status (waiting, running,
+-- done, failed, skipped, not_started), the change it started (change_id, no foreign key: the change goes with its switch) and the
+-- detail (why skipped, failed or not started; '' for a switch that ran). Written by bulk.create, bulk.run and
+-- bulk.mark_interrupted; read with its bulk change.
+CREATE TABLE IF NOT EXISTS bulk_items (
+    bulk_id INTEGER NOT NULL REFERENCES bulks(id) ON DELETE CASCADE, pos INTEGER NOT NULL,
+    switch_id INTEGER REFERENCES switches(id) ON DELETE SET NULL, switch_name TEXT NOT NULL DEFAULT '', ports TEXT NOT NULL,
+    mechanism TEXT, token TEXT, status TEXT NOT NULL, change_id INTEGER, detail TEXT NOT NULL DEFAULT '', PRIMARY KEY (bulk_id, pos));
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,
@@ -337,6 +358,9 @@ ADDED_COLUMNS = (
     ("changes", "confirm_minutes", "INTEGER"),
     ("changes", "confirm_until", "TEXT"),
     ("changes", "confirmed_by", "TEXT"),
+    # Phase 4c, Task 7: the bulk change a change belongs to (bulks.id, written by changes.create_change for each switch bulk.run
+    # starts; NULL for every other change and every row of before). No foreign key: a bulk change is never deleted.
+    ("changes", "bulk_id", "INTEGER"),
 )
 
 

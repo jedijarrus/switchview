@@ -407,6 +407,36 @@ curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41" | jq '{status, co
 ping -c 3 198.51.100.15 && curl -s -X POST -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41/confirm"
 ```
 
+A bulk change makes the same port change on up to 20 switches (at most 1000 ports), each switch as a change of its own through
+the same loop. Its preview, `POST /api/bulk/plan`, takes per switch a port list or `"untagged_in": "20"` (every access port the
+last poll has untagged in VLAN 20) and the change once, and answers a section per switch: `ready` with the preview of `/plan`
+(its own `preview.token` and `preview.mechanism`) or skipped with its `reason`; it starts nothing. `POST /api/bulk` takes the
+ready sections as `items` (the ports the preview resolved, never the filter again) and the skipped ones, plans every switch once
+more against its preview token and starts nothing if one no longer matches (409 naming each); then a background job runs the
+switches one after another, and `GET /api/bulk/<id>` shows each with its state and its change:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"targets": [{"switch_id": 3, "untagged_in": "20"}, {"switch_id": 4, "untagged_in": "20"}], "change": {"untagged": "30"}}' \
+     "$SV/api/bulk/plan" > bulk.json
+jq '.sections[] | {switch, status, reason, ports, commands: .preview.commands}' bulk.json
+BID=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d "$(jq -c '{items: [.sections[] | select(.status == "ready") | {switch_id, ports, token: .preview.token, mechanism: .preview.mechanism}],
+                  skipped: [.sections[] | select(.status != "ready") | {switch_id, reason}], change: {untagged: "30"}}' bulk.json)" \
+     "$SV/api/bulk" | jq -r .id)
+until curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/bulk/$BID" | jq -e '.status != "queued" and .status != "running"' > /dev/null
+do sleep 5; done
+curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/bulk/$BID" | jq '{status, counts, items: [.items[] | {switch, status, detail}]}'
+```
+
+By default the first failure (a refused start, a change that ends unclear, failed or aborted) stops the rest, which is then "not
+started"; `"on_error": "continue"` runs the rest anyway. `POST /api/bulk/<id>/cancel` (who started it, or "Freigeben") stops it
+before its next switch, never inside a change. With `"confirm_minutes": N` every switch waits unsaved for its confirmation and the
+run goes on; each deadline moves with the run, so all of them end N minutes after the last switch, and
+`POST /api/bulk/<id>/confirm` confirms every waiting change of the bulk change with the rules of `/confirm`. With the four-eyes
+principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409). A bulk change that ends with failures, or
+that a restart of SwitchView ends ("interrupted"; none is continued), raises the alert "Sammeländerung mit Fehlern beendet".
+
 ## ProCurve notes
 
 Collected in [docs/procurve-cli-referenz.md](docs/procurve-cli-referenz.md) (German), including:

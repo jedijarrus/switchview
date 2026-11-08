@@ -56,6 +56,7 @@ NEW_COLUMNS = {
         "confirm_minutes": ("INTEGER", 0, None),    # Phase 4c appends the confirmation (Task 4)
         "confirm_until": ("TEXT", 0, None),
         "confirmed_by": ("TEXT", 0, None),
+        "bulk_id": ("INTEGER", 0, None),    # and the bulk change a change belongs to (Task 7)
     },
 }
 # config_backups and switch_cfg are not in NEW_COLUMNS: their Phase 3 columns are checked by test_migration_adds_the_phase3_columns.
@@ -376,12 +377,13 @@ PHASE4B_TABLES = {"sightings", "events", "findings", "alert_outbox", "watch_macs
 PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
                                          ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
                                          ("switches", "compliance_snmp_at")}
-# The tables and the columns Phase 4c adds (Tasks 4 and 7 extend both): Task 2 the API tokens (with idx_api_tokens_subject) and the
-# API token an audit entry was made with, Task 4 the confirmation of a change (its minutes, its deadline, who confirmed it). A
-# database as Phase 4b left it has none of them, and its audit entries and changes read NULL there.
-PHASE4C_TABLES = {"api_tokens"}
+# The tables and the columns Phase 4c adds (Tasks 4, 7 and 8 extend both): Task 2 the API tokens (with idx_api_tokens_subject) and
+# the API token an audit entry was made with, Task 4 the confirmation of a change (its minutes, its deadline, who confirmed it), Task
+# 7 the bulk changes with their switches (with idx_bulks_status) and the bulk change a change belongs to. A database as Phase 4b left
+# it has none of them, and its audit entries and changes read NULL there.
+PHASE4C_TABLES = {"api_tokens", "bulks", "bulk_items"}
 PHASE4C_COLUMNS: set[tuple[str, str]] = {("audit", "token"), ("changes", "confirm_minutes"), ("changes", "confirm_until"),
-                                         ("changes", "confirmed_by")}
+                                         ("changes", "confirmed_by"), ("changes", "bulk_id")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:

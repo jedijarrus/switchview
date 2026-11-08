@@ -25,6 +25,7 @@ import api_tokens
 import approvals
 import auth
 import bodylimit
+import bulk
 import changes
 import confirm
 import roles
@@ -62,6 +63,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 # The alert queue (alert_outbox) is delivered by a scheduler job: a second worker would send every message twice.
 # The throttle of invalid API tokens is in-process as well (auth._TOKENS): each worker would count its own failures.
 # The misses of the watch over changes waiting for confirmation count per process (confirm._misses): a second worker would check and take back twice.
+# A bulk change runs as a date job of the scheduler of the process that started it (bulk.schedule): a second worker's start would end it as interrupted.
 
 
 # The start warnings about SSO (check_startup_config): an open login gate, without and with the role mapping, and SSO without it
@@ -114,6 +116,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     await auth.prune_sessions()    # expired sessions of before the start; the scheduler prunes hourly from here on
     await changes.mark_interrupted()    # changes the last process left queued or running: aborted if nothing went out, else unclear
+    await bulk.mark_interrupted()    # bulk changes the last process left queued or running: interrupted, none continued
     await _schedule()
     scheduler.start()
     yield

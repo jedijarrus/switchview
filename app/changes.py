@@ -549,14 +549,16 @@ async def busy_reason(conn, sid: int, revert_of: int | None) -> str | None:
 
 
 async def create_change(sid: int, user: str, kind: str, summary: str, req: dict, plan: dict, revert_of: int | None = None, *,
-                        role: str | None = None, approved_by: str | None = None, claim=None, confirm_minutes: int | None = None) -> int:
+                        role: str | None = None, approved_by: str | None = None, claim=None, confirm_minutes: int | None = None,
+                        bulk_id: int | None = None) -> int:
     """Die Aenderung als queued anlegen. mechanism ist plan["mechanism"], der Schreibweg der Vorschau, den run_change genau so faehrt;
     ohne ihn bleibt die Spalte NULL und heisst ssh, wie bei Zeilen von vor der Spalte. sent is 0: nothing has gone out yet (run_change
     and _run_snmp set it to 1 right before anything does). role is the role of whoever starts it (Phase 4a): its change_* audit entry
     names it, whenever the change ends (run_change, _close). approved_by is whoever approved it under the four-eyes principle (Phase
     4a, Task 7; None for a change without an approval). confirm_minutes (Phase 4c, Task 4; None: without confirmation): run_change
     leaves the change waiting that long for "Bestätigen" (PENDING) instead of saving it; api_changes.start_change offers it only for a
-    port change on a write way that can hold a change unsaved.
+    port change on a write way that can hold a change unsaved. bulk_id (Phase 4c, Task 7; None: no bulk change) is the bulk change
+    whose run (bulk.run) starts this change for one of its switches.
 
     One change at a time per switch (Phase 1, review §2): busy_reason and the INSERT are one write transaction (BEGIN IMMEDIATE), so of
     two concurrent requests that both passed api_changes.start_change's early check the second waits for the first's commit and then
@@ -573,10 +575,10 @@ async def create_change(sid: int, user: str, kind: str, summary: str, req: dict,
             raise Busy(reason)    # closing the connection rolls the transaction back
         cur = await conn.execute(
             "INSERT INTO changes(switch_id, username, kind, summary, request, ports, desired, before, commands, status, steps, expert, revert_of, "
-            "mechanism, sent, role, approved_by, confirm_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
+            "mechanism, sent, role, approved_by, confirm_minutes, bulk_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
             (sid, user, kind, summary, json.dumps(req), json.dumps(sorted(plan.get("desired", {}), key=cfgparse.port_sort_key)),
              json.dumps(plan.get("desired", {})), json.dumps(plan.get("before", {})), json.dumps(plan["shown"]), "queued", "[]",
-             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role, approved_by, confirm_minutes))
+             int(bool(plan.get("expert"))), revert_of, plan.get("mechanism"), role, approved_by, confirm_minutes, bulk_id))
         await _leave_pending(conn, revert_of, cur.lastrowid)
         if claim is not None:
             await claim(conn, cur.lastrowid)    # its exception: closing the connection rolls the INSERT back, as for Busy

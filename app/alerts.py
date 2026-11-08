@@ -51,7 +51,7 @@ CHANNELS = ("mail", "webhook")
 EVENTS = {"reachability": "Switch nicht erreichbar oder wieder erreichbar", "unknown_device": "Neues unbekanntes Gerät an einem Zugangsport",
           "drift": "Änderung außerhalb von SwitchView", "compliance": "Neuer Sicherheitsbefund",
           "change_problem": "Änderung fehlgeschlagen, unklar, abgebrochen oder zurückgenommen",
-          "confirm_revert": "Änderung ohne Bestätigung zurückgenommen",
+          "confirm_revert": "Änderung ohne Bestätigung zurückgenommen", "bulk_problem": "Sammeländerung mit Fehlern beendet",
           "lldp_uplink": "LLDP-Nachbar an einem Uplink geändert", "approval": "Freigabe angefordert oder entschieden",
           "watch": "Beobachtete MAC-Adresse gesehen"}
 # Every event but the new unknown device: in a network with guests it would be most of the messages; an Admin switches it on
