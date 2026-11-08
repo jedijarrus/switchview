@@ -145,12 +145,13 @@ def test_the_roles_note_has_a_row_per_decision_of_the_plan():
             assert f"\n| {rid} |" in note, rid
 
 
-@pytest.mark.parametrize("note_name, half", [("rollen-phase4a.md", "MATRIX_4A"), ("verlauf-phase4b.md", "MATRIX_4B")])
+@pytest.mark.parametrize("note_name, half", [("rollen-phase4a.md", "MATRIX_4A"), ("verlauf-phase4b.md", "MATRIX_4B"),
+                                             ("sammel-api-phase4c.md", "MATRIX_4C")])
 def test_each_note_repeats_its_half_of_the_permission_matrix(note_name, half):
     """Phase 4a wrap-up, split in Phase 4b Task 1: each note's table "Rechte je Route" has a row for every entry of its half of the
     matrix the walk over the app's routes holds (tests/test_permissions.py: MATRIX_4A for the roles note, MATRIX_4B for the history
-    note), with the German name of its minimum role, and no other row (none for a removed or renamed route, none twice, none of the
-    other half) - neither note can go stale silently."""
+    note, since Phase 4c Task 1 MATRIX_4C for the note on bulk changes and the REST API), with the German name of its minimum role,
+    and no other row (none for a removed or renamed route, none twice, none of another part) - no note can go stale silently."""
     import test_permissions
     matrix = getattr(test_permissions, half)
     note = (ROOT / "docs" / note_name).read_text(encoding="utf-8")
@@ -168,6 +169,15 @@ def test_the_history_note_is_linked_and_has_its_sections():
     note = (ROOT / "docs" / "verlauf-phase4b.md").read_text(encoding="utf-8")
     for heading in ("## Was gebaut wurde", "## Rechte je Route", "## Kosten der Erfassung", "## Bekannte Grenzen",
                     "## Prüfungen vor dem Produktiveinsatz", "## Was beim Update zu tun ist", "## Später", "## Entscheidungen"):
+        assert f"\n{heading}\n" in note, heading
+
+
+def test_the_4c_note_is_linked_and_has_its_sections():
+    """Phase 4c: the README links the German note on bulk changes, confirmation, the REST API and triage, which has its sections."""
+    assert "Bulk changes, confirmation, REST API and triage notes (German): [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md)" in README
+    note = (ROOT / "docs" / "sammel-api-phase4c.md").read_text(encoding="utf-8")
+    for heading in ("## Was gebaut wurde", "## Rechte je Route", "## REST-API", "## Bekannte Grenzen", "## Prüfungen vor dem Produktiveinsatz",
+                    "## Was beim Update zu tun ist", "## Später", "## Entscheidungen", "### Entscheidungen des Plans", "### Rulings der Umsetzung"):
         assert f"\n{heading}\n" in note, heading
 
 

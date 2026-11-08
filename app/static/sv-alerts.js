@@ -11,12 +11,12 @@
   const SMTP_SECURITY = [["starttls", "STARTTLS (Port 587)"], ["tls", "TLS (Port 465)"], ["none", "Ohne Verschlüsselung (Port 25, ohne Anmeldung)"]];
   const HOOK_FORMATS = [["teams", "Microsoft Teams (Workflow)"], ["json", "JSON"]];
   const RULE_MODES = [["must_not", "keine Zeile enthält"], ["must", "eine Zeile enthält"]];
-  const SECRET_KEPT = "gesetzt – leer lassen = unverändert";
   const choices = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
 
   // The card "Benachrichtigungen" of s (GET /api/settings/alerts): the channels mail (SMTP) and webhook, each with the events it
   // sends (s.events: key → text) and its test button, then "Letzte Meldungen" (#a-deliv, bindAlertCard fills it). The two secrets
-  // follow the settings' rule: never shown, empty = unchanged, the note of one that does not decrypt beside its field (unreadNote)
+  // follow the settings' rule (secretInput of sv-core.js): never shown, empty = unchanged, the note of one that does not decrypt
+  // beside its field
   function alertCardHtml(s, admin) {
     const head = `<div class="card-h"><h2>Benachrichtigungen</h2></div>`;
     if (!admin) return head + `<div class="card-b" style="max-width:640px"><p class="note gate">Benachrichtigungen einrichten braucht die Rolle „Admin“.</p></div>`;
@@ -24,11 +24,6 @@
     const lim = s.limits || {}, on = (id, key) => `<label class="check"><input id="${id}" type="checkbox"${s[key] ? " checked" : ""}>`;
     const boxes = (attr, picked) => `<fieldset class="evs"><legend>Ereignisse</legend>${Object.keys(s.events).map(k => `<label class="check"><input type="checkbox" `
       + `data-${attr}="${esc(k)}"${(picked || []).includes(k) ? " checked" : ""}> ${esc(s.events[k])}</label>`).join("")}</fieldset>`;
-    const secret = (id, label, k, set, hint, max) => {
-      const note = unreadNote(s, k, id + "-unread"), desc = [hint && id + "-hint", note && id + "-unread"].filter(Boolean).join(" ");
-      return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? SECRET_KEPT : ""}" `
-        + `maxlength="${max}"${desc ? ` aria-describedby="${desc}"` : ""}>${hint ? `<span class="hint" id="${id}-hint">${esc(hint)}</span>` : ""}${note}</div>`;
-    };
     const text = (id, label, v, extra = "") => `<label class="field"><span>${label}</span><input id="${id}" value="${esc(v)}"${extra} autocomplete="off"></label>`;
     return head + `<div class="card-b" style="display:grid;gap:16px;max-width:640px">
       <p class="note" style="margin:0">SwitchView meldet Ereignisse per Mail und per Webhook (Microsoft Teams oder JSON). Dieselbe Meldung geht innerhalb von ${esc(lim.dedup_minutes)} Minuten einmal hinaus, je Weg höchstens ${esc(lim.cap_per_hour)} in der Stunde.</p>
@@ -37,12 +32,12 @@
         <p class="note warn" id="a-host-note" style="margin:0" hidden>Neuer Mailserver: Das gespeicherte Kennwort gilt nur für den alten Mailserver. Was du hier nicht neu eingibst, löscht das Speichern.</p>
         <div class="grid2"><label class="field"><span>Verschlüsselung</span><select id="a-sec">${choices(SMTP_SECURITY, s.smtp_security)}</select></label></div>
         ${on("a-mtls", "smtp_verify_tls")} TLS-Zertifikat prüfen</label>
-        <div class="grid2">${text("a-user", "Benutzer", s.smtp_user, ' maxlength="200"')}${secret("a-pass", "Kennwort", "smtp_pass", s.smtp_pass_set, "", 200)}</div>
+        <div class="grid2">${text("a-user", "Benutzer", s.smtp_user, ' maxlength="200"')}${secretInput(s, "a-pass", "Kennwort", "smtp_pass", s.smtp_pass_set, { max: 200 })}</div>
         <div class="grid2">${text("a-from", "Absender", s.mail_from, ' maxlength="254"')}</div>
         <label class="field"><span>Empfänger (eine Adresse je Zeile)</span><textarea id="a-to" rows="3">${esc((s.mail_to || []).join("\n"))}</textarea></label>
         ${boxes("mev", s.mail_events)}<div><button class="btn small" type="button" id="a-mtest">Test-Mail senden</button></div></fieldset>
       <fieldset class="fs"><legend>Webhook</legend>${on("a-hook-on", "hook_on")} Webhook senden</label>
-        ${secret("a-url", "Webhook-Adresse", "webhook_url", s.webhook_url_set, s.webhook_target ? `Ziel: ${s.webhook_target}` : "SwitchView zeigt die Adresse nach dem Speichern nie wieder, nur ihr Ziel.", 2000)}
+        ${secretInput(s, "a-url", "Webhook-Adresse", "webhook_url", s.webhook_url_set, { hint: s.webhook_target ? `Ziel: ${s.webhook_target}` : "SwitchView zeigt die Adresse nach dem Speichern nie wieder, nur ihr Ziel.", max: 2000 })}
         <div class="grid2"><label class="field"><span>Format</span><select id="a-fmt">${choices(HOOK_FORMATS, s.hook_format)}</select></label></div>
         ${on("a-htls", "hook_verify_tls")} TLS-Zertifikat prüfen</label>
         ${boxes("hev", s.hook_events)}<div><button class="btn small" type="button" id="a-htest">Test senden</button></div></fieldset>

@@ -1,8 +1,9 @@
 """Rights per route (Phase 4a, Task 4): every route declares its minimum role through exactly one dependency auth.require(<role>),
 recognisable by its min_role, or is one of the public routes of auth.PUBLIC_ROUTES. A walk over main.app.routes holds both against
 MATRIX, the permission matrix of the plan (docs/superpowers/plans/2026-11-07-phase4a-rollen.md, Task 4; the rows of Tasks 5-7 come
-with them; since Phase 4b Task 1 the union of MATRIX_4A and MATRIX_4B, the routes of docs/superpowers/plans/2026-11-07-phase4b-verlauf.md),
-so a new route without a right fails here, not in operation. A role below the minimum gets 403 with the German text of
+with them; since Phase 4b Task 1 the union of MATRIX_4A and MATRIX_4B, the routes of docs/superpowers/plans/2026-11-07-phase4b-verlauf.md;
+since Phase 4c Task 1 also MATRIX_4C, the routes of docs/superpowers/plans/2026-11-08-phase4c-sammel-api.md), so a new route without a
+right fails here, not in operation. A role below the minimum gets 403 with the German text of
 roles.denial; without a session every non-public route is 401. Inside /plan and /apply the mode has rules of its own: preparing RADIUS
 is Admin (Sicherheit Phase 2 T2-R1, it sends the RADIUS secret), the expert mode and taking back an expert change are Freigeben. Every
 audit entry records the role: the role of the request, of the new session for a login, none for a failed login, and the role of
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 
+import api_changes
 import apifix
 import auth
 import changes
@@ -31,9 +33,10 @@ from loginfix import BAD, GOOD
 ROOT = Path(__file__).resolve().parent.parent
 
 # The permission matrix of the plans, (method, path) -> minimum role, None for a public route (no sign-in). Written out by hand from
-# the plans' tables in two halves: MATRIX_4A the routes up to Phase 4a (the table of docs/rollen-phase4a.md), MATRIX_4B the routes of
-# Phase 4b (the table of docs/verlauf-phase4b.md); tests/test_readme.py holds each note to its half. MATRIX, their union, is what the
-# walk over the routes compares. A new route needs a row in one half and one in tests/data/routes.json.
+# the plans' tables in three parts: MATRIX_4A the routes up to Phase 4a (the table of docs/rollen-phase4a.md), MATRIX_4B the routes of
+# Phase 4b (the table of docs/verlauf-phase4b.md), MATRIX_4C the routes of Phase 4c (the table of docs/sammel-api-phase4c.md);
+# tests/test_readme.py holds each note to its part. MATRIX, their union, is what the walk over the routes compares. A new route needs
+# a row in one part and one in tests/data/routes.json.
 MATRIX_4A = {
     ("GET", "/"): None,
     ("GET", "/static/{name}"): None,
@@ -105,7 +108,8 @@ MATRIX_4B: dict = {
     ("DELETE", "/api/watch/{mac}"): "aendern",
     ("GET", "/api/audit.csv"): "lesen",
 }
-MATRIX = MATRIX_4A | MATRIX_4B
+MATRIX_4C: dict = {}
+MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C
 
 
 @pytest.fixture
@@ -136,8 +140,9 @@ def test_the_rights_are_the_matrix_of_the_plan():
     assert declared() == MATRIX
 
 
-def test_the_two_halves_of_the_matrix_do_not_overlap():
-    assert not set(MATRIX_4A) & set(MATRIX_4B) and MATRIX == MATRIX_4A | MATRIX_4B
+def test_the_three_parts_of_the_matrix_do_not_overlap():
+    assert not set(MATRIX_4A) & set(MATRIX_4B) and not set(MATRIX_4A) & set(MATRIX_4C) and not set(MATRIX_4B) & set(MATRIX_4C)
+    assert MATRIX == MATRIX_4A | MATRIX_4B | MATRIX_4C
 
 
 def test_there_is_one_dependency_per_role():
@@ -149,16 +154,15 @@ def test_there_is_one_dependency_per_role():
         auth.require("admn")
 
 
-PATH = dict(sid=1, bid=1, cid=1, aid=1, mac="aa:bb:cc:dd:ee:ff", name="x")
+PATH = dict(sid=1, bid=1, cid=1, aid=1, mac="aa:bb:cc:dd:ee:ff", name="x", tid=1, blk=1)
 
 
-@pytest.mark.parametrize("method, path", [k for k, v in MATRIX.items() if v not in (None, roles.LESEN)])
-def test_a_route_refuses_the_role_below_its_minimum(api, method, path):
-    need = MATRIX[(method, path)]
-    below = roles.ORDER[roles.ORDER.index(need) - 1]
+@pytest.mark.parametrize("method, path, below", [(m, p, r) for (m, p), need in MATRIX.items() if need not in (None, roles.LESEN)
+                                                 for r in roles.ORDER[:roles.ORDER.index(need)]])
+def test_a_route_refuses_every_role_below_its_minimum(api, method, path, below):         # 4a, Später 4c (was: the role just below)
     apifix.become(apifix.user(below))
     r = api.request(method, path.format(**PATH), json={})
-    assert (r.status_code, r.json()["detail"]) == (403, roles.denial(need, below))
+    assert (r.status_code, r.json()["detail"]) == (403, roles.denial(MATRIX[(method, path)], below))
 
 
 @pytest.mark.parametrize("method, path", [k for k, v in MATRIX.items() if v is not None])
@@ -179,16 +183,28 @@ def test_a_mode_needs_its_role(api, route, payload, role, need, what):
     assert (r.status_code, r.json()["detail"]) == (403, roles.denial(need, role, what))
 
 
-@pytest.mark.parametrize("expert, refused", [(1, True), (0, False)])
-def test_taking_back_an_expert_change_needs_freigeben(api, expert, refused):
+@pytest.mark.parametrize("route", ["plan", "apply"])
+@pytest.mark.parametrize("expert", [1, 0])
+def test_taking_back_an_expert_change_needs_freigeben(api, route, expert):              # 4a, Später 4c: both routes, the exact status
     sid = dbfix.insert_switch(name="SW", host="10.0.0.1")
     [(cid,)] = dbfix.query("INSERT INTO changes(switch_id, kind, summary, status, expert, sent) VALUES (?, 'ports', 'x', 'ok', ?, 1) "
                            "RETURNING id", (sid, expert))
     apifix.become(apifix.user("aendern"))
-    r = api.post(f"/api/switches/{sid}/plan", json={"mode": "revert", "of": cid})
-    assert (r.status_code == 403) == refused
-    if refused:
-        assert r.json()["detail"] == roles.denial("freigeben", "aendern", "Eine Änderung im Expertenmodus zurückzunehmen")
+    r = api.post(f"/api/switches/{sid}/{route}", json={"mode": "revert", "of": cid})
+    if expert:
+        assert (r.status_code, r.json()["detail"]) == (403, roles.denial("freigeben", "aendern", "Eine Änderung im Expertenmodus zurückzunehmen"))
+    else:                                       # past the rights: the switch has no SSH access, and the change ran over SSH
+        assert r.status_code == 409 and r.json()["detail"].startswith(api_changes.SSH_NEEDED)
+
+
+@pytest.mark.parametrize("route", ["plan", "apply"])
+def test_the_rights_of_a_revert_ask_about_the_change_at_this_switch(api, route):        # kills the mutation "the query without switch_id"
+    a, b = dbfix.insert_switch(name="A", host="10.0.0.1"), dbfix.insert_switch(name="B", host="10.0.0.2")
+    [(cid,)] = dbfix.query("INSERT INTO changes(switch_id, kind, summary, status, expert, sent) VALUES (?, 'ports', 'x', 'ok', 1, 1) "
+                           "RETURNING id", (b,))
+    apifix.become(apifix.user("aendern"))
+    r = api.post(f"/api/switches/{a}/{route}", json={"mode": "revert", "of": cid})
+    assert (r.status_code, r.json()["detail"]) == (404, "Änderung nicht gefunden")
 
 
 def test_every_audit_call_names_a_role():
@@ -212,6 +228,20 @@ def test_an_sso_login_is_audited_with_the_role_of_its_session(login_api, entra, 
     assert loginfix.sso_login(login_api, entra, preferred_username="anna@example.org", roles=["SwitchView.Aendern"]).status_code == 200
     assert dbfix.query("SELECT username, action, role FROM audit") == [("anna@example.org", "login", "aendern")]
     assert login_api.get("/api/auth/me").json()["role"] == "aendern"
+
+
+AUDITED = [("POST", "/api/devices", {"mac": "aa:bb:cc:dd:ee:01", "name": "D"}, "device_create", "aendern"),
+           ("POST", "/api/watch", {"mac": "aa:bb:cc:dd:ee:02", "note": ""}, "watch_add", "aendern"),
+           ("POST", "/api/auth/logout-all", None, "logout_all", "lesen"),
+           ("PUT", "/api/zone-scopes", {"entries": []}, "zone_scopes_update", "admin"),
+           ("PUT", "/api/settings/approvals", {"four_eyes": False}, "approval_settings", "admin")]
+
+
+@pytest.mark.parametrize("method, path, body, action, role", AUDITED)
+def test_each_kind_of_audit_entry_names_the_role_of_its_request(api, method, path, body, action, role):   # 4a, Später 4c
+    apifix.become(apifix.user(role, "anna"))
+    assert api.request(method, path, json=body).status_code == 200
+    assert dbfix.query("SELECT username, action, role FROM audit") == [("anna", action, role)]
 
 
 def test_a_route_audits_the_role_of_its_request(api):

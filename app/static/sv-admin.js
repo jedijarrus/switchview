@@ -473,12 +473,6 @@
   }
 
   /* ── Einstellungen ── */
-  // A stored secret that does not decrypt (s = GET /api/settings, k its key in s.unreadable; SECRET_KEY changed?): it has to be
-  // entered anew. id is the note's own id (<field id>-unread), which its field names in aria-describedby; the note stands beside the
-  // field, not in its label (no block in a label, and a click on the note does not focus the field). Below Admin the field is locked:
-  // the note names the role that can enter it
-  const unreadNote = (s, k, id) => (s.unreadable || []).includes(k)
-    ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – ${roleOk("admin") ? "bitte neu eingeben" : "neu eingeben braucht die Rolle „Admin“"}</span>` : "";
   // The settings and the zone list (GET /api/zone-scopes, kept in a textarea: SVLogic.formatScopes / parseScopes). Changing them is
   // Admin: below it every field is locked and the save buttons are gone, the card says why; what only reads (names, PacketFence test)
   // and ending the own sessions stay. The cards of sv-alerts.js ask beside them, each on its own (a failure is its card's text):
@@ -495,32 +489,25 @@
     const lossy = SVLogic.lossyScopes(scopes.entries);
     const destNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Neue Adresse: Das gespeicherte Kennwort bzw. der API-Schlüssel gilt nur für die alte Adresse. Was du hier nicht neu eingibst, löscht das Speichern.</p>`;
     const tlsNote = id => `<p class="note warn" id="${id}-note" style="margin:0" hidden>Ohne TLS-Prüfung (oder mit http://) kann jemand im Netz Kennwort bzw. API-Schlüssel mitlesen.</p>`;
-    // A secret field (k its key in s.unreadable, set: a value is stored): the input with its hint and its unread note as siblings,
-    // both naming the input's description
-    const secretField = (id, label, k, set, hint = "") => {
-      const note = unreadNote(s, k, id + "-unread"), desc = [hint && id + "-hint", note && id + "-unread"].filter(Boolean).join(" ");
-      return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? "gesetzt – leer lassen = unverändert" : ""}"${desc ? ` aria-describedby="${desc}"` : ""}${dis}>`
-        + `${hint ? `<span class="hint" id="${id}-hint">${hint}</span>` : ""}${note}</div>`;
-    };
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Einstellungen</h2></div><div class="card-b" style="display:grid;gap:16px;max-width:640px">
       ${admin ? "" : `<p class="note gate">Einstellungen ändern braucht die Rolle „Admin“.</p>`}
       <label class="field"><span>Abfrage-Intervall (Minuten)</span><input id="s-poll" type="number" min="5" max="1440" value="${esc(s.poll_minutes)}"${dis}></label>
       <fieldset class="fs"><legend>Gerätenamen aus der OPNsense (ARP-Tabelle)</legend>
         <label class="field"><span>Adresse</span><input id="s-url" value="${esc(s.opnsense_url)}" placeholder="https://opnsense.example.com"${dis}><span class="hint">API-Benutzer mit Recht „Diagnostics: ARP Table“</span></label>
         ${destNote("s-url")}
-        <div class="grid2">${secretField("s-key", "API-Key", "opnsense_key", s.opnsense_key_set)}
-        ${secretField("s-secret", "API-Secret", "opnsense_secret", s.opnsense_secret_set)}</div>
+        <div class="grid2">${secretInput(s, "s-key", "API-Key", "opnsense_key", s.opnsense_key_set, { disabled: !admin })}
+        ${secretInput(s, "s-secret", "API-Secret", "opnsense_secret", s.opnsense_secret_set, { disabled: !admin })}</div>
         <label class="check"><input id="s-tls" type="checkbox" ${s.opnsense_verify_tls ? "checked" : ""}${dis}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-tls")}
         <div><button class="btn small" type="button" id="s-names">Namen jetzt aktualisieren</button></div></fieldset>
       <fieldset class="fs"><legend>RADIUS und PacketFence</legend>
         <div class="grid2"><label class="field"><span>RADIUS-Server (PacketFence-IP)</span><input id="s-rs" value="${esc(s.radius_server)}" placeholder="IP-Adresse"${dis}><span class="hint">wird beim „Vorbereiten“ eines Switches eingetragen</span></label>
-        ${secretField("s-rk", "Shared Secret der Switches", "radius_key", s.radius_key_set, "wie in PacketFence beim Switch hinterlegt")}</div>
+        ${secretInput(s, "s-rk", "Shared Secret der Switches", "radius_key", s.radius_key_set, { hint: "wie in PacketFence beim Switch hinterlegt", disabled: !admin })}</div>
         ${destNote("s-rs")}
         <label class="field"><span>PacketFence-API</span><input id="s-pfu" value="${esc(s.pf_url)}" placeholder="https://packetfence:9999"${dis}><span class="hint">für die Geräte-Freigaben (Nodes mit Rolle)</span></label>
         ${destNote("s-pfu")}
         <div class="grid2"><label class="field"><span>API-Benutzer</span><input id="s-pfuser" value="${esc(s.pf_user)}" autocomplete="off"${dis}></label>
-        ${secretField("s-pfpass", "API-Kennwort", "pf_pass", s.pf_pass_set)}</div>
+        ${secretInput(s, "s-pfpass", "API-Kennwort", "pf_pass", s.pf_pass_set, { disabled: !admin })}</div>
         <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}${dis}> TLS-Zertifikat prüfen</label>
         ${tlsNote("s-pftls")}
         <div><button class="btn small" type="button" id="s-pftest">PacketFence testen</button></div></fieldset>
@@ -591,6 +578,6 @@
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });
-    $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${r.entries} Einträge aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
+    $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${SVLogic.plural(r.entries, "Eintrag", "Einträge")} aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
     bindRulesCard(rules); await bindAlertCard(alertSet);
   }

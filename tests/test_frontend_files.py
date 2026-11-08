@@ -139,3 +139,13 @@ def test_the_approvals_tab_sits_between_backups_and_audit():                    
     # Browser check: with the tab the header wrapped the user to a second row at 1280 px (the search asked for 220 px before it
     # shrinks); from 160 px the row holds the tab, the search and a name like "Lena Grünwalder" (T9-e)
     assert ".search { position: relative; flex: 1 1 160px; min-width: 0; max-width: 380px; margin-left: auto; }" in css
+
+
+def test_sv_admin_stays_below_600_lines():                                              # Pin (4b T10-s): new views get their own script
+    assert len((STATIC / "sv-admin.js").read_text(encoding="utf-8").splitlines()) < 600
+
+
+def test_one_helper_draws_the_secret_fields_of_the_settings():                          # 4b, Später 4c
+    texts = {n: (STATIC / n).read_text(encoding="utf-8") for n in SCRIPTS[2:]}
+    assert sum(t.count("unreadNote(s, k, id") for t in texts.values()) == 1 and "const secretInput = " in texts["sv-core.js"]
+    assert "secretField" not in texts["sv-admin.js"] and "const secret = (id, label, k," not in texts["sv-alerts.js"]

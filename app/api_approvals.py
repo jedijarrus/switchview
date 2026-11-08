@@ -103,16 +103,18 @@ approvals.register(approvals.Kind(approvals.PORT_CHANGE, "Port-Änderung im Expe
 @router.post("/api/approvals")
 async def request_approval(body: ApprovalIn, user=Depends(auth.require(roles.AENDERN))):
     """A four-eyes request for the change body.plan at switch body.switch_id, checked in this order: the switch is there and enabled
-    (api_changes._enabled_row); the change needs an approval (approvals.needs_approval, else 409 NO_APPROVAL_NEEDED: a prepare, a
-    revert, a save and a change without expert mode go directly, as does everything with the four-eyes principle off); the rights of
-    its mode and the zone (api_changes._mode_rights); the plan of now is the preview's (api_changes.checked_plan, the errors of
-    /apply). Stores exactly the desired state the requester sent (without the empty defaults of PortChange: PlanIn(**payload) restores
-    the request) and the preview they saw (api_changes.preview_answer); audits approval_requested and tells the listeners."""
+    (api_changes._enabled_row); the zone and the rights of its mode (api_changes._mode_rights, the 403 of /plan); the change needs an
+    approval (approvals.needs_approval, else 409 NO_APPROVAL_NEEDED: a prepare, a revert, a save and a change without expert mode go
+    directly, as does everything with the four-eyes principle off); the plan of now is the preview's (api_changes.checked_plan, the
+    errors of /apply). The rights come before the 409 since Phase 4c (4a R6-b): with the REST API the answer is a contract, and "sie
+    lässt sich direkt ausführen" is true only for whoever has the rights. Stores exactly the desired state the requester sent
+    (without the empty defaults of PortChange: PlanIn(**payload) restores the request) and the preview they saw
+    (api_changes.preview_answer); audits approval_requested and tells the listeners."""
     row = await api_changes._enabled_row(body.switch_id)
     four_eyes = (await approvals.policy())["four_eyes"]
+    await api_changes._mode_rights(user, row, body.plan, four_eyes)
     if not approvals.needs_approval(approvals.PORT_CHANGE, body.plan.model_dump(), four_eyes):
         raise HTTPException(409, NO_APPROVAL_NEEDED)
-    await api_changes._mode_rights(user, row, body.plan, four_eyes)
     plan, _, kind, summary = await api_changes.checked_plan(row, body.plan)
     preview = api_changes.preview_answer(row, plan, kind, summary)
     payload = {"mode": body.plan.mode, "ports": body.plan.ports, "change": body.plan.change.model_dump(exclude_defaults=True),

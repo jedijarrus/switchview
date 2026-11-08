@@ -386,3 +386,9 @@ def test_the_css_of_the_cards_takes_only_existing_tokens():
     tokens = {t for rule in new for t in re.findall(r"var\((--[\w-]+)\)", rule)}
     assert len(new) >= 12 and tokens <= {"--surface", "--surface-2", "--border", "--border-strong", "--fg", "--fg-2", "--muted", "--accent", "--accent-bg",
                                          "--warn", "--warn-bg", "--crit", "--crit-bg", "--r"}
+
+
+@pytest.mark.parametrize("entries, said", [(1, "1 Eintrag aus der ARP-Tabelle"), (2, "2 Einträge aus der ARP-Tabelle")])
+def test_the_names_refresh_counts_one_entry_in_the_singular(entries, said):             # 4b, Später 4c
+    then = ('api = async () => ({ok: true, entries: %d, skipped: 0}); ' % entries + CLICK % ("s-names", "s-names") + 'return ' + TOASTS + ';')
+    assert settings(then)[-1] == said

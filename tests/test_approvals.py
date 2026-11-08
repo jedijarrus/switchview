@@ -183,7 +183,7 @@ def test_a_request_expires(world, client):
     assert asyncio.run(approvals.expire_due()) == 0
 
 
-def test_listeners_hear_every_step_and_a_failing_one_costs_nothing(world, client):
+def test_listeners_hear_every_step_and_a_failing_one_costs_nothing(world, client, caplog):
     four_eyes()
     heard = []
 
@@ -203,6 +203,7 @@ def test_listeners_hear_every_step_and_a_failing_one_costs_nothing(world, client
     dbfix.query("UPDATE approvals SET expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (eid,))
     client.get("/api/approvals?status=all", headers=H("lea"))
     assert heard == [("requested", aid), ("withdrawn", aid), ("requested", bid), ("rejected", bid), ("requested", eid), ("expired", eid)]
+    assert f"Freigaben: ein Listener scheiterte an „withdrawn“ (Anfrage #{aid})" in caplog.text
 
 
 def test_the_four_eyes_setting(world, client):
@@ -229,14 +230,20 @@ def test_deleting_the_switch_deletes_its_requests(world, client):
 
 
 # ── Beyond the plan's tests: what the interface names and no test above holds ─────────────────────────────────────────────────────
-@pytest.mark.parametrize("plan", [{**PLAN, "expert": False}, {"mode": "revert", "of": 1, "expert": True}, {"mode": "prepare", "expert": True},
-                                  {"mode": "save", "of": 1}])
-def test_with_four_eyes_only_an_expert_port_change_is_requested(world, client, plan):
-    """needs_approval comes before the rights of the mode: a prepare by Ändern is 409, not 403; nothing is planned or stored."""
+@pytest.mark.parametrize("plan, want", [
+    ({**PLAN, "expert": False}, (409, api_approvals.NO_APPROVAL_NEEDED)),
+    ({"mode": "revert", "of": 1, "expert": True}, (409, api_approvals.NO_APPROVAL_NEEDED)),
+    ({"mode": "prepare", "expert": True}, (403, roles.denial(roles.ADMIN, roles.AENDERN, "„RADIUS vorbereiten“"))),
+    ({"mode": "save", "of": 1}, (409, api_approvals.NO_APPROVAL_NEEDED))])
+def test_a_request_checks_the_rights_before_it_says_no_approval_is_needed(world, client, plan, want):    # 4a, Später 4c (R6-b)
     four_eyes()
     r = client.post("/api/approvals", json={"kind": "port_change", "switch_id": world, "plan": plan}, headers=H("anna"))
-    assert (r.status_code, r.json()["detail"]) == (409, api_approvals.NO_APPROVAL_NEEDED)
-    assert dbfix.query("SELECT count(*) FROM approvals") == [(0,)]
+    assert (r.status_code, r.json()["detail"]) == want and dbfix.query("SELECT count(*) FROM approvals") == [(0,)]
+
+
+def test_without_four_eyes_an_expert_request_of_aendern_hears_its_role(world, client):
+    r = client.post("/api/approvals", json={"kind": "port_change", "switch_id": world, "plan": PLAN}, headers=H("anna"))
+    assert (r.status_code, r.json()["detail"]) == (403, roles.denial(roles.FREIGEBEN, roles.AENDERN, "Der Expertenmodus"))
 
 
 def test_with_four_eyes_taking_back_an_expert_change_stays_freigeben(world, client):

@@ -3,8 +3,12 @@ usual spelling, an IP address (exact) or a part of a name or MAC (without case),
 first (last_seen), paged by the cursor "<last_seen>|<id>" of the last row shown. Both routes need Lesen and are not zone-limited.
 The CSV (app/csvout.py) is UTF-8 with a BOM, ";" and CRLF, and a cell that starts like a formula gets a "'" before it.
 
+At the end, Phase 4c Task 1: the watch list (GET/POST /api/watch) holds at most history.WATCH_MAX entries and is read with every
+latest sighting in one query.
+
 A fresh database per test (apifix.fresh_db), the rows of sightings written directly through dbfix.
 """
+import asyncio
 import contextlib
 import pathlib
 import re
@@ -12,6 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import api_history
 import apifix
 import csvout
 import dbfix
@@ -265,3 +270,22 @@ def test_the_download_is_named_by_the_date_in_utc(api, monkeypatch):
     r = api.get("/api/history.csv", params={"q": MAC})
     assert (r.headers["content-type"], r.headers["content-disposition"]) == (
         "text/csv; charset=utf-8", 'attachment; filename="switchview-verlauf-2026-11-07.csv"')
+
+
+def test_the_watch_list_holds_at_most_1000_macs(api):                                    # 4b, Später 4c
+    dbfix.query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 999) INSERT INTO watch_macs(mac, note, created_at) "
+                "SELECT printf('02:00:00:00:%02x:%02x', i / 256, i % 256), '', '2026-11-08 00:00:00' FROM n")
+    r = api.post("/api/watch", json={"mac": "aa:bb:cc:dd:ee:ff", "note": ""})
+    assert (r.status_code, r.json()["detail"]) == (422, api_history.WATCH_FULL) and dbfix.query("SELECT count(*) FROM watch_macs") == [(1000,)]
+
+
+def test_the_watch_list_reads_every_latest_sighting_in_one_query(api, monkeypatch):     # 4b, Später 4c
+    for mac in ("aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"):
+        api.post("/api/watch", json={"mac": mac, "note": ""})
+    dbfix.query("INSERT INTO sightings(mac, switch_name, port, vlan, first_seen, last_seen) VALUES "
+                "('aa:bb:cc:00:00:01', 'SW', '5', '20', '2026-11-01 08:00:00', '2026-11-01 09:00:00'), "
+                "('aa:bb:cc:00:00:01', 'SW', '6', '20', '2026-11-02 08:00:00', '2026-11-02 09:00:00')")
+    want = asyncio.run(history.search(q="aa:bb:cc:00:00:01"))["rows"][0]
+    monkeypatch.setattr(history, "_last", lambda *args: (_ for _ in ()).throw(AssertionError("a query per entry")))
+    got = api.get("/api/watch").json()
+    assert [(w["mac"], w["last"]) for w in got] == [("aa:bb:cc:00:00:01", want), ("aa:bb:cc:00:00:02", None)]

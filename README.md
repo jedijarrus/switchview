@@ -92,6 +92,10 @@ History, drift and alerts notes (German): [docs/verlauf-phase4b.md](docs/verlauf
 the cost of recording, known limits, checks before production use, what to do on an update, what comes later, decisions). Setting
 up mail and Teams: [History and alerts](#history-and-alerts).
 
+Bulk changes, confirmation, REST API and triage notes (German): [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md) (what was
+built, the rights per route, the REST API with curl examples, known limits, checks before production use, what to do on an update,
+decisions).
+
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
 - Approved devices become registered PacketFence nodes with owner `switchview` and a role; access is re-evaluated (CoA) immediately.

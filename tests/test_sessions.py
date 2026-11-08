@@ -127,6 +127,30 @@ def test_logout_all_counts_only_sessions_still_valid(login_api):
     assert query("SELECT count(*) FROM sessions") == [(0,)]
 
 
+def test_idle_sessions_go_with_the_hourly_prune_and_are_not_counted(login_api, monkeypatch):    # 4a, Später 4c
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=30))
+    login_api.post("/api/auth/local", json=GOOD)
+    add_session(db.settings.db_path, auth.token_hash("ruht"), expires=datetime.now(timezone.utc) + timedelta(hours=1))
+    with closing(sqlite3.connect(db.settings.db_path)) as conn:
+        conn.execute("UPDATE sessions SET last_seen = ? WHERE token = ?",
+                     ((datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat(), auth.token_hash("ruht")))
+        conn.commit()
+    assert login_api.post("/api/auth/logout-all").json()["ended"] == 1          # this session; the idle one is gone, not counted
+
+
+async def test_without_an_idle_limit_the_prune_keeps_a_quiet_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
+    await db.init_db()
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=0))
+    add_session(db.settings.db_path, auth.token_hash("ruht"), expires=datetime.now(timezone.utc) + timedelta(hours=1))
+    assert await auth.prune_sessions() == 0
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=30))
+    with closing(sqlite3.connect(db.settings.db_path)) as conn:
+        conn.execute("UPDATE sessions SET last_seen = '2000-01-01T00:00:00+00:00'")
+        conn.commit()
+    assert await auth.prune_sessions() == 1
+
+
 async def test_rehashing_counts_the_legacy_tokens_and_keeps_hashed_ones(tmp_path):
     path = tmp_path / "switchview.db"
     hashed = "0123456789abcdef" * 4                                            # a session stored by the new code

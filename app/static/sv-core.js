@@ -107,6 +107,24 @@
   const confirmModal = (title, text, label, danger) => new Promise(res => modal(title, `<p style="margin:0">${text}</p>`,
     [{ label: "Abbrechen", onClick: () => { closeModal(); res(false); } }, { label, cls: danger ? "danger" : "primary", onClick: () => { closeModal(); res(true); } }]));
 
+  /* ── Secret fields of the settings: one rule for the cards of renderSettings (sv-admin.js) and alertCardHtml (sv-alerts.js) - a
+     stored secret is never shown, an empty field keeps it, and one that does not decrypt is named beside its field ── */
+  const SECRET_KEPT = "gesetzt – leer lassen = unverändert";
+  // A stored secret that does not decrypt (s = GET /api/settings or /api/settings/alerts, k its key in s.unreadable; SECRET_KEY
+  // changed?): it has to be entered anew. id is the note's own id (<field id>-unread), which its field names in aria-describedby; the
+  // note stands beside the field, not in its label (no block in a label, and a click on the note does not focus the field). Below
+  // Admin the field is locked: the note names the role that can enter it
+  const unreadNote = (s, k, id) => (s.unreadable || []).includes(k)
+    ? `<span class="note warn" id="${id}">lässt sich nicht entschlüsseln – ${roleOk("admin") ? "bitte neu eingeben" : "neu eingeben braucht die Rolle „Admin“"}</span>` : "";
+  // A secret field (s the card's answer, k its key in s.unreadable, set: a value is stored): the input with its hint (o.hint) and its
+  // unread note as siblings, both naming the input's description; o.max its maxlength, o.disabled locks it (below Admin)
+  const secretInput = (s, id, label, k, set, o = {}) => {
+    const note = unreadNote(s, k, id + "-unread"), desc = [o.hint && id + "-hint", note && id + "-unread"].filter(Boolean).join(" ");
+    return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="password" autocomplete="new-password" placeholder="${set ? SECRET_KEPT : ""}"`
+      + `${o.max ? ` maxlength="${o.max}"` : ""}${desc ? ` aria-describedby="${desc}"` : ""}${o.disabled ? " disabled" : ""}>`
+      + `${o.hint ? `<span class="hint" id="${id}-hint">${esc(o.hint)}</span>` : ""}${note}</div>`;
+  };
+
   /* ── Login ── */
   let authCfg = null, msalApp = null, ME = null; // ME: the signed-in user (/api/auth/me), set by start()
   function showLogin(msg) { dropLayers(); $("#app").hidden = true; $("#login").hidden = false; const e = $("#login-error"); e.hidden = !msg; e.textContent = msg || ""; }

@@ -72,7 +72,8 @@ def test_a_scoped_user_changes_only_in_their_zones(api, route, zone, refused):
     sid = dbfix.insert_switch(name="SW", host="10.0.0.1", zone=zone)
     apifix.become(apifix.user("aendern", zones=["EK"]))
     r = api.post(f"/api/switches/{sid}/{route}", json={"ports": ["1"], "change": {"status": "off"}})
-    assert (r.status_code == 403 and r.json()["detail"] == roles.zone_denial(zone, ["EK"])) == refused
+    assert r.status_code == (403 if refused else 422)
+    assert not refused or r.json()["detail"] == roles.zone_denial(zone, ["EK"])
 
 
 # ── Beyond the plan ──────────────────────────────────────────────────────────
@@ -91,11 +92,17 @@ def test_an_empty_list_clears_every_entry_and_a_long_audit_is_cut(api):
     many = [{"principal": f"SwitchView.Zone.{i:03}", "zones": ["Gebäude A", "Gebäude B"]} for i in range(30)]
     assert len(api.put("/api/zone-scopes", json={"entries": many}).json()["entries"]) == 30
     assert api.put("/api/zone-scopes", json={"entries": []}).json() == {"entries": []}
-    assert api.put("/api/zone-scopes", json={}).json() == {"entries": []}
     assert dbfix.query("SELECT count(*) FROM zone_scopes") == [(0,)]
-    [(long,), (empty,), (default,)] = dbfix.query("SELECT detail FROM audit ORDER BY id")
+    [(long,), (empty,)] = dbfix.query("SELECT detail FROM audit ORDER BY id")
     assert len(long) == 500 and long.startswith("30 Einträge: SwitchView.Zone.000 → Gebäude A, Gebäude B; SwitchView.Zone.001 → ")
-    assert empty == default == "0 Einträge"
+    assert empty == "0 Einträge"
+
+
+def test_a_put_without_entries_clears_nothing(api):                                    # 4a, Später 4c
+    api.put("/api/zone-scopes", json={"entries": [{"principal": "Z.EK", "zones": ["EK"]}]})
+    for body in ({}, {"entrys": []}):
+        assert api.put("/api/zone-scopes", json=body).status_code == 422
+    assert api.get("/api/zone-scopes").json() == {"entries": [{"principal": "Z.EK", "zones": ["EK"]}]}
 
 
 def test_the_zone_is_checked_before_the_mode(api):

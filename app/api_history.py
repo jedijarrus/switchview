@@ -158,6 +158,7 @@ async def put_compliance_rules(body: RulesIn, user=Depends(auth.require(roles.AD
 
 WATCHED = "Diese MAC-Adresse wird schon beobachtet"
 NOT_WATCHED = "Nicht in der Beobachtungsliste"
+WATCH_FULL = "Höchstens 1000 beobachtete MAC-Adressen"      # history.WATCH_MAX
 
 
 class WatchIn(BaseModel):
@@ -174,11 +175,13 @@ async def get_watch_list(user=Depends(auth.require(roles.LESEN))):
 
 @router.post("/api/watch")
 async def add_to_watch_list(body: WatchIn, user=Depends(auth.require(roles.AENDERN))):
-    """Watches a MAC (422 „MAC-Adresse ungültig“, 409 WATCHED when it is watched already) and audits it (watch_add, the MAC, the note);
-    the answer is the entry as GET lists it."""
+    """Watches a MAC (422 „MAC-Adresse ungültig“, 422 WATCH_FULL when the list holds history.WATCH_MAX already, 409 WATCHED when it
+    is watched already) and audits it (watch_add, the MAC, the note); the answer is the entry as GET lists it."""
     mac = api_devices.norm_mac(body.mac)
     try:
         entry = await history.watch_add(mac, body.note.strip(), user)
+    except history.WatchFull:
+        raise HTTPException(422, WATCH_FULL) from None
     except KeyError:
         raise HTTPException(409, WATCHED) from None
     await audit(user["username"], "watch_add", mac, entry["note"], role=user["role"])

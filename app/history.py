@@ -27,8 +27,8 @@ name or MAC, or by a switch and a port; newest first by last_seen (the place of 
 by the cursor "<last_seen>|<id>" of the last row shown. export gives the same rows for the CSV (at most EXPORT_MAX).
 
 The watch list (Task 7, table watch_macs, GET/POST /api/watch, DELETE /api/watch/{mac}): MACs a helpdesk wants to hear of, each
-with a note. After its commit, record hands what it added or revived to alerts.announce_sightings, which tells a new unknown device
-and every watched MAC seen for the first time, at another place or back (watched gives their notes).
+with a note, at most WATCH_MAX (Phase 4c). After its commit, record hands what it added or revived to alerts.announce_sightings,
+which tells a new unknown device and every watched MAC seen for the first time, at another place or back (watched gives their notes).
 """
 import ipaddress
 import logging
@@ -312,28 +312,47 @@ async def export(*, q: str | None = None, switch_id: int | None = None, port: st
 
 
 # ── The watch list (Task 7) ──────────────────────────────────────────────────
+WATCH_MAX = 1000    # watched MACs at most (Phase 4c: a script can fill the list through the REST API); GET /api/watch reads all at once
+
+
+class WatchFull(Exception):
+    """watch_add: the watch list holds WATCH_MAX entries already."""
+
+
 async def _last(conn, mac: str) -> dict | None:
     """The latest sighting of mac as search reads it (the first row of a search by that MAC, on idx_sightings_mac), None without one."""
     rows = await _select(conn, "mac = ?", [mac], 1)
     return rows[0] if rows else None
 
 
+# Every watched MAC with its latest sighting in one SELECT (Phase 4c; a query per entry before): the correlated subquery takes the
+# first row of a search by that MAC on idx_sightings_mac, as _last does, and the LEFT JOIN leaves s.* NULL for a MAC never seen
+_WATCH_LIST = (f"SELECT w.mac AS watch_mac, w.note, w.created_by, w.created_at, {', '.join('s.' + c for c in COLUMNS.split(', '))} "
+               "FROM watch_macs w LEFT JOIN sightings s ON s.id = "
+               "(SELECT id FROM sightings WHERE mac = w.mac ORDER BY last_seen DESC, id DESC LIMIT 1) ORDER BY w.mac")
+
+
 async def watch_list() -> list[dict]:
     """Every watched MAC by MAC: mac, note, created_by, created_at and last, its latest sighting as search reads it (None without
-    one)."""
+    one), all in one query."""
     async with db() as conn:
-        async with conn.execute("SELECT mac, note, created_by, created_at FROM watch_macs ORDER BY mac") as cur:
-            out = [dict(r) for r in await cur.fetchall()]
-        for w in out:
-            w["last"] = await _last(conn, w["mac"])
-    return out
+        async with conn.execute(_WATCH_LIST) as cur:
+            return [{"mac": r["watch_mac"], "note": r["note"], "created_by": r["created_by"], "created_at": r["created_at"],
+                     "last": None if r["id"] is None else _served(r)} for r in await cur.fetchall()]
 
 
 async def watch_add(mac: str, note: str, user: dict) -> dict:
     """Watches mac (as api_devices.norm_mac writes it) with note, added by user (auth.current_user) now; the entry as watch_list
-    reads it. KeyError when mac is watched already (nothing changes then)."""
+    reads it. Counts and writes in one write transaction (BEGIN IMMEDIATE), so two at once cannot pass WATCH_MAX: WatchFull when
+    the list holds WATCH_MAX entries, KeyError when mac is watched already (nothing changes then)."""
     now = datetime.now(timezone.utc).strftime(TIME)
     async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT count(*) FROM watch_macs") as cur:
+            (count,) = await cur.fetchone()
+        if count >= WATCH_MAX:
+            await conn.rollback()
+            raise WatchFull()
         cur = await conn.execute("INSERT INTO watch_macs(mac, note, created_by, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (mac) DO NOTHING",
                                  (mac, note, user["username"], now))
         await conn.commit()

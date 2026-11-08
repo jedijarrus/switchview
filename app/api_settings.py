@@ -269,7 +269,9 @@ class ZoneScope(BaseModel):
 
 
 class ZoneScopesIn(BaseModel):
-    entries: list[ZoneScope] = Field(default_factory=list, max_length=200)
+    """The whole zone list of PUT /api/zone-scopes. entries is required (Phase 4c): a body without it, or with the key misspelt, is
+    FastAPI's 422, so only an explicit [] clears the list - a typo of a script must not silently lift every zone scope."""
+    entries: list[ZoneScope] = Field(max_length=200)
 
 
 async def _zone_scopes(conn) -> list[dict]:

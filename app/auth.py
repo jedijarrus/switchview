@@ -199,14 +199,18 @@ def device_id(cookie: str | None, username: str) -> str | None:
 
 
 async def _delete_expired(conn) -> int:
-    """Deletes the expired sessions of anyone on conn, without a commit; how many."""
-    cur = await conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+    """Deletes the sessions of anyone on conn that current_user would refuse, without a commit; how many. A session is gone after its
+    expires_at, and (Phase 4c) with settings.idle_minutes > 0 also when its last_seen lies further back than idle_minutes - the rule
+    of current_user: a session without last_seen, from before the update, is not idle and stays."""
+    now = datetime.now(timezone.utc)
+    cur = await conn.execute("DELETE FROM sessions WHERE expires_at < ? OR (? > 0 AND last_seen IS NOT NULL AND last_seen < ?)",
+                             (now.isoformat(), settings.idle_minutes, (now - timedelta(minutes=settings.idle_minutes)).isoformat()))
     return cur.rowcount
 
 
 async def prune_sessions() -> int:
-    """Deletes every expired session and returns how many: hourly by the scheduler (main._schedule) and once at the start
-    (main.lifespan), so the table does not grow between logins."""
+    """Deletes every expired or idle session (_delete_expired) and returns how many: hourly by the scheduler (main._schedule) and
+    once at the start (main.lifespan), so the table does not grow between logins."""
     async with db() as conn:
         pruned = await _delete_expired(conn)
         await conn.commit()
@@ -223,6 +227,7 @@ def claim_roles(claims: dict) -> list[str]:
     return [r for r in value if isinstance(r, str) and len(r) <= 256][:200]
 
 
+# "roles" (the plan's name) hides the module roles inside this function: use no roles.X here
 async def create_session(username: str, display: str, method: str, *, roles: list[str] | None = None, subject: str | None = None) -> str:
     """Starts a session and returns its token for the cookie; the database keeps only token_hash(token). It stores the app roles of
     the login (claims, from which current_user works out the role on every request), the person's stable identity (subject, by
@@ -248,7 +253,7 @@ async def drop_session(token: str):
 
 async def drop_user_sessions(username: str) -> int:
     """Ends every session of username, on every device ("log out everywhere"), and returns how many of them were still valid.
-    Expired sessions of anyone are deleted first, as create_session does, so they are not counted."""
+    Expired and idle sessions of anyone are deleted first (_delete_expired), as create_session does, so they are not counted."""
     async with db() as conn:
         await _delete_expired(conn)
         cur = await conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
