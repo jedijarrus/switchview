@@ -210,7 +210,12 @@ WHY_STOPPED = "nach einem Fehler gestoppt"
 WHY_RESTART = "SwitchView neu gestartet"
 # The detail of a switch whose change ended in one of these states: "Änderung #<cid> <ENDED>"
 ENDED = {"unclear": "unklar", "failed": "fehlgeschlagen", "aborted": "abgebrochen"}
+# The detail of a done switch whose change ended unconfirmed after its run (_unconfirmed): UNCONFIRMED only once its revert ended ok
+# (reverted_by), else the change's own error - the watch gave up (confirm.UNREACHABLE, NOT_TAKEN_BACK, NOTHING_BACK) or its revert
+# has only started (changes.REVERT_STARTED) -, UNCONFIRMED_BARE without one
 UNCONFIRMED = "Änderung #{cid} nicht bestätigt, zurückgenommen"
+UNCONFIRMED_AS = "Änderung #{cid}: {error}"
+UNCONFIRMED_BARE = "Änderung #{cid} nicht bestätigt"
 # The detail of the switch at which the run itself failed (an exception that is no refusal of start_change); the log has the rest
 CRASHED = "Unerwarteter Fehler im Lauf – Einzelheiten im Log von SwitchView"
 
@@ -252,9 +257,12 @@ async def precheck(body) -> list[dict]:
     """Every switch of body's items planned against its preview token as /apply plans it (api_changes.checked_plan, on the write way of
     its preview) and, with confirm_minutes, asked whether it can run with confirmation (api_changes.confirm_refusal), at most
     PARALLEL at once. Every HTTPException of a switch - outdated, blocked, unreadable, disabled, gone, nothing to change, no
-    confirmation possible - means it does not match, with its text; if one does not match, api_changes.PreviewOutdated (409) with
+    confirmation possible, busy - means it does not match, with its text; if one does not match, api_changes.PreviewOutdated (409) with
     OUTDATED naming each that does not ("<name>: <reason>", "; " between, "#<id>" for a switch that is gone), and nothing starts.
-    Else per switch {"switch_id", "switch", "ports", "preview"} in the order of the items, preview as api_changes.preview_answer."""
+    Else per switch {"switch_id", "switch", "ports", "preview"} in the order of the items, preview as api_changes.preview_answer.
+    Before the plan, as start_change's early check, a switch that takes no change now (changes.busy_reason: one runs, or waits for its
+    confirmation - a second bulk over the switches of a first that still waits) does not match either: else the run would change the
+    switches before it and fail there. It stays an early check; the binding one is create_change's in the run."""
     gate = asyncio.Semaphore(PARALLEL)
 
     async def checked(item) -> dict | tuple[str, str]:
@@ -263,6 +271,10 @@ async def precheck(body) -> list[dict]:
             try:
                 row = await api_changes._enabled_row(item.switch_id)
                 name = row["name"]
+                async with db() as conn:
+                    busy = await changes.busy_reason(conn, item.switch_id, None)
+                if busy:
+                    raise HTTPException(409, busy)
                 one = plan_in(item.model_dump(), body.change, body.expert, body.confirm_minutes)
                 plan, _, kind, summary_ = await api_changes.checked_plan(row, one)
                 if body.confirm_minutes is not None:
@@ -365,27 +377,35 @@ async def _settled(cid: int) -> str | None:
 
 async def _extend_deadlines(bid: int, minutes: int) -> None:
     """The deadline (confirm_until) of every change of bulk change bid that waits for its confirmation now + minutes (UTC), only while
-    it waits: called after each switch whose change waits, so at the end every one of them has the deadline of the last (T7-e). A
-    seam for the tests: the run calls it through the module."""
-    until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    it waits and only before its deadline (confirm_until > now: a deadline that has passed is final, the watch takes that change back
+    within CHECK_S, and the extension of a later switch does not revive it): called after each switch whose change waits, so at the
+    end every one of them has the deadline of the last (T7-e). A seam for the tests: the run calls it through the module."""
+    now = datetime.now(timezone.utc)
+    until = (now + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
     async with db() as conn:
-        await conn.execute("UPDATE changes SET confirm_until = ? WHERE bulk_id = ? AND status = 'pending'", (until, bid))
+        await conn.execute("UPDATE changes SET confirm_until = ? WHERE bulk_id = ? AND status = 'pending' AND confirm_until > ?",
+                           (until, bid, now.strftime("%Y-%m-%d %H:%M:%S")))
         await conn.commit()
 
 
 async def _unconfirmed(bid: int) -> bool:
     """Whether a change of bulk change bid ended unconfirmed: the change of a done switch (it waited for its confirmation at its run)
     with confirm_minutes and without confirmed_by that is neither waiting nor queued, running or ok (ok without a confirm is
-    changes.CONFIRM_SKIPPED: the switch saved it itself). Each such switch keeps done and gets the detail UNCONFIRMED (again at each
-    look, the same text); a switch that failed at its own run keeps its detail."""
+    changes.CONFIRM_SKIPPED: the switch saved it itself). Each such switch keeps done and gets the detail of what happened, as the
+    change says it at this look (rewritten at each look, so it follows a revert that ends meanwhile): UNCONFIRMED once its revert
+    ended ok (reverted_by), else UNCONFIRMED_AS with the change's error (stored masked) - the watch gave up and the switch keeps the
+    change unsaved, or the revert has only started -, UNCONFIRMED_BARE without one; never "zurückgenommen" for a change that was not.
+    A switch that failed at its own run keeps its detail."""
     async with db() as conn:
         async with conn.execute(
-                "SELECT i.pos, c.id FROM bulk_items i JOIN changes c ON c.id = i.change_id WHERE i.bulk_id = ? AND i.status = 'done' "
-                "AND c.confirm_minutes IS NOT NULL AND c.confirmed_by IS NULL AND c.status NOT IN ('pending', 'queued', 'running', 'ok')",
-                (bid,)) as cur:
+                "SELECT i.pos, c.id, c.error, c.reverted_by FROM bulk_items i JOIN changes c ON c.id = i.change_id WHERE i.bulk_id = ? "
+                "AND i.status = 'done' AND c.confirm_minutes IS NOT NULL AND c.confirmed_by IS NULL "
+                "AND c.status NOT IN ('pending', 'queued', 'running', 'ok')", (bid,)) as cur:
             ended = await cur.fetchall()
         for r in ended:
-            await conn.execute("UPDATE bulk_items SET detail = ? WHERE bulk_id = ? AND pos = ?", (UNCONFIRMED.format(cid=r["id"]), bid, r["pos"]))
+            text = (UNCONFIRMED.format(cid=r["id"]) if r["reverted_by"] else
+                    UNCONFIRMED_AS.format(cid=r["id"], error=r["error"]) if r["error"] else UNCONFIRMED_BARE.format(cid=r["id"]))
+            await conn.execute("UPDATE bulk_items SET detail = ? WHERE bulk_id = ? AND pos = ?", (text, bid, r["pos"]))
         await conn.commit()
     return bool(ended)
 
@@ -526,15 +546,24 @@ async def _ended(bid: int, end: str) -> None:
 
 async def cancel(bid: int, user: dict) -> None:
     """The cancel of bulk change bid by user, in this order: it is there (404 NOT_FOUND), user started it (the case aside) or has
-    Freigeben (403 CANCEL_WHO), it is queued or running (409 NOT_RUNNING). It sets cancel_requested; the run stops before its next
-    switch, never inside a change (a change cut short would leave part of it at the switch, Spec §5). Audits bulk_cancel ("#<bid>")."""
+    Freigeben (403 CANCEL_WHO) - and then, as every changing route that affects a switch and as the approval of a bulk change (Task
+    8), the zone of every switch it runs at, of now (403 roles.zone_denial of the first that is not user's; a skipped or deleted
+    switch runs nothing): a cancel decides which switches get changed -, it is queued or running (409 NOT_RUNNING). It sets
+    cancel_requested; the run stops before its next switch, never inside a change (a change cut short would leave part of it at the
+    switch, Spec §5). Audits bulk_cancel ("#<bid>")."""
     async with db() as conn:
         async with conn.execute("SELECT username FROM bulks WHERE id = ?", (bid,)) as cur:
             b = await cur.fetchone()
         if b is None:
             raise HTTPException(404, NOT_FOUND)
-        if b["username"].casefold() != user["username"].casefold() and not roles.at_least(user["role"], roles.FREIGEBEN):
-            raise HTTPException(403, CANCEL_WHO)
+        if b["username"].casefold() != user["username"].casefold():
+            if not roles.at_least(user["role"], roles.FREIGEBEN):
+                raise HTTPException(403, CANCEL_WHO)
+            async with conn.execute("SELECT DISTINCT s.zone FROM bulk_items i JOIN switches s ON s.id = i.switch_id "
+                                    "WHERE i.bulk_id = ? AND i.status != 'skipped' ORDER BY s.zone", (bid,)) as cur:
+                denied = [r["zone"] for r in await cur.fetchall() if not roles.zone_allows(user, r["zone"])]
+            if denied:
+                raise HTTPException(403, roles.zone_denial(denied[0], user["zones"]))
         asked = await conn.execute("UPDATE bulks SET cancel_requested = 1 WHERE id = ? AND status IN ('queued', 'running')", (bid,))
         await conn.commit()
     if asked.rowcount != 1:

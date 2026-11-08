@@ -169,9 +169,10 @@ def test_a_change_taken_back_unconfirmed_meanwhile_stops_the_rest(world, client,
     bid = start(client, world, confirm_minutes=5).json()["id"]
     real = bulk._extend_deadlines
 
-    async def watcher_took_a_back(b, minutes):
+    async def watcher_took_a_back(b, minutes):                                          # its revert #99 ended ok
         await real(b, minutes)
-        dbfix.query("UPDATE changes SET status = 'unclear' WHERE switch_id = ? AND bulk_id = ?", (world.a, b))
+        dbfix.query("UPDATE changes SET status = 'unclear', error = ?, reverted_by = 99 WHERE switch_id = ? AND bulk_id = ?",
+                    (changes.REVERT_STARTED.format(rid=99), world.a, b))
 
     monkeypatch.setattr(bulk, "_extend_deadlines", watcher_took_a_back)
     assert asyncio.run(bulk.run(bid)) == "failed"
@@ -194,8 +195,8 @@ def test_a_restart_marks_a_running_bulk_interrupted(world, client):
     assert asyncio.run(bulk.mark_interrupted()) == 0
 
 
-def test_a_bulk_started_with_an_api_token_names_it_in_the_audit_of_its_run(world, client):
-    USERS["bot"] = apifix.user("aendern", "anna") | {"api_token": {"id": 1, "name": "ci"}}
+def test_a_bulk_started_with_an_api_token_names_it_in_the_audit_of_its_run(world, client, monkeypatch):
+    monkeypatch.setitem(USERS, "bot", apifix.user("aendern", "anna") | {"api_token": {"id": 1, "name": "ci"}})
     bid = start(client, world, "bot").json()["id"]
     assert dbfix.query("SELECT api_token FROM bulks") == [("ci (#1)",)]
     asyncio.run(bulk.run(bid))
@@ -321,8 +322,9 @@ def test_a_change_taken_back_after_the_last_switch_still_fails_the_bulk(world, c
     async def after_c(b, minutes):
         await real(b, minutes)
         calls.append(b)
-        if len(calls) == 3:
-            dbfix.query("UPDATE changes SET status = 'unclear' WHERE switch_id = ? AND bulk_id = ?", (world.b, b))
+        if len(calls) == 3:                                                             # its revert #99 ended ok
+            dbfix.query("UPDATE changes SET status = 'unclear', error = ?, reverted_by = 99 WHERE switch_id = ? AND bulk_id = ?",
+                        (changes.REVERT_STARTED.format(rid=99), world.b, b))
 
     monkeypatch.setattr(bulk, "_extend_deadlines", after_c)
     assert asyncio.run(bulk.run(bid)) == "failed"
@@ -366,8 +368,8 @@ def test_a_queued_bulk_that_is_cancelled_starts_nothing(world, client):
                                                                                        "0 fehlgeschlagen, 3 nicht gestartet",)]
 
 
-def test_a_restart_names_the_api_token_of_the_bulk_and_leaves_the_context_as_it_was(world, client):
-    USERS["bot"] = apifix.user("aendern", "anna") | {"api_token": {"id": 1, "name": "ci"}}
+def test_a_restart_names_the_api_token_of_the_bulk_and_leaves_the_context_as_it_was(world, client, monkeypatch):
+    monkeypatch.setitem(USERS, "bot", apifix.user("aendern", "anna") | {"api_token": {"id": 1, "name": "ci"}})
     start(client, world, "bot")
     assert asyncio.run(bulk.mark_interrupted()) == 1 and db.AUDIT_TOKEN.get() is None
     assert dbfix.query("SELECT username, token FROM audit WHERE action = 'bulk_interrupted'") == [("anna", "ci (#1)")]
@@ -405,3 +407,101 @@ def test_the_deadlines_of_the_waiting_changes_move_with_the_run(world, client):
     assert until[world.a] == "2026-01-02 00:00:00" and until[world.b] == until[world.c] > before
     later = datetime.strptime(until[world.c], "%Y-%m-%d %H:%M:%S") - datetime.strptime(before, "%Y-%m-%d %H:%M:%S")
     assert timedelta(minutes=7) <= later <= timedelta(minutes=7, seconds=5)
+
+
+# ── Task 7 review round 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("error, reverted_by, detail", [
+    (f"{confirm.UNREACHABLE} (Konfiguration per SNMP nicht lesbar: Timeout)", None,
+     f"Änderung #{{cid}}: {confirm.UNREACHABLE} (Konfiguration per SNMP nicht lesbar: Timeout)"),
+    (f"{confirm.NOT_TAKEN_BACK} (Switch deaktiviert)", None, f"Änderung #{{cid}}: {confirm.NOT_TAKEN_BACK} (Switch deaktiviert)"),
+    (changes.REVERT_STARTED.format(rid=99), None, "Änderung #{cid}: Nicht bestätigt: Rücknahme #99 gestartet"),
+    (changes.REVERT_STARTED.format(rid=99), 99, bulk.UNCONFIRMED),
+    (None, None, bulk.UNCONFIRMED_BARE)], ids=["unreachable", "not-taken-back", "revert-started", "taken-back", "no-error"])
+def test_the_detail_of_an_unconfirmed_end_says_only_what_happened(world, client, monkeypatch, error, reverted_by, detail):
+    """Review Focus 2: the switch drops off the network during the deadline and the watch gives up (unclear with confirm.UNREACHABLE,
+    or NOT_TAKEN_BACK), or its revert has only started: the bulk's summary must not say "zurückgenommen" while the change says it was
+    not - only a change its revert marked (reverted_by: the revert ended ok) is UNCONFIRMED; any other names the change's own error.
+    It is a failure either way, and stop stops the rest."""
+    world.ends |= {"A": "pending", "B": "pending", "C": "pending"}
+    bid = start(client, world, confirm_minutes=5).json()["id"]
+    real = bulk._extend_deadlines
+
+    async def a_ended_unconfirmed(b, minutes):
+        await real(b, minutes)
+        dbfix.query("UPDATE changes SET status = 'unclear', error = ?, reverted_by = ? WHERE switch_id = ? AND bulk_id = ?",
+                    (error, reverted_by, world.a, b))
+
+    monkeypatch.setattr(bulk, "_extend_deadlines", a_ended_unconfirmed)
+    assert asyncio.run(bulk.run(bid)) == "failed"
+    [(ca,)] = dbfix.query("SELECT id FROM changes WHERE switch_id = ?", (world.a,))
+    items = got(client, bid)["items"]
+    assert [(i["status"], i["detail"]) for i in items] == [("done", detail.format(cid=ca))] + [
+        ("not_started", bulk.NOT_STARTED.format(why=bulk.WHY_STOPPED))] * 2
+    assert (items[0]["change"]["error"], items[0]["change"]["reverted_by"]) == (error, reverted_by)
+
+
+def test_the_detail_of_an_unconfirmed_end_follows_its_revert_while_the_bulk_runs(world, client, monkeypatch):
+    """With continue the run looks again before each switch and after the last: A's revert has started at the look before B and has
+    ended ok (reverted_by) at the look before C - the detail says what holds at the last look."""
+    world.ends |= {"A": "pending", "B": "pending", "C": "pending"}
+    bid = start(client, world, confirm_minutes=5, on_error="continue").json()["id"]
+    real, calls, seen = bulk._extend_deadlines, [], []
+
+    async def a_taken_back_in_two_steps(b, minutes):
+        await real(b, minutes)
+        calls.append(b)
+        if len(calls) == 1:
+            dbfix.query("UPDATE changes SET status = 'unclear', error = ? WHERE switch_id = ? AND bulk_id = ?",
+                        (changes.REVERT_STARTED.format(rid=99), world.a, b))
+        seen.append(dbfix.query("SELECT detail FROM bulk_items WHERE bulk_id = ? AND pos = 0", (b,))[0][0])
+        if len(calls) == 2:
+            dbfix.query("UPDATE changes SET reverted_by = 99 WHERE switch_id = ? AND bulk_id = ?", (world.a, b))
+
+    monkeypatch.setattr(bulk, "_extend_deadlines", a_taken_back_in_two_steps)
+    assert asyncio.run(bulk.run(bid)) == "failed" and world.order == [world.a, world.b, world.c]
+    [(ca,)] = dbfix.query("SELECT id FROM changes WHERE switch_id = ?", (world.a,))
+    assert seen[1] == f"Änderung #{ca}: Nicht bestätigt: Rücknahme #99 gestartet"
+    assert [(i["status"], i["detail"]) for i in got(client, bid)["items"]] == [("done", bulk.UNCONFIRMED.format(cid=ca)), ("done", ""),
+                                                                               ("done", "")]
+
+
+def test_a_deadline_that_has_passed_is_not_extended(world, client):
+    """A deadline that has passed is final: the watch (every 15 s) takes that change back, and the extension after a later switch of
+    the bulk does not revive it before the watch gets there (Bekannte Grenzen: "läuft die Frist der früheren vorher ab, der Wächter
+    nimmt sie zurück")."""
+    world.ends |= {"A": "pending", "B": "pending", "C": "pending"}
+    world.after_start[world.b] = lambda: dbfix.query("UPDATE changes SET confirm_until = '2000-01-01 00:00:00' WHERE switch_id = ?",
+                                                     (world.a,))
+    bid = start(client, world, confirm_minutes=7).json()["id"]
+    assert asyncio.run(bulk.run(bid)) == "done"
+    until = dict(dbfix.query("SELECT switch_id, confirm_until FROM changes WHERE bulk_id = ?", (bid,)))
+    assert until[world.a] == "2000-01-01 00:00:00" and until[world.b] == until[world.c] > changes._now()
+
+
+@pytest.mark.parametrize("status, reason", [(changes.PENDING, lambda cid: changes.PENDING_BUSY.format(cid=cid)),
+                                            ("running", lambda cid: changes.BUSY)], ids=["waiting", "running"])
+def test_a_switch_busy_at_the_start_is_named_and_nothing_starts(world, client, status, reason):
+    """The early busy check of start_change in the check before the start: a switch with a change that runs or waits for its
+    confirmation (a second bulk over the switches of a first one that still waits) stops the start before any switch is changed."""
+    preview = client.post("/api/bulk/plan", json={"targets": [{"switch_id": s, "ports": ["1"]} for s in (world.a, world.b)],
+                                                  "change": {"untagged": "30"}}, headers=H("anna")).json()
+    dbfix.query("INSERT INTO changes(switch_id, kind, summary, status) VALUES (?, 'ports', 'x', ?)", (world.b, status))
+    [(cid,)] = dbfix.query("SELECT id FROM changes")
+    r = client.post("/api/bulk", json=items_of(preview), headers=H("anna"))
+    assert (r.status_code, r.json()["detail"]) == (409, bulk.OUTDATED.format(list=f"B: {reason(cid)}"))
+    assert dbfix.query("SELECT count(*) FROM bulks") == [(0,)] and world.scheduled == []
+
+
+def test_freigeben_cancels_another_ones_bulk_only_with_the_zone_of_each_of_its_switches(world, client, monkeypatch):
+    """Cancel decides which switches get changed: a Freigeben who did not start the bulk needs the zone of every switch it runs at
+    (as Task 8's approval of a bulk change); a skipped switch runs nothing and does not count; the starter is never asked."""
+    monkeypatch.setitem(USERS, "ute", apifix.user("freigeben", "ute", zones=["EK"]))
+    dbfix.query("UPDATE switches SET zone = 'VK' WHERE id = ?", (world.c,))
+    bid = start(client, world).json()["id"]
+    r = client.post(f"/api/bulk/{bid}/cancel", headers=H("ute"))
+    assert (r.status_code, r.json()["detail"]) == (403, roles.zone_denial("VK", ["EK"]))
+    assert dbfix.query("SELECT cancel_requested FROM bulks WHERE id = ?", (bid,)) == [(0,)]
+    world.plans["C"] = {"blocked": [{"port": "1", "reason": "Uplink"}]}
+    other = start(client, world).json()["id"]
+    assert client.post(f"/api/bulk/{other}/cancel", headers=H("ute")).status_code == 200
+    assert client.post(f"/api/bulk/{bid}/cancel", headers=H("anna")).status_code == 200

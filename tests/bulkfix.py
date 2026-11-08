@@ -11,6 +11,7 @@ itself (Task 8 imports items_of).
 Like tests/apifix.py this module imports app code, so a test module imports it at the top, after conftest.py has set the
 environment.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import api_changes
@@ -33,7 +34,8 @@ class World:
     it lays over its default plan); inv: per switch id the poll inventory (changes.inventory), NO_PORTS without an entry; extra(name)
     adds another switch in zone EK, extra_ids are their ids in order. For the run (Task 7): ends, per switch name the status
     fake_run_change ends its change with ("ok" without an entry); order, the switch ids in the order their changes ran; after_start,
-    per switch id a function fake_run_change calls once it wrote the end; scheduled, the bulk ids bulk.schedule was given."""
+    per switch id a function fake_run_change calls (in a thread) right before it writes the end; scheduled, the bulk ids bulk.schedule
+    was given."""
 
     def __init__(self, zones: tuple[str, str, str]):
         self.a, self.b, self.c = (dbfix.insert_switch(name=name, host=f"10.0.0.{i + 1}", zone=zone, **POLLED)
@@ -71,22 +73,26 @@ async def _inventory(sid: int) -> dict:
 
 
 async def fake_run_change(cid: int) -> None:
-    """changes.run_change of WORLD: ends change cid with WORLD.ends[<its switch's name>] ("ok" without an entry), sent 1 and finished_at
-    now - "pending" also with confirm_until now + 5 minutes, as run_change leaves a change waiting for its confirmation; notes the
-    switch in WORLD.order, then calls WORLD.after_start[<switch id>], if there is one. Nothing is read, sent or audited."""
+    """changes.run_change of WORLD: notes the switch of change cid in WORLD.order, calls WORLD.after_start[<switch id>], if there is
+    one, then ends the change with WORLD.ends[<its switch's name>] ("ok" without an entry), sent 1 and finished_at now - "pending" also
+    with confirm_until now + 5 minutes, as run_change leaves a change waiting for its confirmation. Nothing is read, sent or audited.
+    after_start (a function with dbfix.query, sqlite3 in the calling thread) runs in a thread before the end: the run sees its writes
+    once it sees the end (bulk._settled), and the event loop stays free meanwhile - called in the loop, it blocked the commit of a
+    write the run had open (bulk._set_item of change_id) until "database is locked"."""
     async with db.db() as conn:
         async with conn.execute("SELECT c.switch_id, s.name FROM changes c JOIN switches s ON s.id = c.switch_id WHERE c.id = ?",
                                 (cid,)) as cur:
             sid, name = await cur.fetchone()
+    WORLD.order.append(sid)
+    if sid in WORLD.after_start:
+        await asyncio.to_thread(WORLD.after_start[sid])
+    async with db.db() as conn:
         end = WORLD.ends.get(name, "ok")
         now = datetime.now(timezone.utc)
         until = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S") if end == changes.PENDING else None
         await conn.execute("UPDATE changes SET status = ?, sent = 1, finished_at = ?, confirm_until = ? WHERE id = ?",
                            (end, now.strftime("%Y-%m-%d %H:%M:%S"), until, cid))
         await conn.commit()
-    WORLD.order.append(sid)
-    if sid in WORLD.after_start:
-        WORLD.after_start[sid]()
 
 
 def items_of(preview: dict, **over) -> dict:

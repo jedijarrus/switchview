@@ -430,8 +430,9 @@ curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/bulk/$BID" | jq '{status, cou
 ```
 
 By default the first failure (a refused start, a change that ends unclear, failed or aborted) stops the rest, which is then "not
-started"; `"on_error": "continue"` runs the rest anyway. `POST /api/bulk/<id>/cancel` (who started it, or "Freigeben") stops it
-before its next switch, never inside a change. With `"confirm_minutes": N` every switch waits unsaved for its confirmation and the
+started"; `"on_error": "continue"` runs the rest anyway. `POST /api/bulk/<id>/cancel` (who started it, or "Freigeben" with the
+zone of each of its switches) stops it before its next switch, never inside a change. Rights, the token and the four-eyes principle
+are checked when it starts: revoking the token does not stop a running bulk change, its cancel does. With `"confirm_minutes": N` every switch waits unsaved for its confirmation and the
 run goes on; each deadline moves with the run, so all of them end N minutes after the last switch, and
 `POST /api/bulk/<id>/confirm` confirms every waiting change of the bulk change with the rules of `/confirm`. With the four-eyes
 principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409). A bulk change that ends with failures, or
