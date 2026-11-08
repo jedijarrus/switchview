@@ -141,13 +141,13 @@ def test_idle_sessions_go_with_the_hourly_prune_and_are_not_counted(login_api, m
 async def test_without_an_idle_limit_the_prune_keeps_a_quiet_session(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "settings", config.Settings(data_dir=str(tmp_path)))
     await db.init_db()
-    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=0))
     add_session(db.settings.db_path, auth.token_hash("ruht"), expires=datetime.now(timezone.utc) + timedelta(hours=1))
-    assert await auth.prune_sessions() == 0
-    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=30))
-    with closing(sqlite3.connect(db.settings.db_path)) as conn:
+    with closing(sqlite3.connect(db.settings.db_path)) as conn:                 # quiet for decades: only the idle rule could end it
         conn.execute("UPDATE sessions SET last_seen = '2000-01-01T00:00:00+00:00'")
         conn.commit()
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=0))
+    assert await auth.prune_sessions() == 0                                    # IDLE_MINUTES=0: no idle logout, the session stays
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=30))
     assert await auth.prune_sessions() == 1
 
 

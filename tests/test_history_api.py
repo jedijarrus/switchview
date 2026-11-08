@@ -3,8 +3,8 @@ usual spelling, an IP address (exact) or a part of a name or MAC (without case),
 first (last_seen), paged by the cursor "<last_seen>|<id>" of the last row shown. Both routes need Lesen and are not zone-limited.
 The CSV (app/csvout.py) is UTF-8 with a BOM, ";" and CRLF, and a cell that starts like a formula gets a "'" before it.
 
-At the end, Phase 4c Task 1: the watch list (GET/POST /api/watch) holds at most history.WATCH_MAX entries and is read with every
-latest sighting in one query.
+At the end, Phase 4c Task 1: the watch list (GET/POST /api/watch) holds at most history.WATCH_MAX entries, also with two additions at
+once, and is read with every latest sighting in one query.
 
 A fresh database per test (apifix.fresh_db), the rows of sightings written directly through dbfix.
 """
@@ -272,20 +272,56 @@ def test_the_download_is_named_by_the_date_in_utc(api, monkeypatch):
         "text/csv; charset=utf-8", 'attachment; filename="switchview-verlauf-2026-11-07.csv"')
 
 
-def test_the_watch_list_holds_at_most_1000_macs(api):                                    # 4b, Später 4c
-    dbfix.query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 999) INSERT INTO watch_macs(mac, note, created_at) "
+def watch_999() -> None:
+    """999 watched MACs (02:00:00:00:00:00 on), written directly: room for exactly one more."""
+    dbfix.query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 998) INSERT INTO watch_macs(mac, note, created_at) "
                 "SELECT printf('02:00:00:00:%02x:%02x', i / 256, i % 256), '', '2026-11-08 00:00:00' FROM n")
+
+
+def test_the_watch_list_holds_at_most_1000_macs(api):                                    # 4b, Später 4c
+    watch_999()
+    assert api.post("/api/watch", json={"mac": "aa:bb:cc:dd:ee:fe", "note": ""}).status_code == 200       # the 1000th still fits
     r = api.post("/api/watch", json={"mac": "aa:bb:cc:dd:ee:ff", "note": ""})
     assert (r.status_code, r.json()["detail"]) == (422, api_history.WATCH_FULL) and dbfix.query("SELECT count(*) FROM watch_macs") == [(1000,)]
 
 
-def test_the_watch_list_reads_every_latest_sighting_in_one_query(api, monkeypatch):     # 4b, Später 4c
+@pytest.fixture
+def database(tmp_path, monkeypatch):
+    apifix.fresh_db(tmp_path, monkeypatch)
+
+
+async def test_two_additions_at_once_cannot_pass_the_limit(database, monkeypatch):
+    """Pin of BEGIN IMMEDIATE in history.watch_add: each INSERT waits 0.2 s after its count, so without the write transaction both
+    would count 999 and both insert. With it the second count waits for the first commit and sees 1000."""
+    watch_999()
+    real = history.db
+
+    @contextlib.asynccontextmanager
+    async def slow_insert():
+        async with real() as conn:
+            execute = conn.execute
+
+            async def later(sql, args):
+                await asyncio.sleep(0.2)
+                return await execute(sql, args)
+
+            conn.execute = lambda sql, args=(): later(sql, args) if sql.startswith("INSERT INTO watch_macs") else execute(sql, args)
+            yield conn
+
+    monkeypatch.setattr(history, "db", slow_insert)
+    both = await asyncio.gather(*(history.watch_add(mac, "", apifix.user("aendern")) for mac in ("aa:bb:cc:dd:ee:fe", "aa:bb:cc:dd:ee:ff")),
+                                return_exceptions=True)
+    assert sorted(type(r).__name__ for r in both) == ["WatchFull", "dict"] and dbfix.query("SELECT count(*) FROM watch_macs") == [(1000,)]
+
+
+def test_the_watch_list_reads_every_latest_sighting_in_one_query(api, ran_sql):         # 4b, Später 4c
     for mac in ("aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"):
         api.post("/api/watch", json={"mac": mac, "note": ""})
     dbfix.query("INSERT INTO sightings(mac, switch_name, port, vlan, first_seen, last_seen) VALUES "
                 "('aa:bb:cc:00:00:01', 'SW', '5', '20', '2026-11-01 08:00:00', '2026-11-01 09:00:00'), "
                 "('aa:bb:cc:00:00:01', 'SW', '6', '20', '2026-11-02 08:00:00', '2026-11-02 09:00:00')")
     want = asyncio.run(history.search(q="aa:bb:cc:00:00:01"))["rows"][0]
-    monkeypatch.setattr(history, "_last", lambda *args: (_ for _ in ()).throw(AssertionError("a query per entry")))
+    ran_sql.clear()
     got = api.get("/api/watch").json()
     assert [(w["mac"], w["last"]) for w in got] == [("aa:bb:cc:00:00:01", want), ("aa:bb:cc:00:00:02", None)]
+    assert ran_sql == [(history._WATCH_LIST, ())]                                         # one statement for both entries

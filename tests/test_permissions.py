@@ -3,11 +3,11 @@ recognisable by its min_role, or is one of the public routes of auth.PUBLIC_ROUT
 MATRIX, the permission matrix of the plan (docs/superpowers/plans/2026-11-07-phase4a-rollen.md, Task 4; the rows of Tasks 5-7 come
 with them; since Phase 4b Task 1 the union of MATRIX_4A and MATRIX_4B, the routes of docs/superpowers/plans/2026-11-07-phase4b-verlauf.md;
 since Phase 4c Task 1 also MATRIX_4C, the routes of docs/superpowers/plans/2026-11-08-phase4c-sammel-api.md), so a new route without a
-right fails here, not in operation. A role below the minimum gets 403 with the German text of
-roles.denial; without a session every non-public route is 401. Inside /plan and /apply the mode has rules of its own: preparing RADIUS
-is Admin (Sicherheit Phase 2 T2-R1, it sends the RADIUS secret), the expert mode and taking back an expert change are Freigeben. Every
-audit entry records the role: the role of the request, of the new session for a login, none for a failed login, and the role of
-whoever started a change for its change_* entry (changes.role).
+right fails here, not in operation. A role below the minimum gets 403 with the German text of roles.denial; without a session every
+non-public route is 401. Inside /plan and /apply the mode has rules of its own: preparing RADIUS is Admin (Sicherheit Phase 2 T2-R1,
+it sends the RADIUS secret), the expert mode and taking back an expert change are Freigeben. Every audit entry records the role: the
+role of the request, of the new session for a login, none for a failed login, and the role of whoever started a change for its
+change_* entry (changes.role).
 
 The app runs in-process through FastAPI's TestClient: `api` signed in through the override of auth.current_user (apifix.signed_in,
 then apifix.become for another role), `login_api` of conftest.py without any override (the real session code).
