@@ -89,7 +89,8 @@ Roles and approvals notes (German): [docs/rollen-phase4a.md](docs/rollen-phase4a
 limits, checks before production use, what to do on an update, what comes later, decisions).
 
 History, drift and alerts notes (German): [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md) (what was built, the rights per route,
-the cost of recording, known limits, checks before production use, what to do on an update, decisions).
+the cost of recording, known limits, checks before production use, what to do on an update, what comes later, decisions). Setting
+up mail and Teams: [History and alerts](#history-and-alerts).
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
@@ -214,7 +215,8 @@ in the log, without a traceback.
 **Roles and approvals.** Four roles, each with the rights of the one before: Lesen (read, poll, test, back up), Ändern (port and
 device changes), Freigeben (expert mode, approvals) and Admin (switches, settings, preparing RADIUS, zones, four eyes). Every
 route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are
-the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md), and a test holds the app's routes against it. The
+the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (the routes Phase 4b added in
+[docs/verlauf-phase4b.md](docs/verlauf-phase4b.md)), and a test holds the app's routes against it. The
 roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO user is Admin, as before; the emergency login
 is Admin always). An Admin can limit Ändern and Freigeben to the switches of some zones, by app role (Settings → "Zonen", read on
 every request). The four-eyes principle for expert-mode changes is off by default (Settings → "Vier-Augen-Prinzip", Admin): with
@@ -311,6 +313,40 @@ Recommended PacketFence setup:
 | Switch side | `radius-server host <pf> dyn-authorization` **and** `time-window 0`. PacketFence sends CoA without `Event-Timestamp`; with the default window (300 s) the switch silently drops it |
 
 Unknown devices are accepted into the park role (not rejected), so PacketFence keeps a session it can change via CoA once the device is approved. `unauth-vid 3999` on the switch remains as a fallback.
+
+## History and alerts
+
+The settings, in `.env` (see the table under [Security](#security)): `HISTORY_DAYS` (default 180) bounds the history, the events,
+the resolved findings and the alerts that no longer wait; `PUBLIC_URL` gives every alert a link. Two variables of the libraries apply
+as well: `SSL_CERT_FILE` for an own CA of the mail server or the webhook (as under TLS), and `HTTPS_PROXY` for a webhook behind an
+outgoing proxy (mail never goes through a proxy). The container must reach the mail server and the webhook address.
+
+History, events and the security rules start by themselves with the first poll and the next read of each running-config after the
+update. The first recording of a switch is its baseline (no device of it counts as new), and so is the first check of the rules:
+right after the update most ProCurve switches show their factory defaults (Telnet, plain HTTP) as findings, without an alert. An
+Admin switches off a rule that does not apply to the network (Settings → "Sicherheitsregeln"). The database grows by about 235
+bytes per place a device was seen (2400 devices with 5 % moving a day: 5.6 MB after 180 days); it does not shrink when the nightly
+purge deletes, SQLite reuses the pages (`VACUUM` shrinks the file).
+
+Alerts stay off until an Admin sets them up under Settings → "Benachrichtigungen" and saves; the test buttons send through the stored
+settings, so save first.
+- **Mail (SMTP):** the mail server and its security: "STARTTLS (Port 587)" (the default), "TLS (Port 465)", or "Ohne
+  Verschlüsselung (Port 25, ohne Anmeldung)" for an internal relay that takes mail without a login (without TLS SwitchView never
+  logs in). Keep "TLS-Zertifikat prüfen" on. A user and its password if the server wants a login, the sender, the recipients one per
+  line (at most 20), the events, "Mail senden" on, save, then "Test-Mail senden". A new mail server deletes a stored password the
+  same save does not enter anew.
+- **Microsoft Teams:** in the channel, add the workflow template "Post to a channel when a webhook request is received" and copy the
+  URL it shows. In SwitchView paste it as "Webhook-Adresse", choose the format "Microsoft Teams (Workflow)" and the events, switch
+  "Webhook senden" on, save, then "Test senden": an Adaptive Card appears in the channel. The URL carries the workflow's signature:
+  it is stored encrypted and never shown again (only its scheme and host). An old Office 365 connector does not take the card.
+- **JSON:** the format "JSON" posts `{"source": "switchview", "event", "title", "text", "switch": {"id", "name"} | null, "facts",
+  "at", "url"}` to any receiver; an answer of 300 or above (a redirect too) counts as a failure.
+
+"Neues unbekanntes Gerät an einem Zugangsport" is off for each channel until an Admin ticks it. A message that could not be
+delivered shows under "Letzte Meldungen" on the card and, for an Admin, in the overview; after five failed attempts (about 15
+minutes) it is given up and audited as `alert_failed`. For scripts: `GET /api/audit` now answers `{"rows": [...], "next": ...}`
+instead of a list, 100 entries per page (`limit` up to 500, `next` as the `cursor` of the next page). The upgrade steps in full are
+under "Was beim Update zu tun ist" in [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md).
 
 ## ProCurve notes
 
