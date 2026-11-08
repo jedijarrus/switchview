@@ -4,7 +4,8 @@ limitations and device checks. A driver added to drivers.DRIVERS without a READM
 security settings and links the German security note, which has the sections the plan asks for. Phase 3: likewise the logic note,
 with its module map and a row per decision of its plan. Phase 5: the README links the German UX note, which has the same sections.
 Phase 4a: likewise the roles note, with its rights per route as tests/test_permissions.py pins them and a row per decision of
-its plan. Phase 4b: likewise the history note, with its half of the rights per route (MATRIX_4B; the roles note keeps MATRIX_4A)."""
+its plan. Phase 4b: likewise the history note, with its half of the rights per route (MATRIX_4B; the roles note keeps MATRIX_4A), a
+row per decision of its plan and the README's feature block on history, drift and alerts."""
 import pathlib
 import re
 
@@ -182,3 +183,33 @@ def test_the_readme_describes_roles_and_approvals():
         assert text in security.split("**Roles and approvals.**", 1)[1].split("\n\n", 1)[0], text
     for text in ("zone", "four-eyes"):
         assert text in login, text
+
+
+def test_the_history_note_has_a_row_per_decision_of_the_plan():
+    """Phase 4b wrap-up: one table row per "Entscheidung:" of the plan, counted from the plan itself: A1.. for its exclusions, Tn-a.. per task."""
+    note = (ROOT / "docs" / "verlauf-phase4b.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "superpowers" / "plans" / "2026-11-07-phase4b-verlauf.md").read_text(encoding="utf-8")
+    counts, section = {}, None
+    for line in plan.splitlines():
+        task = re.match(r"### Task (\d+):", line)
+        if task:
+            section = f"T{task[1]}"
+        elif line.startswith("## "):
+            section = "A" if line == "## Ausschlüsse" else None
+        elif line.startswith("- Entscheidung:") and section:
+            counts[section] = counts.get(section, 0) + 1
+    assert set(counts) == {"A"} | {f"T{n}" for n in range(1, 12)}, counts
+    for section, n in counts.items():
+        for rid in ([f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]):
+            assert f"\n| {rid} |" in note, rid
+
+
+def test_the_readme_describes_history_drift_and_alerts():
+    """Phase 4b wrap-up: the feature list has a block on the history, the events, the security rules, the alerts, the watch list and
+    the server-side audit log."""
+    features = README.split("\n## Features\n", 1)[1].split("\n## ", 1)[0]
+    assert "**History, drift and alerts**" in features
+    block = features.split("**History, drift and alerts**", 1)[1].split("\n\n", 1)[0]
+    for text in ("HISTORY_DAYS", "Verlauf", "outside SwitchView", "security rules", "SMTP", "Teams", "webhook", "watch list", "CSV",
+                 "PUBLIC_URL", "off until"):
+        assert text in block, text

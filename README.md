@@ -98,6 +98,29 @@ the cost of recording, known limits, checks before production use, what to do on
   keeps the device
 - Optional expiry date, nightly expiry job, list of unknown devices on access ports
 
+**History, drift and alerts**
+- Every poll records where each device was seen: one row per place (MAC, switch, port, VLAN, with IP and name), a new row only when
+  the device moves, never on a trunk or a confirmed uplink (a place behind an unconfirmed uplink is marked). The view "Verlauf" finds
+  where a device was by MAC, IP or name, newest first, and exports the hits as CSV; the port panel shows who was at a port before.
+  `HISTORY_DAYS` (default 180, `0` = keep forever) bounds sightings, events, resolved findings and alerts that no longer wait (sent,
+  failed or suppressed), purged nightly at 04:00
+- Discrete events, no counters or graphs: a switch that misses three polls in a row and answers again, an LLDP neighbour that
+  appears, changes or vanishes, and changes outside SwitchView - a backup that differs from the one before without a change through
+  SwitchView in between, and on switches without backups a port whose VLANs, PVID, status or name changed without one. The switch
+  view lists its events, the backups mark an outside change, the overview counts them
+- The security rules check every read of the running-config (nightly backup, preview, backup) and the SNMP access after every good
+  poll: Telnet, `public`/`private` or v2c write communities, a manager without password, plain HTTP, missing RADIUS basics, each
+  finding pointing at its masked line; an Admin switches rules off and adds own text rules. The first check of a switch is its
+  baseline and alerts nothing; the switch view lists the findings, the overview counts them
+- Alerts by SMTP mail and by webhook (a Microsoft Teams workflow or plain JSON), off until an Admin sets them up under Settings →
+  "Benachrichtigungen", each channel with its events and a test button. They wait in a queue in the database; a scheduler job
+  delivers every 30 seconds with up to 5 attempts and a 10 s timeout, the same message goes out once an hour, at most 30 per channel
+  and hour plus one summary, and what was not delivered is listed and audited. A poll, a backup or a change never waits for an alert
+- A MAC watch list (Ändern, under "Geräte"): an alert when a watched MAC appears, moves or comes back
+- The audit log is filtered and paged on the server (text, action, user, role, switch, time range) and exported as CSV with the same
+  filters; a CSV cell that starts like a formula gets a `'`
+- `PUBLIC_URL` (optional) gives every alert a link to its switch or to the approvals
+
 **Login**
 - Microsoft Entra ID (MSAL popup, ID token verified via JWKS, optional app roles/groups) or a local emergency account. With neither
   `ENTRA_ALLOWED_ROLES` nor `ENTRA_ALLOWED_GROUPS` set, every user of the tenant may sign in; the start logs a warning
@@ -157,14 +180,14 @@ The settings that matter, in `.env` unless noted:
 | `ENTRA_ROLE_MAPPING` | `off` | `on`: the role of an SSO user comes from the Entra app roles; `off`: every SSO user is Admin; any other value stops the start |
 | `ENTRA_ROLE_LESEN`, `ENTRA_ROLE_AENDERN`, `ENTRA_ROLE_FREIGEBEN`, `ENTRA_ROLE_ADMIN` | `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben`, `SwitchView.Admin` | the app role values of each role, comma-separated |
 | `IDLE_MINUTES` | `120` | a session without a request for this many minutes ends; `0` = off (the behaviour before Phase 4a); a negative value stops the start |
-| `HISTORY_DAYS` | `180` | days of history kept (sightings, events, resolved findings, delivered alerts), purged nightly at 04:00; `0` = keep forever; a negative value stops the start |
+| `HISTORY_DAYS` | `180` | days of history kept (sightings, events, resolved findings, alerts that no longer wait), purged nightly at 04:00; `0` = keep forever; a negative value stops the start |
 | `PUBLIC_URL` | unset (alerts without a link) | the address of SwitchView as its users reach it (e.g. `https://switchview.example.com`); alerts link the switch or the approvals there; a value without `http://` or `https://` stops the start |
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |
 | "Vier-Augen-Prinzip" (Settings, Admin) | off, requests expire after `24` hours | on: an expert-mode change is requested, and a second person with Freigeben or Admin approves it; hours 1–168 |
 | "Zonen" (Settings, Admin) | empty: nobody is limited | one line per Entra app role (`SwitchView.Zone.EK = EK`): Ändern and Freigeben with that role change only switches of those zones; needs `ENTRA_ROLE_MAPPING=on` |
-| "Benachrichtigungen" (Settings, Admin) | off until set up | mail via SMTP (STARTTLS, TLS, or without TLS and without login for an internal relay; certificate check on) and a webhook for a Microsoft Teams workflow or plain JSON, each with its events; the SMTP password and the webhook URL are stored encrypted and never shown again (of the URL only its host); a test button per channel |
+| "Benachrichtigungen" (Settings, Admin) | off until set up | mail via SMTP (STARTTLS, TLS, or without TLS and without login for an internal relay; certificate check on) and a webhook for a Microsoft Teams workflow or plain JSON, each with its events; the SMTP password and the webhook URL are stored encrypted and never shown again (of the URL only its scheme and host); a test button per channel |
 
 **Reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address as the container sees it (comma-separated addresses or networks,
 e.g. `172.18.0.1`, or `172.18.0.0/16` for a proxy in another container of the compose network): only that sender may set
@@ -219,9 +242,11 @@ blocked. It applies from the first start of the new image, without a report-only
 **SECRET_KEY.** A `SECRET_KEY` under 16 characters stops the start; one under 32 characters or with fewer than 8 different
 characters gets a warning in the log at every start. Changing the key later means entering every stored credential anew.
 
-**Credentials follow their destination.** When a save changes the address of a switch, of PacketFence, of OPNsense or of the
-RADIUS server, every stored secret of that destination that the same save does not enter anew is deleted, and the answer and the UI
-say which. A changed address never inherits a stored secret.
+**Credentials follow their destination.** When a save changes the address of a switch, of PacketFence, of OPNsense, of the
+RADIUS server or the mail server of the alerts, every stored secret of that destination that the same save does not enter anew is
+deleted, and the answer and the UI say which. A changed address never inherits a stored secret: a new mail server deletes the stored
+SMTP password. The SMTP password and the webhook URL of the alerts are stored encrypted and never shown again (of the URL only its
+scheme and host), and no alert, log line or error text carries them.
 
 **SNMP credentials** never go on a command line, where any local process could read them (`ps`, `/proc/<pid>/cmdline`): for each
 SNMP call SwitchView writes the community or the v3 passphrases into a short-lived `snmp.conf` (mode 0600, in a private directory
@@ -249,7 +274,10 @@ usual CAs plus your own (the variable also applies to the Microsoft key fetch of
 container, where only `./data` is mounted (as `/data`): put the bundle at e.g. `./data/ca-bundle.pem`, set
 `SSL_CERT_FILE=/data/ca-bundle.pem` in `.env` and run `docker compose up -d`. A wrong path makes every checked PacketFence/OPNsense
 call and the Entra login fail (the emergency login still works), so afterwards log in once over SSO and press "PacketFence testen"
-and "Namen jetzt aktualisieren" in the settings.
+and "Namen jetzt aktualisieren" in the settings. The alerts have a "TLS-Zertifikat prüfen" of their own for mail and for the
+webhook, on by default: mail checks the server against the CAs of the system, the webhook against the certifi bundle;
+`SSL_CERT_FILE` applies to both, so the bundle with an own CA serves the alerts as well. Mail without the check, or SMTP without
+TLS, belongs on an internal relay only; without TLS SwitchView never logs in.
 
 **Masking.** Secrets are masked in stored backups, in the backup and diff views, in CLI previews and in the error, steps and output
 of every change, also of changes stored before the update (masked when they are served; the rows in the database stay as they were),
