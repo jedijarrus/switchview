@@ -32,6 +32,12 @@ def role_of(method: str, claim_roles: list[str] | None, s: Settings) -> str:
     return LESEN
 
 
+def cap(role: str, maximum: str | None) -> str:
+    """role capped at maximum (Phase 4c: the maximum role of an API token): maximum when it is set and lower than role, else role.
+    A maximum that is none of ORDER counts as lower than every role (it has no rights, as for at_least)."""
+    return maximum if maximum is not None and not at_least(maximum, role) else role
+
+
 def denial(minimum: str, role: str | None, what: str = "Das") -> str:
     """The detail of a 403 for a role below minimum."""
     return f"Keine Berechtigung: {what} braucht die Rolle „{LABELS[minimum]}“ (deine Rolle: „{LABELS.get(role, role or '–')}“)"

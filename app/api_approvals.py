@@ -28,6 +28,8 @@ STALE_REQUEST = "Der Switch hat sich seit der Anfrage geändert: die Anfrage ist
 # reload the page, which fits a preview but not a request that has to be asked again
 OTHER_COMMANDS = "Die Befehle von jetzt sind andere als die der Vorschau der Anfrage"
 DECIDED = "Anfrage #{aid} ist schon entschieden"
+APPROVE_VIA_TOKEN = ("Freigeben geht nur angemeldet in der Oberfläche, nicht mit einem API-Token: das Vier-Augen-Prinzip verlangt eine "
+                     "Person")
 
 
 class ApprovalIn(BaseModel):
@@ -191,7 +193,8 @@ async def preview_approval(aid: int, user=Depends(auth.require(roles.FREIGEBEN))
 async def approve_approval(aid: int, body: ApproveIn, user=Depends(auth.require(roles.FREIGEBEN))):
     """Someone with Freigeben approves an open request of someone else, which starts its change at once (the run of its kind:
     api_changes.start_change, the code of /apply). In this order: 404; not open (409 not_open); one's own (approvals.same_person,
-    403 SELF, Admin too); the emergency login (403 EMERGENCY: a shared account, not a person); the switch disabled (409 DISABLED) or
+    403 SELF, Admin too); the emergency login (403 EMERGENCY: a shared account, not a person); an API token (Phase 4c: 403
+    APPROVE_VIA_TOKEN, four eyes mean a person, and a leaked token must not replace one); the switch disabled (409 DISABLED) or
     outside the approver's zones (403); body.token not the request's preview (409 REVIEW_AGAIN: the approver saw another preview).
     Then the run: a plan that is no longer the preview (api_changes.PreviewOutdated) sends nothing and makes the request stale (409
     STALE_REQUEST with the reason; audited and announced when this call made it so) - the reason is OTHER_COMMANDS for other commands
@@ -205,6 +208,8 @@ async def approve_approval(aid: int, body: ApproveIn, user=Depends(auth.require(
         raise HTTPException(403, SELF)
     if user["method"] == "local":
         raise HTTPException(403, EMERGENCY)
+    if user["api_token"]:
+        raise HTTPException(403, APPROVE_VIA_TOKEN)
     row = await api_changes._enabled_row(a["switch_id"])
     if not roles.zone_allows(user, row["zone"]):
         raise HTTPException(403, roles.zone_denial(row["zone"], user["zones"]))

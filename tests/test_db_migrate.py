@@ -373,6 +373,10 @@ PHASE4B_TABLES = {"sightings", "events", "findings", "alert_outbox", "watch_macs
 PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switches", "down_since"), ("switches", "last_ok_at"),
                                          ("switches", "unread_fields"), ("config_backups", "outside"), ("switches", "compliance_cfg_at"),
                                          ("switches", "compliance_snmp_at")}
+# The tables and the columns Phase 4c adds (Tasks 4 and 7 extend both): Task 2 the API tokens (with idx_api_tokens_subject) and the
+# API token an audit entry was made with. A database as Phase 4b left it has none of them, and its audit entries read NULL there.
+PHASE4C_TABLES = {"api_tokens"}
+PHASE4C_COLUMNS: set[tuple[str, str]] = {("audit", "token")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:
@@ -390,35 +394,37 @@ async def _default_of(conn, table: str, column: str):
         return (await cur.fetchone())[0]
 
 
-async def test_migration_adds_the_phase4b_tables_and_columns(data_dir):
-    """A database as Phase 4a left it (db.SCHEMA without the tables of PHASE4B_TABLES, every column of db.ADDED_COLUMNS but those of
-    PHASE4B_COLUMNS, one switch and one backup) gets the tables (empty, with their indexes) and the columns (the rows: the column's
-    default) from init_db, the rows keep what they held; a second init_db changes nothing."""
+@pytest.mark.parametrize("tables, columns", [(PHASE4B_TABLES, PHASE4B_COLUMNS), (PHASE4C_TABLES, PHASE4C_COLUMNS)], ids=["4b", "4c"])
+async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables, columns):
+    """A database as the phase before left it (db.SCHEMA without the tables of tables, every column of db.ADDED_COLUMNS but those of
+    columns, one switch, one backup and one audit entry) gets the tables (empty, with their indexes) and the columns (the rows: the
+    column's default) from init_db, the rows keep what they held; a second init_db changes nothing."""
     path = data_dir / "switchview.db"
     async with aiosqlite.connect(path) as conn:
         await conn.executescript(db.SCHEMA)
-        indexes = await _index_names(conn, PHASE4B_TABLES)
-        for table in PHASE4B_TABLES:
+        indexes = await _index_names(conn, tables)
+        for table in tables:
             await conn.execute(f"DROP TABLE {table}")
         for table, column, definition in db.ADDED_COLUMNS:
-            if (table, column) not in PHASE4B_COLUMNS:
+            if (table, column) not in columns:
                 await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         await conn.execute("INSERT INTO switches (name, host) VALUES ('SW-EK-01', '203.0.113.21')")
         await conn.execute("INSERT INTO config_backups (switch_id, taken_at, sha, content) VALUES (1, '2026-11-01 02:30:00', 'abc', 'x')")
+        await conn.execute("INSERT INTO audit (username, action, target, detail, role) VALUES ('anna', 'login', 'entra', '', 'aendern')")
         await conn.commit()
         # the premise: none of the tables, their indexes or the columns is there yet
-        assert not await _table_names(conn) & PHASE4B_TABLES and not await _index_names(conn, PHASE4B_TABLES)
-        assert set((await _added_state(conn, PHASE4B_COLUMNS)).values()) <= {(None, None)}
-        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups")}
+        assert not await _table_names(conn) & tables and not await _index_names(conn, tables)
+        assert set((await _added_state(conn, columns)).values()) <= {(None, None)}
+        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups", "audit")}
 
     await db.init_db()
 
     async with aiosqlite.connect(path) as conn:
-        assert PHASE4B_TABLES <= await _table_names(conn) and await _index_names(conn, PHASE4B_TABLES) == indexes
-        for table in PHASE4B_TABLES:
+        assert tables <= await _table_names(conn) and await _index_names(conn, tables) == indexes
+        for table in tables:
             async with conn.execute(f"SELECT count(*) FROM {table}") as cur:
                 assert (await cur.fetchone())[0] == 0, table
-        for (table, column), (definition, value) in (await _added_state(conn, PHASE4B_COLUMNS)).items():
+        for (table, column), (definition, value) in (await _added_state(conn, columns)).items():
             assert definition is not None and value == await _default_of(conn, table, column), (table, column)
         for table, row in before.items():
             assert {k: v for k, v in (await _first_row_plain(conn, table)).items() if k in row} == row

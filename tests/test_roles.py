@@ -111,7 +111,8 @@ def test_the_emergency_login_is_admin_also_with_a_mapping(login_api, monkeypatch
     login_api.post("/api/auth/local", json=GOOD)
     me = login_api.get("/api/auth/me").json()
     assert (me["role"], me["zones"], "subject" in me) == ("admin", None, False) and query("SELECT subject FROM sessions") == [("local:admin",)]
-    assert set(me) == {"username", "name", "method", "role", "zones", "idle_minutes", "four_eyes"} and me["idle_minutes"] == 120
+    assert set(me) == {"username", "name", "method", "role", "zones", "idle_minutes", "four_eyes", "api_token"} and me["idle_minutes"] == 120
+    assert me["api_token"] is None
 
 
 @pytest.mark.parametrize("minutes, said", [(1, "1 Minute"), (120, "120 Minuten")])

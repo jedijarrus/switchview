@@ -1,4 +1,5 @@
 """SQLite-Zugriff. Immer ueber db() verbinden (PRAGMAs pro Connection)."""
+import contextvars
 import hashlib
 import os
 import re
@@ -236,6 +237,18 @@ CREATE TABLE IF NOT EXISTS watch_macs (mac TEXT PRIMARY KEY, note TEXT NOT NULL 
 -- id. The user's index carries the collation of its filter (username = ? COLLATE NOCASE): SQLite takes no BINARY index for that.
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit(action, id);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit(username COLLATE NOCASE, id);
+-- Phase 4c, Task 2: the API tokens (app/api_tokens.py, resolved by auth.current_user), one row per token of a person signed in over
+-- SSO: token_hash the db.token_hash of the token (the token itself is shown once, in the answer of POST /api/tokens, and stored
+-- nowhere), name unique per subject, the user name, display name, login method and stable identity (subject) of whoever created it,
+-- claims the app roles of the session it was created in (JSON {"roles": [...]}, from which current_user works out its role on every
+-- request), max_role the role it is capped at (NULL: the role of its user), created_at, expires_at (1-365 days later, never NULL)
+-- and last_used_at (written at most once a minute; NULL: never used), all UTC as "YYYY-MM-DD HH:MM:SS". Listed per subject (GET
+-- /api/tokens), revoked by deleting the row; auth.prune_sessions deletes the expired ones hourly.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, username TEXT NOT NULL, display_name TEXT,
+    method TEXT NOT NULL, subject TEXT NOT NULL, claims TEXT NOT NULL DEFAULT '{}', max_role TEXT, created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL, last_used_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_subject ON api_tokens(subject);
 """
 
 # Spalten, die nach dem Urstand dazugekommen sind: (Tabelle, Spalte, Definition). migrate() ist die EINZIGE Stelle, die sie anlegt,
@@ -311,6 +324,10 @@ ADDED_COLUMNS = (
     # Existing rows have NULL.
     ("switches", "compliance_cfg_at", "TEXT"),
     ("switches", "compliance_snmp_at", "TEXT"),
+    # Phase 4c, Task 2, written by audit(): the API token an entry was made with, "<name> (#<id>)" (auth.token_label), from the
+    # context of its request (AUDIT_TOKEN). NULL for an entry of a session, of the scheduler, without a user, and for every row of
+    # before.
+    ("audit", "token", "TEXT"),
 )
 
 
@@ -369,8 +386,8 @@ _HASHED_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 def token_hash(token: str) -> str:
     """What the sessions table stores in place of a session token: its SHA-256 as 64 hex digits (F4). A copy of the database then
-    holds no value a browser could send as the cookie. The one definition: auth imports it, hash_legacy_session_tokens uses it for
-    the rows of before."""
+    holds no value a browser could send as the cookie. The one definition: auth imports it (also for api_tokens.token_hash, Phase
+    4c: no value a script could send as its API token either), hash_legacy_session_tokens uses it for the rows of before."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -432,13 +449,26 @@ async def write_settings(conn, items: dict[str, str | None]) -> None:
                            list(items.items()))
 
 
+# The API token of the running request (Phase 4c, Task 2): (user name, label of the token, auth.token_label), set by
+# auth.current_user on the bearer path, None (the default) for a session. audit() reads it, so every entry of a request made with a
+# token names the token without a parameter at each call - the change_* entry of a change it started too, since asyncio copies the
+# context into the tasks the request spawns. A job of the scheduler runs in the context of whoever woke the scheduler last
+# (APScheduler wakes itself through call_soon_threadsafe / call_later, which copy the caller's context - a request with an API token
+# that adds a job, for instance), so every job that writes entries with a user name sets the context itself (Task 5 confirm.watch,
+# Task 7 bulk.run).
+AUDIT_TOKEN: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar("AUDIT_TOKEN", default=None)
+
+
 async def audit(username: str | None, action: str, target: str = "", detail: str = "", *, role: str | None):
     """One audit entry. role is required as a keyword, so no call can forget it (tests/test_permissions.py checks every call): the
     role of the request (user["role"]), of the new session for a login, of whoever started a change for its change_* entry, None
-    for a failed login."""
+    for a failed login. The entry names the API token of AUDIT_TOKEN (audit.token) when its user name is the context's, the case
+    aside; an entry of anyone else, and one without a user (approval_expired), never names a token."""
+    via = AUDIT_TOKEN.get()
+    token = via[1] if via and username is not None and username.casefold() == via[0].casefold() else None
     async with db() as conn:
         await conn.execute(
-            "INSERT INTO audit(username, action, target, detail, role) VALUES(?, ?, ?, ?, ?)",
-            (username, action, target, detail, role),
+            "INSERT INTO audit(username, action, target, detail, role, token) VALUES(?, ?, ?, ?, ?, ?)",
+            (username, action, target, detail, role, token),
         )
         await conn.commit()

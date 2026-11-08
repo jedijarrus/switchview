@@ -438,6 +438,15 @@ def test_the_emergency_login_approves_nothing(world, client):
     assert approve(client, aid, "notfall").json()["detail"] == api_approvals.EMERGENCY
 
 
+def test_a_token_never_approves(world, client):                                        # Phase 4c: four eyes means a person
+    four_eyes()
+    aid = ask(client, world)[1].json()["id"]
+    USERS["bot"] = apifix.user("freigeben", "bot") | {"api_token": {"id": 1, "name": "ci"}}
+    r = approve(client, aid, "bot")
+    assert (r.status_code, r.json()["detail"]) == (403, api_approvals.APPROVE_VIA_TOKEN) and dbfix.query("SELECT status FROM approvals") == [
+        ("open",)]
+
+
 def test_the_token_must_be_the_requests(world, client):
     four_eyes()
     aid = ask(client, world)[1].json()["id"]

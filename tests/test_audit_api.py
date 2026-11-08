@@ -75,8 +75,8 @@ def test_the_audit_csv_exports_the_filter_with_formula_cells_quoted(api):
     r = api.get("/api/audit.csv", params={"action": "login"})
     assert r.headers["content-type"].startswith("text/csv")
     assert r.headers["content-disposition"].startswith('attachment; filename="switchview-protokoll-')
-    assert r.text.lstrip("\ufeff").splitlines() == ["Zeit (UTC);Benutzer;Rolle;Aktion;Ziel;Details",
-                                                    "2026-11-07 10:00:00;anna;Admin;login;;'=cmd|' /C calc'!A0"]
+    assert r.text.lstrip("\ufeff").splitlines() == ["Zeit (UTC);Benutzer;Rolle;Aktion;Ziel;Details;API-Token",
+                                                    "2026-11-07 10:00:00;anna;Admin;login;;'=cmd|' /C calc'!A0;"]
 
 
 def test_a_zone_limited_user_reads_the_whole_audit(api):
@@ -93,7 +93,8 @@ def test_a_zone_limited_user_reads_the_whole_audit(api):
 def test_an_entry_carries_its_fields(api):
     rid = entry(user="ben", action="device_update", target="aa:bb:cc:00:00:01", detail="Drucker freigegeben=1", role="aendern")
     assert api.get("/api/audit").json() == {"rows": [{"id": rid, "ts": "2026-11-07 10:00:00", "username": "ben", "action": "device_update",
-                                                      "target": "aa:bb:cc:00:00:01", "detail": "Drucker freigegeben=1", "role": "aendern"}],
+                                                      "target": "aa:bb:cc:00:00:01", "detail": "Drucker freigegeben=1", "role": "aendern",
+                                                      "token": None}],
                                             "next": None}
 
 
@@ -187,7 +188,7 @@ def test_the_csv_names_the_role_in_german_keeps_the_order_and_stops_at_its_maxim
         entry(user=None if role is None else "anna", action="login" if role else "login_failed", role=role)
     lines = api.get("/api/audit.csv", params={"order": "asc"}).text.lstrip("\ufeff").splitlines()
     assert [line.split(";")[2] for line in lines[1:]] == ["Lesen", "Ändern", "Freigeben", "Admin", ""]
-    assert lines[-1] == "2026-11-07 10:00:00;;;login_failed;;"
+    assert lines[-1] == "2026-11-07 10:00:00;;;login_failed;;;"
     assert api.get("/api/audit.csv").text.lstrip("\ufeff").splitlines()[1].startswith("2026-11-07 10:00:00;;;login_failed")
     monkeypatch.setattr(history, "EXPORT_MAX", 2)
     assert len(api.get("/api/audit.csv").text.lstrip("\ufeff").splitlines()) == 3
@@ -223,3 +224,11 @@ def test_an_empty_filter_is_still_a_filter(api):
 
 def test_no_filter_is_the_whole_audit():
     assert asyncio.run(api_settings.audit_filter()) == ("1", [])
+
+
+# ── Phase 4c, Task 2: the API token of an entry ───────────────────────────────────────────────────────────────────────────────────
+def test_the_audit_names_the_token_and_finds_it(api):
+    dbfix.query("INSERT INTO audit(ts, username, action, target, detail, role, token) VALUES "
+                "('2026-11-08 10:00:00', 'anna', 'watch_add', 'aa:bb:cc:dd:ee:ff', '', 'aendern', 'ci (#3)')")
+    assert [r["token"] for r in api.get("/api/audit", params={"q": "ci (#3"}).json()["rows"]] == ["ci (#3)"]
+    assert api.get("/api/audit.csv").text.rstrip().endswith(";ci (#3)")

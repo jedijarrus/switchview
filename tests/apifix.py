@@ -24,9 +24,10 @@ import main
 
 
 def user(role: str, name: str = "tester", *, method: str = "entra", subject: str | None = None, zones: list[str] | None = None) -> dict:
-    """A signed-in user as auth.current_user returns it: role one of roles.ORDER, subject <method>:<name> unless given, zones None
-    (no zone scope) unless given."""
-    return {"username": name, "name": name.title(), "method": method, "role": role, "subject": subject or f"{method}:{name}", "zones": zones}
+    """A signed-in user as auth.current_user returns it for a session: role one of roles.ORDER, subject <method>:<name> unless given,
+    zones None (no zone scope) unless given, api_token None (a request with an API token carries {"id", "name"} there)."""
+    return {"username": name, "name": name.title(), "method": method, "role": role, "subject": subject or f"{method}:{name}", "zones": zones,
+            "api_token": None}
 
 
 USER: dict = user("admin", method="local")      # the test user of every API fixture: the emergency login, Admin

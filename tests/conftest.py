@@ -99,9 +99,10 @@ def sample_running_config() -> str:
 def login_api(tmp_path, monkeypatch):
     """A TestClient on main.app that sends the CSRF header, without dependency_overrides: every request goes through the real login
     and session code. Its database is a fresh one under tmp_path, set up by the app's own init_db; the settings switch on the
-    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle is a fresh one, no JWKS reload, no
-    failed JWKS fetch and no used SSO nonce is on record, and the scheduler is booby-trapped (apifix.never). The client is created
-    without `with`, so the app's lifespan never runs. The app modules are imported here, not at the top, like in _test_environment."""
+    emergency account of loginfix.GOOD and SSO (tenant "t", client "c"); the login throttle and the throttle of invalid API tokens are
+    fresh ones, no JWKS reload, no failed JWKS fetch and no used SSO nonce is on record, and the scheduler is booby-trapped
+    (apifix.never). The client is created without `with`, so the app's lifespan never runs. The app modules are imported here, not
+    at the top, like in _test_environment."""
     import asyncio
 
     from fastapi.testclient import TestClient
@@ -119,12 +120,26 @@ def login_api(tmp_path, monkeypatch):
     for module in (db, auth, main):
         monkeypatch.setattr(module, "settings", s)
     monkeypatch.setattr(main, "_LOGIN", throttle.LoginThrottle())
+    monkeypatch.setattr(auth, "_TOKENS", throttle.LoginThrottle())    # and no invalid API token
     monkeypatch.setattr(auth, "_jwks_refreshed", {})
     monkeypatch.setattr(auth, "_jwks_failed", {})
     monkeypatch.setattr(auth, "_used_nonces", {})    # every login of a test starts without a remembered SSO nonce
     monkeypatch.setattr(main.scheduler, "start", apifix.never)
     asyncio.run(db.init_db())
     return TestClient(main.app, headers=CSRF)
+
+
+@pytest.fixture
+def mapping(login_api, monkeypatch):
+    """login_api with ENTRA_ROLE_MAPPING=on for auth and main (imported here, like the app modules in login_api)."""
+    import dataclasses
+
+    import auth
+    import main
+    s = dataclasses.replace(main.settings, entra_role_mapping="on")
+    for module in (main, auth):
+        monkeypatch.setattr(module, "settings", s)
+    return login_api
 
 
 @pytest.fixture

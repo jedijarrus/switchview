@@ -20,6 +20,7 @@ import api_devices
 import api_history
 import api_settings
 import api_switches
+import api_tokens
 import approvals
 import auth
 import bodylimit
@@ -57,6 +58,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 # auth._jwks_failed): each worker would fetch from Microsoft and wait out the 30 s after a failed fetch on its own.
 # The used SSO nonces are in-process as well (auth._used_nonces): another worker would accept a nonce this one has seen.
 # The alert queue (alert_outbox) is delivered by a scheduler job: a second worker would send every message twice.
+# The throttle of invalid API tokens is in-process as well (auth._TOKENS): each worker would count its own failures.
 
 
 # The start warnings about SSO (check_startup_config): an open login gate, without and with the role mapping, and SSO without it
@@ -285,10 +287,12 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
 
 @app.get("/api/auth/me")
 async def me(user=Depends(auth.require(roles.LESEN))):
-    """The signed-in user for the page: name, role, zones, the idle limit and whether the four-eyes principle is on (approvals.policy);
-    not the subject (it is for the server's comparisons)."""
+    """The signed-in user for the page: name, role, zones, the idle limit, whether the four-eyes principle is on (approvals.policy)
+    and the name of the API token a request was made with (Phase 4c; null for a session); not the subject (it is for the server's
+    comparisons)."""
     return {"username": user["username"], "name": user["name"], "method": user["method"], "role": user["role"], "zones": user["zones"],
-            "idle_minutes": settings.idle_minutes, "four_eyes": (await approvals.policy())["four_eyes"]}
+            "idle_minutes": settings.idle_minutes, "four_eyes": (await approvals.policy())["four_eyes"],
+            "api_token": user["api_token"]["name"] if user["api_token"] else None}
 
 
 @app.post("/api/auth/logout")
@@ -369,3 +373,4 @@ app.include_router(topology.router)
 app.include_router(api_approvals.router)    # Phase 4a, Task 6
 app.include_router(api_history.router)    # Phase 4b
 app.include_router(api_alerts.router)    # Phase 4b, Task 6
+app.include_router(api_tokens.router)    # Phase 4c, Task 2

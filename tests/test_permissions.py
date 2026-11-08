@@ -108,7 +108,12 @@ MATRIX_4B: dict = {
     ("DELETE", "/api/watch/{mac}"): "aendern",
     ("GET", "/api/audit.csv"): "lesen",
 }
-MATRIX_4C: dict = {}
+MATRIX_4C: dict = {
+    ("POST", "/api/tokens"): "lesen",
+    ("GET", "/api/tokens"): "lesen",
+    ("DELETE", "/api/tokens/{tid}"): "lesen",
+    ("GET", "/api/settings/tokens"): "admin",
+}
 MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C
 
 

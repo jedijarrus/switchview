@@ -3,6 +3,7 @@ import functools
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import threading
@@ -14,10 +15,12 @@ import jwt
 from fastapi import Depends, HTTPException, Request
 
 import roles
+import throttle
 from config import settings
 from crypto import keyed_digest
-from db import db, token_hash
+from db import AUDIT_TOKEN, db, token_hash
 
+log = logging.getLogger("switchview.auth")
 COOKIE = "sv_session"
 # The device cookie of the emergency login: a browser in which it succeeded once carries a MAC-signed nonce bound to the user, and the
 # login throttle counts that browser's failures apart from all others (main.login_local), so an attacker cannot lock it out.
@@ -56,6 +59,29 @@ TOUCH_S = 60
 PUBLIC_ROUTES = frozenset({("GET", "/"), ("GET", "/static/{name}"), ("GET", "/static/fonts/{name}"), ("GET", "/api/auth/config"),
                            ("POST", "/api/auth/nonce"), ("POST", "/api/auth/local"), ("POST", "/api/auth/azure"),
                            ("POST", "/api/auth/logout")})
+# The API tokens of Phase 4c (Task 2; the routes are app/api_tokens.py): "svt_" + secrets.token_urlsafe(32), 256 random bits, the
+# prefix so that secret scanners and people recognise a leaked one. A request with "Authorization: Bearer svt_..." is signed in by
+# its token alone (current_user, _token_user); its times are UTC in the format of the column (TOKEN_TIME), never isoformat(): as
+# text "2026-11-08 10:00:00" < "2026-11-08T09:00:00", a token would end hours early on the day of its expiry.
+TOKEN_PREFIX = "svt_"
+TOKEN_DEFAULT_DAYS = 90
+TOKEN_MAX_DAYS = 365
+TOKENS_PER_USER = 20
+TOKEN_TIME = "%Y-%m-%d %H:%M:%S"
+TOKEN_BAD = "API-Token ungültig, abgelaufen oder widerrufen"
+TOKEN_THROTTLED = "Zu viele ungültige API-Tokens, bitte eine Minute warten"
+# Invalid API tokens count under the one key "bearer" (never the client address, which a client forges, as for the emergency login),
+# and only after the lookup: a valid token is never throttled, so no attacker can lock out the scripts. A token cannot be guessed
+# (256 bits): the throttle keeps the log and the answers small, it does not stop anyone guessing.
+_TOKENS = throttle.LoginThrottle()
+
+
+class TokenLimit(Exception):
+    """create_token: the subject has TOKENS_PER_USER API tokens already."""
+
+
+class TokenNameTaken(Exception):
+    """create_token: the subject has an API token of this name already."""
 
 
 def _jwks_client(tenant: str):
@@ -209,10 +235,12 @@ async def _delete_expired(conn) -> int:
 
 
 async def prune_sessions() -> int:
-    """Deletes every expired or idle session (_delete_expired) and returns how many: hourly by the scheduler (main._schedule) and
-    once at the start (main.lifespan), so the table does not grow between logins."""
+    """Deletes every expired or idle session (_delete_expired) and returns how many, and (Phase 4c) every expired API token, which
+    the count leaves out: hourly by the scheduler (main._schedule) and once at the start (main.lifespan), so neither table grows
+    between logins. Until then an expired token is refused like an unknown one (_token_user)."""
     async with db() as conn:
         pruned = await _delete_expired(conn)
+        await conn.execute("DELETE FROM api_tokens WHERE expires_at < ?", (_token_now(),))
         await conn.commit()
     return pruned
 
@@ -262,6 +290,22 @@ async def drop_user_sessions(username: str) -> int:
     return ended
 
 
+def _token_now() -> str:
+    """Now in UTC as the times of api_tokens are written (TOKEN_TIME), for comparing with them."""
+    return datetime.now(timezone.utc).strftime(TOKEN_TIME)
+
+
+def _stored_roles(claims: str | None) -> list[str]:
+    """The app roles a session or an API token stored (claims, JSON {"roles": [...]}); [] without any (a session of before)."""
+    return (json.loads(claims) if claims else {}).get("roles") or []
+
+
+async def _zone_scopes(conn) -> list[tuple[str, str]]:
+    """The (principal, zone) entries of the zone list of now, read on conn."""
+    async with conn.execute("SELECT principal, zone FROM zone_scopes") as cur:
+        return [(r["principal"], r["zone"]) for r in await cur.fetchall()]
+
+
 def idle_reason(minutes: int) -> str:
     """The detail of the 401 for a session idle longer than minutes (settings.idle_minutes), one minute in the singular."""
     said = "1 Minute" if minutes == 1 else f"{minutes} Minuten"
@@ -271,12 +315,20 @@ def idle_reason(minutes: int) -> str:
 async def current_user(request: Request) -> dict:
     """The signed-in user of request: username, name, method, role (roles.role_of from the roles the session stored at its login,
     against the mapping of now: a changed mapping counts from the restart that reads it, without a new login), subject (the stable
-    identity; a session of before the update has none and gets <method>:<username>) and zones (roles.zones_of: for Ändern and
+    identity; a session of before the update has none and gets <method>:<username>), zones (roles.zones_of: for Ändern and
     Freigeben from the stored roles against the zone_scopes of now, read on the same connection, so a new entry counts at once;
-    None, no zone scope and no read, for every other role). 401 without a session, for an expired one, and for one idle longer than
-    settings.idle_minutes (then deleted, idle_reason; a session that never recorded a request, from before the update, is not idle); 403
-    for a write without the CSRF header. Every request that passes counts as activity: last_seen is written when it is unset or at
-    least TOUCH_S old."""
+    None, no zone scope and no read, for every other role) and api_token (Phase 4c: None for a session). 401 without a session, for
+    an expired one, and for one idle longer than settings.idle_minutes (then deleted, idle_reason; a session that never recorded a
+    request, from before the update, is not idle); 403 for a write without the CSRF header. Every request that passes counts as
+    activity: last_seen is written when it is unset or at least TOUCH_S old.
+
+    A request with an API token (bearer_of: "Authorization: Bearer svt_...") is decided by the token alone (_token_user): the same
+    dict, api_token its id and name; it never reads the cookie, so an invalid token is a 401 also next to a valid cookie, and it needs
+    no CSRF header (that header protects the cookie, which such a request never reads, and a foreign page cannot set Authorization
+    without a CORS grant). Any other Authorization header takes the cookie path as before."""
+    api_token = bearer_of(request)
+    if api_token is not None:
+        return await _token_user(request, api_token)
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "Nicht angemeldet")
@@ -298,13 +350,120 @@ async def current_user(request: Request) -> dict:
             await conn.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now.isoformat(), hashed))
             await conn.commit()
         username, method = row["username"], row["method"]
-        claim = (json.loads(row["claims"]) if row["claims"] else {}).get("roles") or []
-        role, scopes = roles.role_of(method, claim, settings), []
-        if role in roles.SCOPED:
-            async with conn.execute("SELECT principal, zone FROM zone_scopes") as cur:
-                scopes = [(r["principal"], r["zone"]) for r in await cur.fetchall()]
+        claim = _stored_roles(row["claims"])
+        role = roles.role_of(method, claim, settings)
+        scopes = await _zone_scopes(conn) if role in roles.SCOPED else []
     return {"username": username, "name": row["display_name"] or username, "method": method, "role": role,
-            "subject": row["subject"] or f"{method}:{username}", "zones": roles.zones_of(role, claim, scopes)}
+            "subject": row["subject"] or f"{method}:{username}", "zones": roles.zones_of(role, claim, scopes), "api_token": None}
+
+
+# ── API tokens (Phase 4c, Task 2) ─────────────────────────────────────────────
+def bearer_of(request: Request) -> str | None:
+    """The API token of request's Authorization header: the header, without the whitespace at its ends, splits at its first
+    whitespace into scheme and rest; with the scheme bearer (any case) and a rest that starts, without the whitespace at its ends,
+    with TOKEN_PREFIX, that rest. Otherwise None, and current_user takes the cookie path as before: without the header, with another
+    scheme (Basic ...), with "Bearer" without a value, and with a bearer value without svt_ - a reverse proxy in front may set one of
+    its own (oauth2-proxy with --pass-authorization-header passes its id_token so); refusing those would lock out every session
+    behind such a proxy and fill the throttle with every request."""
+    parts = request.headers.get("authorization", "").split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip().startswith(TOKEN_PREFIX):
+        return parts[1].strip()
+    return None
+
+
+def token_label(row) -> str:
+    """How the audit names an API token (audit.token): "<name> (#<id>)"."""
+    return f"{row['name']} (#{row['id']})"
+
+
+async def _token_user(request: Request, api_token: str) -> dict:
+    """The user of an API token (current_user's bearer path), as a session's dict: the user name, name, method and subject of whoever
+    created it; the role per request from the app roles of the session it was created in, against the mapping of now (roles.role_of),
+    capped at its max_role (roles.cap); the zones likewise (for Ändern and Freigeben against the zone_scopes of now, on the same
+    connection); api_token its id and name. No new check at Microsoft, as for a session: an app role taken away in Entra counts for
+    a token only with its expiry or revocation. An unknown or expired token (expires_at before now, compared as TOKEN_TIME) is 401
+    TOKEN_BAD, logged with the client's address and counted under "bearer" (_TOKENS); while "bearer" is blocked, every further invalid
+    one is 429 TOKEN_THROTTLED instead, not logged. The lookup comes first, so a valid token is never throttled. last_used_at is
+    written when it is unset or at least TOUCH_S old. Sets AUDIT_TOKEN for the request: every audit entry of its user names the token."""
+    now = datetime.now(timezone.utc)
+    async with db() as conn:
+        async with conn.execute("SELECT id, name, username, display_name, method, subject, claims, max_role, expires_at, last_used_at "
+                                "FROM api_tokens WHERE token_hash = ?", (token_hash(api_token),)) as cur:
+            row = await cur.fetchone()
+        if not row or row["expires_at"] < now.strftime(TOKEN_TIME):
+            if _TOKENS.blocked(["bearer"]):
+                raise HTTPException(429, TOKEN_THROTTLED)
+            _TOKENS.fail(["bearer"])
+            log.warning("API-Token abgelehnt (%s) von %s", "abgelaufen" if row else "unbekannt", request.client.host if request.client else "?")
+            raise HTTPException(401, TOKEN_BAD)
+        last_used = row["last_used_at"]
+        if not last_used or last_used <= (now - timedelta(seconds=TOUCH_S)).strftime(TOKEN_TIME):
+            await conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now.strftime(TOKEN_TIME), row["id"]))
+            await conn.commit()
+        claim = _stored_roles(row["claims"])
+        role = roles.cap(roles.role_of(row["method"], claim, settings), row["max_role"])
+        scopes = await _zone_scopes(conn) if role in roles.SCOPED else []
+    AUDIT_TOKEN.set((row["username"], token_label(row)))
+    return {"username": row["username"], "name": row["display_name"] or row["username"], "method": row["method"], "role": role,
+            "subject": row["subject"], "zones": roles.zones_of(role, claim, scopes), "api_token": {"id": row["id"], "name": row["name"]}}
+
+
+async def session_claims(request: Request) -> list[str]:
+    """The app roles the session of request's cookie stored at its login (what an API token created in it copies); [] without one."""
+    token = request.cookies.get(COOKIE)
+    if not token:
+        return []
+    async with db() as conn:
+        async with conn.execute("SELECT claims FROM sessions WHERE token = ?", (token_hash(token),)) as cur:
+            row = await cur.fetchone()
+    return _stored_roles(row["claims"]) if row else []
+
+
+async def create_token(user: dict, claims: list[str], name: str, days: int, max_role: str | None) -> dict:
+    """A new API token of user (as current_user returns it) named name, good for days days, capped at max_role (None: the role of
+    its user), with claims, the app roles of the session it is created in: {"id", "name", "token", "expires_at", "max_role"}, the
+    one answer that ever holds the token (the table keeps its token_hash). Every token expires; there is none without expires_at.
+    Counts, checks the name and inserts in one write transaction (BEGIN IMMEDIATE), so two at once cannot pass the limits:
+    TokenLimit when user's subject has TOKENS_PER_USER tokens, TokenNameTaken when it has one named name; nothing is stored then."""
+    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    created, expires = now.strftime(TOKEN_TIME), (now + timedelta(days=days)).strftime(TOKEN_TIME)
+    async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT name FROM api_tokens WHERE subject = ?", (user["subject"],)) as cur:
+            names = [r["name"] for r in await cur.fetchall()]
+        if len(names) >= TOKENS_PER_USER or name in names:
+            await conn.rollback()
+            raise TokenLimit() if len(names) >= TOKENS_PER_USER else TokenNameTaken()
+        cur = await conn.execute("INSERT INTO api_tokens(token_hash, name, username, display_name, method, subject, claims, max_role, "
+                                 "created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                 (token_hash(token), name, user["username"], user["name"], user["method"], user["subject"],
+                                  json.dumps({"roles": claims}), max_role, created, expires))
+        await conn.commit()
+    return {"id": cur.lastrowid, "name": name, "token": token, "expires_at": expires, "max_role": max_role}
+
+
+async def list_tokens(subject: str | None) -> list[dict]:
+    """The API tokens of subject (None: every one), newest first: id, name, username, display_name, max_role, created_at,
+    expires_at, last_used_at and expired (expires_at before now: refused, until the hourly prune deletes it); never the hash."""
+    where, args = ("WHERE subject = ?", (subject,)) if subject is not None else ("", ())
+    async with db() as conn:
+        async with conn.execute("SELECT id, name, username, display_name, max_role, created_at, expires_at, last_used_at FROM api_tokens "
+                                f"{where} ORDER BY id DESC", args) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    now = _token_now()
+    return [r | {"expired": r["expires_at"] < now} for r in rows]
+
+
+async def revoke_token(tid: int, user: dict) -> dict | None:
+    """Deletes API token tid if it is one of user's subject, or any as Admin: the deleted row (id, name, username, subject), None
+    without such a token - someone else's is as unknown as a missing one. A script with it is refused from its next request on."""
+    mine, args = ("", (tid,)) if user["role"] == roles.ADMIN else (" AND subject = ?", (tid, user["subject"]))
+    async with db() as conn:
+        async with conn.execute(f"DELETE FROM api_tokens WHERE id = ?{mine} RETURNING id, name, username, subject", args) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        await conn.commit()
+    return rows[0] if rows else None
 
 
 @functools.cache
