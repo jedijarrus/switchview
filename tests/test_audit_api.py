@@ -108,7 +108,7 @@ def test_a_page_holds_100_entries_unless_asked_for_up_to_500(api):
 
 
 @pytest.mark.parametrize("params", [{"q": "x" * 101}, {"action": "x" * 41}, {"user": "x" * 101}, {"role": "gast"}, {"role": ""},
-                                    {"since": "2026-11-07" + " " * 31}, {"until": "x" * 41}, {"order": "up"}, {"cursor": 0},
+                                    {"since": "2026-11-07" + " " * 31}, {"until": "2026-11-07" + " " * 31}, {"order": "up"}, {"cursor": 0},
                                     {"cursor": 2 ** 63}, {"switch_id": 0}, {"switch_id": 2 ** 63}, {"limit": 0}, {"limit": 501}])
 def test_what_is_out_of_bounds_is_a_422(api, params):
     """A larger integer than SQLite stores would fail in the query as a 500 (like the cursor of the history, T3-h)."""

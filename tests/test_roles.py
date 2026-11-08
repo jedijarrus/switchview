@@ -114,11 +114,15 @@ def test_the_emergency_login_is_admin_also_with_a_mapping(login_api, monkeypatch
     assert set(me) == {"username", "name", "method", "role", "zones", "idle_minutes", "four_eyes"} and me["idle_minutes"] == 120
 
 
-def test_an_idle_session_ends(login_api):
+@pytest.mark.parametrize("minutes, said", [(1, "1 Minute"), (120, "120 Minuten")])
+def test_an_idle_session_ends(login_api, monkeypatch, minutes, said):
+    """The 401 of current_user itself, one minute in the singular (final review: the helper alone was tested so, and 120 minutes read
+    the same in either form)."""
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, idle_minutes=minutes))
     login_api.post("/api/auth/local", json=GOOD)
-    query(f"UPDATE sessions SET last_seen = '{(datetime.now(timezone.utc) - timedelta(minutes=121)).isoformat()}'")
+    query(f"UPDATE sessions SET last_seen = '{ago(minutes=minutes, seconds=5)}'")
     r = login_api.get("/api/auth/me")
-    assert (r.status_code, r.json()["detail"]) == (401, "Abgemeldet nach 120 Minuten ohne Aktivität – bitte neu anmelden") and query(
+    assert (r.status_code, r.json()["detail"]) == (401, f"Abgemeldet nach {said} ohne Aktivität – bitte neu anmelden") and query(
         "SELECT count(*) FROM sessions") == [(0,)]
 
 

@@ -22,7 +22,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from fastapi import HTTPException
+from test_alerts import configure
 
+import alerts
 import api_approvals
 import api_changes
 import apifix
@@ -349,20 +351,28 @@ def test_an_approval_starts_the_change_through_start_change(world, client):
         ("ben", "approval_approved", "freigeben"), ("ben", "approval_run", "freigeben")] and heard == [("approved", aid)]
 
 
-@pytest.mark.parametrize("change", [lambda: setattr(STATE, "shown", ["vlan 30 untagged 6"]),
-                                    lambda: setattr(STATE, "blocked", [{"port": "6", "reason": "x"}])],
+@pytest.mark.parametrize("change, reason", [(lambda: setattr(STATE, "shown", ["vlan 30 untagged 6"]), api_approvals.OTHER_COMMANDS),
+                                            (lambda: setattr(STATE, "blocked", [{"port": "6", "reason": "x"}]), "Nicht ausführbar: 6: x")],
                          ids=["other-plan", "blocked"])
-def test_a_changed_switch_makes_the_request_stale_and_sends_nothing(world, client, change):
+def test_a_changed_switch_makes_the_request_stale_and_sends_nothing(world, client, change, reason):
+    """The reason is OTHER_COMMANDS for other commands than the preview's and the refusal word for word for a blocked port - stored,
+    audited, in the 409 and, since Phase 4b (Task 7), in the alert of the step (final review: a reason that was OTHER_COMMANDS
+    whatever the refusal passed every test)."""
     four_eyes()
     aid = ask(client, world)[1].json()["id"]
     change()
     heard = listen()
+    asyncio.run(configure(mail=True, events=["approval"]))
+    approvals.subscribe(alerts.on_approval)    # world unsubscribed it
     assert client.post(f"/api/approvals/{aid}/preview", headers=H("ben")).json()["matches"] is False
     r = approve(client, aid, "ben")
-    assert r.status_code == 409 and r.json()["detail"].startswith(api_approvals.STALE_REQUEST)
+    assert (r.status_code, r.json()["detail"]) == (409, f"{api_approvals.STALE_REQUEST} ({reason})")
     assert (ran, dbfix.query("SELECT count(*) FROM changes"), client.get(f"/api/approvals/{aid}", headers=H("ben")).json()["status"]) == (
         [], [(0,)], "stale")
-    assert dbfix.query("SELECT action FROM audit WHERE action = 'approval_stale'") == [("approval_stale",)] and heard == [("stale", aid)]
+    assert dbfix.query("SELECT reason FROM approvals") == [(reason,)] and heard == [("stale", aid)]
+    assert dbfix.query("SELECT detail FROM audit WHERE action = 'approval_stale'") == [(f"#{aid} Port 6: VLAN 20: {reason}",)]
+    assert dbfix.query("SELECT title, text FROM alert_outbox") == [
+        (f"Freigabe #{aid} veraltet", f"Port 6: VLAN 20 an SW, angefordert von Anna, entschieden von ben – {reason}")]
 
 
 def test_a_busy_switch_or_an_unreadable_one_leaves_the_request_open(world, client, monkeypatch):

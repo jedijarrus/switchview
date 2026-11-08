@@ -421,8 +421,9 @@ async def test_a_narrowed_view_is_no_drift_when_it_comes_nor_when_it_goes(net, m
     await poller.poll_switch(sid)                                       # compared with the narrowed poll: no drift either
     assert events() == []
     revalue(net, "10.0.0.3", CATALYST, pvid={"1": "20"}, ifAlias={"10101": "Büro"}, ifAdmin={"10101": "2"})
-    await poller.poll_switch(sid)                                       # and the next one compares again
-    assert [port for _, port, _ in events()] == ["Gi1/0/1"]
+    await poller.poll_switch(sid)                                       # and the next one compares again, every field of it
+    assert events() == [("drift_port", "Gi1/0/1", "Port Gi1/0/1 außerhalb von SwitchView geändert: PVID 10 → 20; Status an → aus; "
+                                                   "Name „Drucker“ → „Büro“")]
 
 
 @pytest.mark.parametrize("note, want", [("Teilweise gelesen: vlanEgress fehlgeschlagen (Timeout)", []), (None, ["Gi1/0/1"])],
