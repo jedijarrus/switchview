@@ -843,10 +843,8 @@ def test_the_deliveries_page_newest_first_by_a_cursor(api):
     assert [[r["id"] for r in p["rows"]] for p in (first, second, third)] == [[5, 4], [3, 2], [1]] and third["next"] is None
 
 
-@pytest.mark.parametrize("cursor", [None, 7])
-async def test_a_page_of_one_status_walks_its_index_and_sorts_nothing(database, monkeypatch, cursor):
-    # At HISTORY_DAYS some 268 000 sent rows stand (31 an hour, two channels, 180 days): sorting every row of a status for one
-    # page took about 160 ms, idx_outbox_status (status, id) gives the page in the order it is asked for
+def recorded_sql(monkeypatch) -> list[tuple[str, tuple]]:
+    """From now on every (sql, args) alerts runs on a connection of alerts.db, in order."""
     ran = []
     real = alerts.db
 
@@ -863,10 +861,40 @@ async def test_a_page_of_one_status_walks_its_index_and_sorts_nothing(database, 
             yield conn
 
     monkeypatch.setattr(alerts, "db", recording)
+    return ran
+
+
+def query_plan(sql: str, args: tuple) -> list[str]:
+    return [row[3] for row in dbfix.query("EXPLAIN QUERY PLAN " + sql, args)]
+
+
+@pytest.mark.parametrize("cursor", [None, 7])
+async def test_a_page_of_one_status_walks_its_index_and_sorts_nothing(database, monkeypatch, cursor):
+    # At HISTORY_DAYS some 268 000 sent rows stand (31 an hour, two channels, 180 days): sorting every row of a status for one
+    # page took about 160 ms, idx_outbox_status (status, id) gives the page in the order it is asked for
+    ran = recorded_sql(monkeypatch)
     await alerts.deliveries(status="sent", cursor=cursor)
     [(sql, args)] = ran
-    plan = [row[3] for row in dbfix.query("EXPLAIN QUERY PLAN " + sql, args)]
+    plan = query_plan(sql, args)
     assert len(plan) == 1 and re.search(r" USING (COVERING )?INDEX idx_outbox_status\b", plan[0]), plan
+
+
+async def test_emit_counts_the_hour_of_a_channel_on_its_own_index(database, monkeypatch):
+    # Final review: on idx_outbox_key only channel=? was usable, so the count read every retained row of the channel (14.9 ms at the
+    # 267 840 rows that go out in HISTORY_DAYS, the suppressed ones on top, without bound with HISTORY_DAYS=0) inside BEGIN IMMEDIATE
+    # on the poll path; idx_outbox_hour (channel, created_at) reads the last hour only. The dedup and the summary's check keep
+    # idx_outbox_key with all three of its columns
+    await configure(mail=True)
+    for i in range(alerts.CAP_PER_HOUR):
+        await alerts.emit("reachability", "T", "x", key=str(i))
+    ran = recorded_sql(monkeypatch)
+    assert await alerts.emit("reachability", "T", "x", key="late") == 1    # the dedup, the count, the summary's check
+    plans = {sql.split()[0] + (" count" if "count(*)" in sql else ""): query_plan(sql, args) for sql, args in ran
+             if sql.startswith(("SELECT", "UPDATE"))}
+    assert sorted(plans) == ["SELECT", "SELECT count", "UPDATE"], ran
+    assert plans["SELECT count"] == ["SEARCH alert_outbox USING INDEX idx_outbox_hour (channel=? AND created_at>?)"]
+    assert plans["SELECT"] == ["SEARCH alert_outbox USING COVERING INDEX idx_outbox_key (channel=? AND dedup_key=? AND created_at>?)"]
+    assert any("USING INDEX idx_outbox_key (channel=? AND dedup_key=? AND created_at>?)" in step for step in plans["UPDATE"]), plans
 
 
 @pytest.mark.parametrize("query", ["status=offen", "limit=0", "limit=101", "cursor=0"])

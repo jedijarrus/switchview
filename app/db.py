@@ -224,6 +224,9 @@ CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(channel, dedup_key, cr
 CREATE INDEX IF NOT EXISTS idx_outbox_created ON alert_outbox(created_at);
 -- A page of one status, newest first (GET /api/alerts/deliveries?status=...): without it, every row of that status is sorted per page
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status, id);
+-- emit's count of the last hour of a channel (in its write transaction, on the poll path): idx_outbox_key serves only channel=? for
+-- it, so without this one the count reads every retained row of the channel, the suppressed ones too
+CREATE INDEX IF NOT EXISTS idx_outbox_hour ON alert_outbox(channel, created_at);
 -- Phase 4b, Task 7: the MAC watch list (app/history.py), one row per watched MAC ("aa:bb:cc:dd:ee:ff", api_devices.norm_mac) with
 -- the note of whoever added it, their user name and when (UTC). A recording (history.record) that sees one of them for the first
 -- time, at another place or back after an absence tells it (alerts.announce_sightings, the event watch). Kept by Ändern
