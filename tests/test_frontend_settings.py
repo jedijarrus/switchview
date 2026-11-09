@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 STORED = {"poll_minutes": 15, "opnsense_url": "https://fw.example", "opnsense_key_set": True, "opnsense_secret_set": True, "opnsense_verify_tls": True,
           "radius_server": "192.0.2.1", "radius_key_set": True, "pf_url": "https://pf.example:9999", "pf_user": "webapi", "pf_pass_set": True,
           "pf_verify_tls": True, "unreadable": [], "four_eyes": False, "approval_hours": 24}
-SECTIONS = ["set-general", "set-names", "set-pf", "rmm-set", "alert-card", "set-zones", "set-4e", "rules-card", "set-sessions", "tok-card"]
+SECTIONS = ["set-general", "set-names", "set-pf", "alert-card", "set-zones", "set-4e", "rules-card", "set-sessions", "tok-card"]
 # renderSettings as role with the stored settings above (every other GET an empty answer, a PUT ok or, failing, refused); calls as
 # [method, url, body]; then: the statements after the render, their value the test's
 PAGE = ('(async () => { %s const calls = []; const failing = %s; api = async (m, u, b) => { calls.push([m, u, b === undefined ? null : b]); '
@@ -93,3 +93,15 @@ def test_every_save_button_of_the_page_is_named_for_its_card():
     html = page('return $("#view").innerHTML; ')
     names = re.findall(r'aria-label="([^"]+)">Speichern</button>', html)
     assert names == ["Allgemein speichern", "Gerätenamen speichern", "RADIUS und PacketFence speichern", "Zonen speichern", "Vier-Augen-Prinzip speichern"]
+
+
+def test_each_id_of_the_settings_page_is_there_once():
+    """A card that took the ids of another (once the card "RMM" took r-save of "Sicherheitsregeln") binds the other's
+    buttons: every id of the page with all its cards drawn stands once."""
+    from test_frontend_alerts import ALERTS, RULES
+    js = ('(async () => { %s api = async (m, u) => u === "/api/settings" ? %s : u === "/api/zone-scopes" ? {entries: []} '
+          ': u === "/api/compliance/rules" ? %s : u === "/api/settings/alerts" ? %s : u === "/api/alerts/deliveries" ? {rows: [], next: null} : []; '
+          'await renderSettings(); return $("#view").innerHTML; })()')
+    html = in_dom(js % (role_me("admin"), json.dumps(STORED), json.dumps(RULES), json.dumps(ALERTS)))
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    assert "r-save" in ids and "a-save" in ids and sorted({i for i in ids if ids.count(i) > 1}) == []

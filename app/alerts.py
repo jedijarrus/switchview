@@ -53,7 +53,7 @@ EVENTS = {"reachability": "Switch nicht erreichbar oder wieder erreichbar", "unk
           "change_problem": "Änderung fehlgeschlagen, unklar, abgebrochen oder zurückgenommen",
           "confirm_revert": "Änderung ohne Bestätigung zurückgenommen", "bulk_problem": "Sammeländerung mit Fehlern beendet",
           "lldp_uplink": "LLDP-Nachbar an einem Uplink geändert", "approval": "Freigabe angefordert oder entschieden",
-          "watch": "Beobachtete MAC-Adresse gesehen", "dot1x_parked": "802.1X-Rechner per MAC im Park-VLAN"}
+          "watch": "Beobachtete MAC-Adresse gesehen"}
 # Every event but the new unknown device: in a network with guests it would be most of the messages; an Admin switches it on
 DEFAULT_EVENTS = [e for e in EVENTS if e != "unknown_device"]
 CAP_EVENT = "cap"          # the summary of a channel past CAP_PER_HOUR; every channel that is on takes it

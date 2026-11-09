@@ -401,16 +401,9 @@ async def _default_of(conn, table: str, column: str):
         return (await cur.fetchone())[0]
 
 
-# The RMM sync (app/rmm.py): the memory of the MACs per computer (with idx_rmm_macs_agent), the exclusion list, the computers
-# proven by 802.1X and those of them parked, and per device
-# where it comes from, its agent and its last confirmation. A database of before has none of them, and its devices read NULL there:
-# kept by hand.
-RMM_TABLES = {"rmm_macs", "rmm_excluded", "rmm_dot1x", "rmm_parked"}
-RMM_COLUMNS: set[tuple[str, str]] = {("devices", "source"), ("devices", "rmm_agent"), ("devices", "rmm_seen_at")}
 
 
-@pytest.mark.parametrize("tables, columns", [(PHASE4B_TABLES, PHASE4B_COLUMNS), (PHASE4C_TABLES, PHASE4C_COLUMNS),
-                                             (RMM_TABLES, RMM_COLUMNS)], ids=["4b", "4c", "rmm"])
+@pytest.mark.parametrize("tables, columns", [(PHASE4B_TABLES, PHASE4B_COLUMNS), (PHASE4C_TABLES, PHASE4C_COLUMNS)], ids=["4b", "4c"])
 async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables, columns):
     """A database as the phase before left it (db.SCHEMA without the tables of tables, every column of db.ADDED_COLUMNS but those of
     columns, one switch, one backup, one audit entry and one change) gets the tables (empty, with their indexes) and the columns (the
@@ -429,7 +422,6 @@ async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables
         await conn.execute("INSERT INTO audit (username, action, target, detail, role) VALUES ('anna', 'login', 'entra', '', 'aendern')")
         await conn.execute("INSERT INTO changes (switch_id, username, kind, summary, status, mechanism, sent) VALUES "
                            "(1, 'anna', 'ports', 'Port 2: VLAN 20', 'ok', 'ssh', 1)")
-        await conn.execute("INSERT INTO devices (mac, name) VALUES ('aa:bb:cc:dd:ee:01', 'Drucker')")    # for the columns of the sync
         await conn.commit()
         # the premise: none of the tables, their indexes or the columns is there yet
         assert not await _table_names(conn) & tables and not await _index_names(conn, tables)

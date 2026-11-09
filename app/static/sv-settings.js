@@ -7,11 +7,11 @@
      cards ("Allgemein", "Gerätenamen", "RADIUS und PacketFence") that share one PUT, which sets every field (one left out would be
      reset): each card sends its own fields and the stored values of the others, a secret of another card as null (= unchanged).
      Changing them is Admin: below it every field is locked and the save buttons are gone, one sentence on top says why; what only
-     reads (names, PacketFence test) and ending the own sessions stay. The cards of sv-alerts.js, sv-rmm.js and sv-tokens.js ask
-     beside them, each on its own (a failure is its card's text): "Sicherheitsregeln" for everyone, "Benachrichtigungen" and
-     "RMM" only for an Admin; "API-Tokens" for everyone, "Alle API-Tokens" only for an Admin, which no one waits for. ── */
+     reads (names, PacketFence test) and ending the own sessions stay. The cards of sv-alerts.js and sv-tokens.js ask
+     beside them, each on its own (a failure is its card's text): "Sicherheitsregeln" for everyone, "Benachrichtigungen" only for
+     an Admin; "API-Tokens" for everyone, "Alle API-Tokens" only for an Admin, which no one waits for. ── */
   // The sections of the bar in the order of the cards: [the card's id, its label]
-  const SETTINGS_SECTIONS = [["set-general", "Allgemein"], ["set-names", "Gerätenamen"], ["set-pf", "RADIUS und PacketFence"], ["rmm-set", "RMM"],
+  const SETTINGS_SECTIONS = [["set-general", "Allgemein"], ["set-names", "Gerätenamen"], ["set-pf", "RADIUS und PacketFence"],
     ["alert-card", "Benachrichtigungen"], ["set-zones", "Zonen"], ["set-4e", "Vier-Augen-Prinzip"], ["rules-card", "Sicherheitsregeln"],
     ["set-sessions", "Sitzungen"], ["tok-card", "API-Tokens"]];
   // A card whose top is above this line (px from the top of the window, below the header) is the one the bar marks
@@ -118,17 +118,17 @@
 
   async function renderSettings() {
     const v = $("#view"), failed = e => ({ error: e.message }), admin = roleOk("admin");
-    const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), admin ? api("GET", "/api/settings/alerts").catch(failed) : null, admin ? api("GET", "/api/settings/rmm").catch(failed) : null]);
+    const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), admin ? api("GET", "/api/settings/alerts").catch(failed) : null]);
     const got = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/zone-scopes")])
       .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!got) return;
-    const [rules, alertSet, rmmSet] = await cards, scopes = got[1], lossy = SVLogic.lossyScopes(scopes.entries);
+    const [rules, alertSet] = await cards, scopes = got[1], lossy = SVLogic.lossyScopes(scopes.entries);
     let s = got[0];
     const section = (id, html) => `<section class="card" id="${id}">${html}</section>`;
     v.innerHTML = `<div class="set-layout"><nav class="set-nav" id="set-nav" aria-label="Abschnitte der Einstellungen">${SETTINGS_SECTIONS.map(([id, label]) => `<button type="button" id="nav-${id}" data-sec="${id}">${label}<span class="dot" aria-hidden="true"></span></button>`).join("")}</nav>
       <div class="set-main">${admin ? "" : `<p class="note gate">Einstellungen ändern braucht die Rolle „Admin“.</p>`}
       ${section("set-general", generalCard(s, admin))}${section("set-names", namesCard(s, admin))}${section("set-pf", pfCard(s, admin))}
-      ${section("rmm-set", rmmCardHtml(rmmSet, admin))}${section("alert-card", alertCardHtml(alertSet, admin))}
+      ${section("alert-card", alertCardHtml(alertSet, admin))}
       ${section("set-zones", zonesCard(lossy, admin))}${section("set-4e", fourEyesCard(s, admin))}${section("rules-card", rulesCardHtml(rules, admin))}
       ${section("set-sessions", setHead("Sitzungen") + `<div class="card-b set-b"><p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p></div>`
         + cardFoot("", "", `<button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button>`))}
@@ -203,7 +203,7 @@
       try { const r = await api("POST", "/api/auth/logout-all"); toast(r.ended === 1 ? "1 Sitzung beendet" : `${r.ended} Sitzungen beendet`); showLogin(); }
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
-    if (admin) ["set-general", "set-names", "set-pf", "rmm-set", "alert-card", "set-zones", "set-4e", "rules-card"].forEach(trackDirty);
+    if (admin) ["set-general", "set-names", "set-pf", "alert-card", "set-zones", "set-4e", "rules-card"].forEach(trackDirty);
     bindSettingsNav();
-    bindTokenCards(admin); bindRulesCard(rules); bindRmmCard(rmmSet); await bindAlertCard(alertSet);
+    bindTokenCards(admin); bindRulesCard(rules); await bindAlertCard(alertSet);
   }

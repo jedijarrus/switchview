@@ -146,7 +146,7 @@ def test_the_roles_note_has_a_row_per_decision_of_the_plan():
 
 
 @pytest.mark.parametrize("note_name, half", [("rollen-phase4a.md", "MATRIX_4A"), ("verlauf-phase4b.md", "MATRIX_4B"),
-                                             ("sammel-api-phase4c.md", "MATRIX_4C"), ("rmm-abgleich.md", "MATRIX_RMM"),
+                                             ("sammel-api-phase4c.md", "MATRIX_4C"),
                                              ("anmeldungen.md", "MATRIX_AUTH")])
 def test_each_note_repeats_its_half_of_the_permission_matrix(note_name, half):
     """Phase 4a wrap-up, split in Phase 4b Task 1: each note's table "Rechte je Route" has a row for every entry of its half of the
