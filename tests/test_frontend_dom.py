@@ -780,10 +780,10 @@ def test_vlan_chip_buttons_keep_the_markup_of_the_port_form():
     js = (trk() + 'const m = {n: "5", u: [], t: [], tr: "Trk1", mb: [], l: [], d: [], mc: 0, o: true, ad: true, s: 1000, a: "", pv: "", st: ""}; '
           'portIdx["5"] = m; editPorts(sw, ["5"]); [vlanChipButtons(["20"], ["20"], "ta"), vlanChipButtons([], [], "tr"), cap.b]')
     chip, none, form = in_dom(js)
-    assert chip == ('<div class="chipset"><button type="button" class="vchip small" data-ta="20" aria-pressed="true" style="--vc:hsl(220 55% 50%)">'
+    assert chip == ('<div class="chipset"><button type="button" class="vchip small" data-ta="20" aria-pressed="true" style="--vc:#0d9488">'
                     '<i class="sw"></i><span class="id">20</span><span class="nm">Clients</span></button></div>')
     assert none == '<span class="muted" style="font-size:12.5px">keine</span>'
-    assert 'data-ta="30" aria-pressed="false" style="--vc:hsl(330 55% 50%)" disabled aria-describedby="f-gate-mem">' in form   # a member's gate
+    assert 'data-ta="30" aria-pressed="false" style="--vc:#7c3aed" disabled aria-describedby="f-gate-mem">' in form   # a member's gate
 
 
 @pytest.mark.parametrize("error, want", [("Abgebrochen (Prozess beendet), nichts gesendet", "<b>Abgebrochen:</b> Prozess beendet, nichts gesendet"),

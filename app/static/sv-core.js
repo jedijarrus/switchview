@@ -2,9 +2,16 @@
 /* SwitchView Frontend (Vanilla JS). Struktur: Übersicht → Switch-Detail → Port. */
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const VC = { "1": "#a1a1aa", "110": "#78716c", "120": "#e11d48", "130": "#0ea5e9", "140": "#2563eb", "150": "#9333ea", "160": "#ca8a04", "170": "#65a30d",
-    "210": "#ea580c", "220": "#0d9488", "230": "#14b8a6", "240": "#7c3aed", "250": "#a855f7", "260": "#16a34a", "270": "#db2777", "280": "#c026d3" };
-  const vcol = id => VC[id] || ("hsl(" + ((parseInt(id, 10) * 47) % 360) + " 55% 50%)");
+  // VLAN colours: one per VLAN in every view (chip, port tile, matrix, filter), kept apart from the colours of states (green ok and
+  // 802.1X, amber warning and park, red off and error). VLAN 1 is grey, the park VLAN amber like every other sign of the park; the
+  // VLANs in VC (example values) have their colour there, any other one one of VLAN_PALETTE by its number (the golden ratio spreads
+  // neighbouring numbers); no number at all is grey
+  const PARK_VLAN = "3999";    // radiusprep.PARK_VLAN
+  const VLAN_PALETTE = ["#2563eb", "#0ea5e9", "#0891b2", "#0d9488", "#4f46e5", "#7c3aed", "#a21caf", "#db2777", "#ea580c", "#475569"];
+  const VC = { "1": "#a1a1aa", "120": "#ea580c", "130": "#0ea5e9", "140": "#2563eb", "150": "#a21caf", "160": "#475569", "170": "#0d9488",
+    "210": "#4f46e5", "220": "#0891b2", "230": "#155e75", "240": "#7c3aed", "250": "#db2777", "260": "#1e40af", "270": "#c2410c", "280": "#be185d" };
+  const vcol = id => String(id) === PARK_VLAN ? "var(--warn)" : VC[id] || VLAN_PALETTE[Math.floor(((parseInt(id, 10) * 0.6180339887) % 1) * VLAN_PALETTE.length)]
+    || "#a1a1aa";
   const speedTxt = s => !s ? "–" : s >= 1000 ? (s / 1000).toString().replace(".", ",") + " Gbit" : s + " Mbit";
   const fmtTime = iso => { if (!iso) return "–"; const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z"); return isNaN(d) ? iso : d.toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }); };
   const isNum = n => /^\d+$/.test(n);

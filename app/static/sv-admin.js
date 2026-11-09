@@ -329,7 +329,10 @@
   // The tab of the devices view: park (Ohne Zugriff), net (Im Netz), rel (MAC-Freigaben; "Freigaben" is the four-eyes tab), watch (Beobachtung); null until the sessions
   // are there the first time: Ohne Zugriff while a device is parked, else Im Netz. devBehind: Im Netz shows the unknown devices behind
   // an LLDP device or at a port with many devices too
-  let devTab = null, devBehind = false;
+  const DEV_TAB_KEY = "sv.devTab", DEV_OPEN_KEY = "sv.devUnknownOpen";
+  const devStored = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const devKeep = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* a private window: not kept */ } };
+  let devTab = ["park", "net", "rel", "watch"].includes(devStored(DEV_TAB_KEY)) ? devStored(DEV_TAB_KEY) : null, devBehind = false, devOpen = devStored(DEV_OPEN_KEY) === "1";
   const DEV_TABS = [["park", "Ohne Zugriff"], ["net", "Im Netz"], ["rel", "MAC-Freigaben"], ["watch", "Beobachtung"]];
   const NOISE_FLAGS = ["lldp", "many"];
   // The devices view, one question per tab: who has no access now (sessions PacketFence parked), who is on the network and how
@@ -347,8 +350,8 @@
       <div class="dtabs" role="tablist" aria-label="Geräte" id="dtabs">${DEV_TABS.map(([k, l]) => `<button type="button" role="tab" id="dt-${k}" data-tab="${k}" aria-controls="dp-${k}" aria-selected="${tab === k}">${l}<span class="count" id="dn-${k}"></span></button>`).join("")}</div>
       ${panel("park", `<section class="card" id="park-card"><div class="card-h"><h2>Ohne Zugriff</h2></div><div class="empty">Lade …</div></section>`)}
       ${panel("net", `<section class="card" id="auth-card"></section>
-        <section class="card"><div class="card-h"><h2>Ohne Anmeldung</h2><span class="sub">an Ports ohne Anmeldung gelernt und nicht freigegeben: sie haben Zugang, PacketFence fragt dort nicht</span>
-          <label class="check right" style="font-size:12.5px"><input type="checkbox" id="d-behind"${devBehind ? " checked" : ""}> auch hinter anderen Geräten <span id="d-behind-n"></span></label></div><div id="ulist"><div class="empty">Lade …</div></div></section>`)}
+        <section class="card"><div class="card-h"><h2><button type="button" class="fold" id="d-fold" aria-expanded="${devOpen}" aria-controls="d-unknown"><span class="chev" aria-hidden="true">›</span>Ohne Anmeldung<span class="count" id="dn-unknown"></span></button></h2><span class="sub">an Ports ohne Anmeldung gelernt und nicht freigegeben: sie haben Zugang, PacketFence fragt dort nicht</span>
+          <label class="check right" style="font-size:12.5px"><input type="checkbox" id="d-behind"${devBehind ? " checked" : ""}> auch hinter anderen Geräten <span id="d-behind-n"></span></label></div><div id="d-unknown"${devOpen ? "" : " hidden"}><div id="ulist"><div class="empty">Lade …</div></div></div></section>`)}
       ${panel("rel", `<section class="card"><div class="card-h"><h2>MAC-Freigaben</h2><span class="sub">${list.length} ${list.length === 1 ? "Gerät" : "Geräte"} ohne Zertifikat · ${list.filter(d => !d.allowed).length} gesperrt</span>
         <div class="right toolrow"><div class="seg" role="group" aria-label="MAC-Freigaben filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Gesperrt"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="MAC-Freigaben durchsuchen" value="${esc(devText)}">
@@ -356,8 +359,9 @@
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Status</th><th>Anmeldung</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>`)}
       ${panel("watch", `<section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`)}`;
-    const show = k => {
+    const show = (k, kept = true) => {
       devTab = k;
+      if (kept) devKeep(DEV_TAB_KEY, k);
       document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === k)));
       document.querySelectorAll("[data-panel]").forEach(p => { p.hidden = p.dataset.panel !== k; });
     };
@@ -392,7 +396,8 @@
       const live = authReady() ? SESS.sessions.filter(x => !x.park).length : 0;
       $("#dn-park").textContent = parked.length || ""; $("#dn-park").classList.toggle("alert", parked.length > 0);
       $("#dn-net").textContent = live + un.length;
-      if (devTab == null) show(parked.length ? "park" : "net");
+      if (devTab == null) show(parked.length ? "park" : "net", false);
+      $("#dn-unknown").textContent = un.length;
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
       const drawUnknown = () => {
         const shown = un.filter(d => devBehind || !noise(d));
@@ -404,6 +409,7 @@
       };
       drawUnknown();
       $("#d-behind").addEventListener("change", e => { devBehind = e.target.checked; drawUnknown(); });
+      $("#d-fold").addEventListener("click", () => { devOpen = !devOpen; devKeep(DEV_OPEN_KEY, devOpen ? "1" : "0"); $("#d-fold").setAttribute("aria-expanded", String(devOpen)); $("#d-unknown").hidden = !devOpen; });
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     await watched;
@@ -433,7 +439,7 @@
     if (!isNew) btns.push({ label: "Löschen", cls: "danger", onClick: async () => {
       closeModal();
       if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.`, "Löschen", true))) return editDevice(d, false);
-      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || `Gelöscht${AUTH_SWITCH_NOTE}`); MAP = null; authAfterChange(); if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
+      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || `Gelöscht${AUTH_SWITCH_NOTE}`); MAP = null; authAfterChange(d.mac); if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     btns.push({ label: release || isNew ? "Freigeben" : "Speichern", cls: "primary", onClick: async b => {
@@ -445,7 +451,7 @@
         const r = isNew ? await api("POST", "/api/devices", payload) : await api("PUT", `/api/devices/${encodeURIComponent(d.mac)}`, payload);
         closeModal();
         toast(r.pf && r.pf.ok ? `Gespeichert und in PacketFence übernommen${AUTH_SWITCH_NOTE}` : `Gespeichert. PacketFence: ${(r.pf && (r.pf.error || "Fehler, siehe Liste")) || "–"}`);
-        MAP = null; authAfterChange(); if (current === "devices") renderDevices();    // the sessions anew now and once the port switched
+        MAP = null; authAfterChange(payload.mac); if (current === "devices") renderDevices();    // the sessions anew until the port switched
       } catch (e) { toast(e.message); b.disabled = false; }
     } });
     modal(release || isNew ? "Gerät freigeben" : `Gerät: ${d.name}`, body, btns);

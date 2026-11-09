@@ -328,3 +328,10 @@ def test_saving_or_deleting_a_device_drops_the_kept_sessions(api, packetfence, m
         assert api_devices._sessions["items"] is None
         client.get("/api/pf/sessions")
         assert client.delete(f"/api/devices/{GUEST}").status_code == 200 and api_devices._sessions["items"] is None
+
+
+def test_fresh_asks_packetfence_past_the_kept_answer(api, packetfence):
+    api.get("/api/pf/sessions")
+    api.get("/api/pf/sessions?fresh=1")
+    api.get("/api/pf/sessions")
+    assert sum(1 for c in packetfence.calls if c == ("POST", "/locationlogs/search")) == 2

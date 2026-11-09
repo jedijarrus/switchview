@@ -215,9 +215,9 @@ def _mac_or_none(v) -> str | None:
     return ":".join(h[i:i + 2] for i in range(0, 12, 2)) if len(h) == 12 else None
 
 
-async def _open_sessions() -> list[dict]:
-    """pf.open_sessions, its answer reused for SESSIONS_TTL seconds (a failure is not kept)."""
-    if _sessions["items"] is None or time.monotonic() - _sessions["at"] > SESSIONS_TTL:
+async def _open_sessions(fresh: bool = False) -> list[dict]:
+    """pf.open_sessions, its answer reused for SESSIONS_TTL seconds unless fresh (a failure is not kept)."""
+    if fresh or _sessions["items"] is None or time.monotonic() - _sessions["at"] > SESSIONS_TTL:
         _sessions["items"] = await pf.open_sessions()
         _sessions["at"] = time.monotonic()
     return _sessions["items"]
@@ -253,13 +253,14 @@ def session_view(items: list[dict], switches: list[dict], ports: list[dict], dev
 
 
 @router.get("/api/pf/sessions")
-async def pf_sessions(user=Depends(auth.require(roles.LESEN))):
+async def pf_sessions(fresh: bool = False, user=Depends(auth.require(roles.LESEN))):
     """Who is logged in on the LAN now, as PacketFence holds it (session_view of pf.open_sessions, at most SESSIONS_TTL seconds
-    old). Without PacketFence set up {"configured": False, "sessions": []}; when it does not answer, ok False with its reason."""
+    old; fresh: asked now, as the devices view does after a release until the device's session switched). Without PacketFence set up
+    {"configured": False, "sessions": []}; when it does not answer, ok False with its reason."""
     if not await pf.configured():
         return {"configured": False, "ok": True, "sessions": []}
     try:
-        items = await _open_sessions()
+        items = await _open_sessions(fresh)
     except Exception as e:  # noqa: BLE001
         return {"configured": True, "ok": False, "error": str(e)[:200] if isinstance(e, RuntimeError) else f"{type(e).__name__}: {str(e)[:160]}",
                 "sessions": []}

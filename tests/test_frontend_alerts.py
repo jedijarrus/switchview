@@ -313,7 +313,7 @@ def test_the_devices_view_appends_the_watch_list():
     view, rows, calls = in_dom(js)
     assert ('<section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, '
             'den Port wechselt oder wiederkommt</span></div><div id="w-card">') in view
-    assert view.index("<h2>Ohne Anmeldung</h2>") < view.index("Beobachtungsliste") and "/api/watch" in calls and "aa:bb:cc:00:00:05" in rows
+    assert view.index(">Ohne Anmeldung<span class=\"count\"") < view.index("Beobachtungsliste") and "/api/watch" in calls and "aa:bb:cc:00:00:05" in rows
 
 
 NETMAP = {"switches": [{"id": 1, "k": "SW", "zone": "", "host": "10.0.0.1", "ok": True, "error": "", "ports": [], "caps": []}], "links": [], "vlans": {}}

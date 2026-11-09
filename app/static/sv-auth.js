@@ -20,19 +20,43 @@
   // Whether mac has a session now (logged in, or parked): such a device is not among the unknown ones
   const authSession = mac => authReady() && SESS.sessions.some(x => x.mac === mac);
 
-  // After a release was saved or deleted PacketFence bounces the port and the device logs in anew, about AUTH_SWITCH_MS later: the
-  // sessions are read anew at once (the server dropped its own, api_devices) and the devices view once more then
-  const AUTH_SWITCH_MS = 15000;
-  const AUTH_SWITCH_NOTE = " · der Port schaltet in etwa 15 Sekunden um";
-  function authAfterChange() {
+  // After a release of mac was saved or deleted PacketFence bounces its port and the device logs in anew, 10 to 25 s later. Until its
+  // session changed (another start, parked or not) the sessions are asked anew every AUTH_POLL_MS, past PacketFence's answer the server
+  // keeps (?fresh=1), at most AUTH_POLL_MAX times; meanwhile the device says "wird umgeschaltet …" (authPending). Then its switch is
+  // polled once (its MAC table, "Zuletzt gesehen") and the view drawn anew. The promise of the whole, for a test
+  let AUTH_POLL_MS = 5000;
+  const AUTH_POLL_MAX = 12;
+  const AUTH_SWITCH_NOTE = " · der Port schaltet gleich um";
+  const authPending = new Set();
+  const sessionKey = mac => (SESS && Array.isArray(SESS.sessions) ? SESS.sessions : []).filter(x => x.mac === mac).map(x => `${x.since}|${x.park}|${x.how}|${x.role}`).join(",");
+  function authAfterChange(mac) {
     SESS_AT = 0;
-    setTimeout(() => { SESS_AT = 0; if (current === "devices") renderDevices(); }, AUTH_SWITCH_MS);
+    if (!mac) return Promise.resolve();
+    const was = sessionKey(mac);
+    authPending.add(mac);
+    return new Promise(done => {
+      let n = 0;
+      const tick = async () => {
+        n += 1;
+        const a = await loadAuth(true, true), now = sessionKey(mac);
+        if (now === was && n < AUTH_POLL_MAX) { setTimeout(tick, AUTH_POLL_MS); return; }
+        authPending.delete(mac);
+        const x = (a.sessions || []).find(s => s.mac === mac);
+        if (now !== was && x && x.switch_id != null) {
+          try { await api("POST", `/api/switches/${encodeURIComponent(x.switch_id)}/poll`); MAP = null; } catch (e) { /* the next poll brings it */ }
+        }
+        if (current === "devices") renderDevices();
+        done(now !== was);
+      };
+      setTimeout(tick, AUTH_POLL_MS);
+    });
   }
-  // The sessions (GET /api/pf/sessions), reused for AUTH_TTL; a failed request is kept as an answer with its reason
-  function loadAuth(force) {
+  // The sessions (GET /api/pf/sessions), reused for AUTH_TTL; fresh: past the answer the server keeps. A failed request is kept as
+  // an answer with its reason
+  function loadAuth(force, fresh) {
     if (!force && SESS && Date.now() - SESS_AT < AUTH_TTL) return Promise.resolve(SESS);
     if (!authLoading) {
-      authLoading = api("GET", "/api/pf/sessions").catch(e => ({ configured: true, ok: false, error: e.message, sessions: [] }))
+      authLoading = api("GET", fresh ? "/api/pf/sessions?fresh=1" : "/api/pf/sessions").catch(e => ({ configured: true, ok: false, error: e.message, sessions: [] }))
         .then(r => { SESS = r && Array.isArray(r.sessions) ? r : { configured: true, ok: false, error: "Antwort ohne Sitzungen", sessions: [] }; SESS_AT = Date.now(); authLoading = null; return SESS; });
     }
     return authLoading;
@@ -62,6 +86,7 @@
   }
   // The cell "Anmeldung" of a device of the list: how and where it is logged in now, "…" while the sessions load, "–" without one
   function authCell(mac) {
+    if (authPending.has(mac)) return `<span class="muted">wird umgeschaltet …</span>`;
     if (!SESS) return `<span class="muted">…</span>`;
     const list = authReady() ? SESS.sessions.filter(x => x.mac === mac) : [];
     return list.length ? list.map(x => `${authPill(x)}<div class="muted" style="font-size:12px">${esc(x.switch_name)} · Port ${esc(x.port)}${x.role ? " · " + esc(x.role) : ""}</div>`).join("")

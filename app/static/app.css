@@ -113,11 +113,11 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .pill.neutral { color: var(--muted); background: var(--surface-2); }
 .vlans { display: flex; flex-wrap: wrap; gap: 6px; }
 .vchip { --vc: #a1a1aa; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px 0 6px; border-radius: 6px; font-size: 12px; cursor: pointer;
-  border: 1px solid color-mix(in srgb, var(--vc) 45%, var(--border)); background: color-mix(in srgb, var(--vc) 10%, var(--surface)); white-space: nowrap; }
+  border: 1px solid var(--border-strong); background: var(--surface); white-space: nowrap; }
 .vchip .sw { width: 10px; height: 10px; border-radius: 3px; background: var(--vc); flex: none; }
 .vchip .id { font-family: var(--mono); font-size: 11.5px; font-weight: 500; }
 .vchip .nm { color: var(--fg-2); }
-.vchip[aria-pressed="true"] { background: color-mix(in srgb, var(--vc) 26%, var(--surface)); border-color: var(--vc); box-shadow: 0 0 0 1px var(--vc) inset; }
+.vchip[aria-pressed="true"] { background: color-mix(in srgb, var(--vc) 14%, var(--surface)); border-color: var(--vc); box-shadow: 0 0 0 1px var(--vc) inset; }
 .vchip.static { cursor: default; }
 .vchip.small { height: 20px; font-size: 11.5px; padding: 0 6px 0 5px; gap: 5px; }
 .vchip.small .sw { width: 8px; height: 8px; }
@@ -176,7 +176,6 @@ tr.clickrow:hover td { background: var(--surface-2); }
 .port .tk { position: absolute; left: 2px; top: 6px; font-family: var(--mono); font-size: 8px; color: var(--accent); }
 .port.down { background: transparent; border-style: dashed; }
 .port.down .pn { color: var(--muted); }
-.port.down::before { opacity: .45; }
 .port.adown { background: repeating-linear-gradient(135deg, transparent 0 4px, var(--surface-3) 4px 5px); }
 .port.link { box-shadow: 0 0 0 2px var(--accent) inset; }
 .port:hover { border-color: var(--accent); }
@@ -331,8 +330,7 @@ details.lk summary::-webkit-details-marker { display: none; }
 .pill.st-prot { color: var(--fg-2); background: var(--surface-2); }
 .pill.st-off { color: var(--crit); background: var(--crit-bg); }
 .port .sb { position: absolute; right: 2px; top: 6px; font: 600 8px var(--mono); }
-.port .sb.r { color: var(--accent); }
-.port .sb.k { color: var(--violet); }
+.port .sb.r, .port .sb.k { color: var(--fg-2); }
 .port.picked { outline: 2px dashed var(--accent); outline-offset: 1px; }
 .lg-port.adown { background: repeating-linear-gradient(135deg, transparent 0 3px, var(--surface-3) 3px 4px); }
 .banner { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r); padding: 10px 12px; font-size: 13px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -456,3 +454,9 @@ a.btn { color: var(--fg); text-decoration: none; }
 .dtabs .count:empty { display: none; }
 .dtabs .count.alert { background: var(--warn-bg); color: var(--warn); }
 .card-h .check.right { margin-left: auto; }
+/* Eine einklappbare Karte (Geräte → „Ohne Anmeldung“): der Kopf ist der Knopf, der Pfeil dreht sich beim Aufklappen */
+.fold { display: inline-flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; }
+.fold .chev { display: inline-block; width: 12px; color: var(--muted); transition: transform .15s; }
+.fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.fold .count { padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11.5px; font-weight: 500; }
+@media (prefers-reduced-motion: reduce) { .fold .chev { transition: none; } }
