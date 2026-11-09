@@ -584,6 +584,24 @@ def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_chan
     assert in_dom(SAVE_SWITCH % typed) == want
 
 
+
+# The VLAN view: per switch and VLAN its ports (U / T, a button to the switch), "angelegt" for a VLAN the switch has without a port
+# (its VLAN list of the poll, vl), "–" for one it does not have and "?" for a switch without a list yet; "Angelegt" counts the
+# switches with a list that have the VLAN (marked when not all of them do)
+def test_the_vlan_view_tells_a_vlan_the_switch_has_without_a_port():
+    m = {"vlans": {"140": "Client", "3999": "Park"}, "switches": [
+        {"k": "SW-A", "id": 1, "vl": ["1", "140", "3999"], "ports": [{"n": "1", "u": ["140"], "t": [], "tr": ""}]},
+        {"k": "SW-B", "id": 2, "vl": ["1", "140"], "ports": [{"n": "1", "u": [], "t": ["140"], "tr": ""}]},
+        {"k": "SW-C", "id": 3, "vl": [], "ports": []}]}
+    html = in_dom('(async () => { MAP = %s; loadMap = async () => MAP; await renderVlans(); return $("#view").innerHTML; })()' % json.dumps(m))
+    rows = {r.split('<span class="id">')[1].split("<")[0]: r for r in html.split("<tr>")[2:]}
+    assert '<th>VLAN</th><th>Angelegt</th><th>SW-A</th><th>SW-B</th><th>SW-C</th>' in html
+    assert ('<td class="num">2 von 2</td><td><button type="button" class="mcell" data-sw="1" data-v="140" title="SW-A · VLAN 140"><span class="u">U 1</span>'
+            '<span class="t">T 0</span></button></td>') in rows["140"]
+    assert ('<td class="num part">1 von 2</td><td><span class="mdef" title="SW-A · VLAN 3999: angelegt, an keinem Port">angelegt</span></td>'
+            '<td><span class="muted" aria-hidden="true" title="SW-B · VLAN 3999: nicht angelegt">–</span><span class="sr-only">nicht angelegt</span></td>'
+            '<td><span class="muted" title="SW-C: VLAN-Liste noch nicht gelesen">?</span></td>') in rows["3999"]
+
 # The zone of a switch: with zones on the switches it is picked from them ("Ohne Zone" first, each once, sorted) or "Neue Zone …"
 # shows the field to type a new one; without any zone yet only the field. #f-zone holds the value the save sends either way
 ZONE_FORM = ('(async () => { api = async (m, u) => u === "/api/switches" ? %s : u === "/api/drivers" ? [{name: "procurve", caps: [], notes: ""}] : {}; '

@@ -5,12 +5,22 @@
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     try { await loadMap(!MAP); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     const sw = MAP.switches;
-    // One pass over the ports of each switch (SVLogic.vlanCounts); a VLAN without a key there is on none of its ports
-    const counts = sw.map(s => SVLogic.vlanCounts(s.ports));
-    v.innerHTML = `<section class="card"><div class="card-h"><h2>VLANs je Switch</h2><span class="sub">U = Ports ungetaggt, T = getaggt (Trunks zählen einfach). Klick öffnet den Switch mit diesem VLAN.</span></div>
-      <div class="tbl-wrap"><table class="matrix"><thead><tr><th>VLAN</th>${sw.map(s => `<th>${esc(s.k)}</th>`).join("")}</tr></thead><tbody>` +
-      Object.keys(MAP.vlans).map(id => `<tr><td>${chip(id, "")}</td>${sw.map((s, i) => { const c = counts[i][id];
-        return `<td>${c ? `<button type="button" class="mcell" data-sw="${s.id}" data-v="${esc(id)}" title="${esc(s.k)} · VLAN ${esc(id)}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>` : `<span class="muted">–</span>`}</td>`; }).join("")}</tr>`).join("") +
+    // One pass over the ports of each switch (SVLogic.vlanCounts); a VLAN without a key there is on none of its ports. Whether the
+    // switch has a VLAN at all is its VLAN list of the poll (s.vl): one there without a port is "angelegt", one missing "–"; a switch
+    // without a list (not polled yet) cannot say ("?"), and "Angelegt" counts only the switches with one
+    const counts = sw.map(s => SVLogic.vlanCounts(s.ports)), has = sw.map(s => (s.vl && s.vl.length ? new Set(s.vl.map(String)) : null));
+    const listed = has.filter(Boolean).length;
+    const cell = (s, i, id) => {
+      const c = counts[i][id], what = `${esc(s.k)} · VLAN ${esc(id)}`;
+      if (c) return `<button type="button" class="mcell" data-sw="${s.id}" data-v="${esc(id)}" title="${what}"><span class="u">U ${c.u}</span><span class="t">T ${c.t}</span></button>`;
+      if (!has[i]) return `<span class="muted" title="${esc(s.k)}: VLAN-Liste noch nicht gelesen">?</span>`;
+      return has[i].has(id) ? `<span class="mdef" title="${what}: angelegt, an keinem Port">angelegt</span>`
+        : `<span class="muted" aria-hidden="true" title="${what}: nicht angelegt">–</span><span class="sr-only">nicht angelegt</span>`;
+    };
+    v.innerHTML = `<section class="card"><div class="card-h"><h2>VLANs je Switch</h2><span class="sub">U = Ports ungetaggt, T = getaggt (Trunks zählen einfach), „angelegt“ = auf dem Switch angelegt, an keinem Port, – = nicht angelegt. Klick öffnet den Switch mit diesem VLAN.</span></div>
+      <div class="tbl-wrap"><table class="matrix"><thead><tr><th>VLAN</th><th>Angelegt</th>${sw.map(s => `<th>${esc(s.k)}</th>`).join("")}</tr></thead><tbody>` +
+      Object.keys(MAP.vlans).map(id => { const n = has.filter(h => h && h.has(id)).length;
+        return `<tr><td>${chip(id, "")}</td><td class="num${n < listed ? " part" : ""}">${n} von ${listed}</td>${sw.map((s, i) => `<td>${cell(s, i, id)}</td>`).join("")}</tr>`; }).join("") +
       `</tbody></table></div></section>`;
     v.querySelector("table").addEventListener("click", e => { const b = e.target.closest(".mcell"); if (!b) return; swVlan = b.dataset.v; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); });
   }
