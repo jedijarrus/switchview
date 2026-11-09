@@ -584,6 +584,31 @@ def test_saving_a_switch_opens_the_write_dialog_only_after_a_write_relevant_chan
     assert in_dom(SAVE_SWITCH % typed) == want
 
 
+# The zone of a switch: with zones on the switches it is picked from them ("Ohne Zone" first, each once, sorted) or "Neue Zone …"
+# shows the field to type a new one; without any zone yet only the field. #f-zone holds the value the save sends either way
+ZONE_FORM = ('(async () => { api = async (m, u) => u === "/api/switches" ? %s : u === "/api/drivers" ? [{name: "procurve", caps: [], notes: ""}] : {}; '
+             'await editSwitch({id: 1, name: "SW", host: "10.0.0.1", zone: "Büro", sort: 0, enabled: 1, driver: "procurve", snmp_version: "2c"}); '
+             'const body = $("#m-body").innerHTML, pick = $("#f-zone-pick"), field = $("#f-zone"); '
+             'const choose = (v, fresh) => { pick.value = v; pick.selectedOptions = [{hasAttribute: a => fresh && a === "data-new"}]; pick.fire("change"); '
+             'return [field.value, field.hidden, document.activeElement === field]; }; '
+             'return [body, choose("Rechenzentrum", false), choose("", true)]; })()')
+
+
+def test_the_zone_is_picked_from_the_zones_of_the_switches_or_typed_new():
+    switches = [{"id": 1, "zone": "Büro"}, {"id": 2, "zone": "Rechenzentrum"}, {"id": 3, "zone": ""}, {"id": 4, "zone": "Büro"}, {"id": 5, "zone": "Archiv"}]
+    body, picked, fresh = in_dom(ZONE_FORM % json.dumps(switches))
+    assert ('<select id="f-zone-pick"><option value="">Ohne Zone</option><option value="Archiv">Archiv</option><option value="Büro" selected>Büro</option>'
+            '<option value="Rechenzentrum">Rechenzentrum</option><option value="" data-new>Neue Zone …</option></select>') in body
+    assert '<input id="f-zone" value="Büro" maxlength="40" placeholder="Name der neuen Zone" aria-label="Neue Zone" hidden>' in body
+    assert picked == ["Rechenzentrum", True, False] and fresh == ["", False, True]
+
+
+def test_without_any_zone_the_form_has_only_the_field():
+    body = in_dom(ZONE_FORM.replace("return [body, choose", "return body; [choose") % json.dumps([{"id": 1, "zone": ""}]))
+    assert 'id="f-zone-pick"' not in body
+    assert '<label class="field"><span>Zone</span><input id="f-zone" value="Büro" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>' in body
+
+
 # Phase 5 Task 8: the change lists offer "Trotzdem speichern" (can_save, the server's rule) and "Mehr laden" (limit doubled up to
 # 500, the maximum of GET /api/changes); a change that sent nothing reloads only the switch's change list (the tests of the audit
 # view moved to tests/test_frontend_audit.py with Phase 4b Task 10)

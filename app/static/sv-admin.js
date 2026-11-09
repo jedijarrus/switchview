@@ -143,6 +143,14 @@
     const isNew = !s; s = s || { snmp_version: "2c", enabled: 1, sort: 0, zone: "", driver: "procurve", snmp_write: false };
     if (!DRIVERS) { try { DRIVERS = await api("GET", "/api/drivers"); } catch (e) { /* dann bleibt der Treiber, wie er ist */ } }
     const drv = DRIVERS, curDrv = s.driver || "procurve";
+    // The zones of the switches (GET /api/switches): one is picked from the list or a new one typed (#f-zone holds the value either
+    // way); with none yet, or the list not readable, only the field
+    const zones = await api("GET", "/api/switches").then(list => [...new Set((Array.isArray(list) ? list : []).map(x => x.zone || "").filter(Boolean))]
+      .sort((x, y) => x.localeCompare(y, "de")), () => []);
+    const zoneField = zones.length
+      ? `<div class="field"><label for="f-zone-pick">Zone</label><select id="f-zone-pick">${["", ...zones].map(z => `<option value="${esc(z)}"${z === (s.zone || "") ? " selected" : ""}>${z ? esc(z) : "Ohne Zone"}</option>`).join("")}`
+        + `<option value="" data-new>Neue Zone …</option></select><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="Name der neuen Zone" aria-label="Neue Zone" hidden></div>`
+      : `<label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>`;
     // Ein gespeicherter Treiber, den die Liste nicht kennt (am Server wie generic), bleibt wählbar: sonst wechselte ihn ein Speichern still
     const drvs = !drv ? [{ name: curDrv, caps: s.caps || [], notes: "Treiberliste nicht ladbar, der Treiber bleibt unverändert." }]
       : drv.some(d => d.name === curDrv) ? drv : [...drv, { name: curDrv, caps: s.caps || [], notes: "Unbekannter Treiber, wirkt wie generic (nur Standard-MIBs)." }];
@@ -169,7 +177,7 @@
     const body = `<div class="grid2"><label class="field"><span>Name</span><input id="f-name" value="${esc(s.name || "")}" required maxlength="64"></label>
       <label class="field"><span>Adresse (IP oder Hostname)</span><input id="f-host" value="${esc(s.host || "")}" required maxlength="64"></label>
       <p class="note warn" id="f-host-note" style="margin:0;grid-column:1/-1" hidden>${esc(hostNote)}</p>
-      <label class="field"><span>Zone</span><input id="f-zone" value="${esc(s.zone || "")}" maxlength="40" placeholder="z. B. Büro, Rechenzentrum"></label>
+      ${zoneField}
       <label class="field"><span>Reihenfolge</span><input id="f-sort" type="number" value="${esc(s.sort || 0)}"></label></div>
       <div class="field"><label for="f-driver">Treiber</label><select id="f-driver" aria-describedby="f-drv-notes f-drv-caps" ${drv ? "" : "disabled"}>${drvs.map(d => `<option value="${esc(d.name)}" ${d.name === curDrv ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
         <span class="hint" id="f-drv-notes"></span><span class="hint" id="f-drv-caps"></span></div>
@@ -254,6 +262,13 @@
       try { await api("DELETE", `/api/switches/${s.id}/ssh-host-key`); toast("SSH-Hostschlüssel vergessen"); } catch (e) { toast(e.message); }
       const row = await api("GET", "/api/switches").then(list => list.find(x => x.id === s.id), () => null);
       editSwitch(row || s);
+    });
+    // A zone picked fills #f-zone, "Neue Zone …" shows it empty to type into (left empty, the switch has no zone)
+    const pick = $("#f-zone-pick");
+    if (pick) pick.addEventListener("change", () => {
+      const fresh = !!pick.selectedOptions[0] && pick.selectedOptions[0].hasAttribute("data-new"), field = $("#f-zone");
+      field.hidden = !fresh; field.value = fresh ? "" : pick.value;
+      if (fresh) field.focus();
     });
     const sync = () => { const v3 = $("#f-snmpv").value === "3"; $("#snmp2").hidden = v3; $("#snmp3").hidden = !v3; };
     $("#f-snmpv").addEventListener("change", sync); sync();
