@@ -76,18 +76,18 @@
     const dev = new Map((devices || []).map(d => [d.mac, d])), un = new Map((unknown || []).map(d => [d.mac, d]));
     return SESS.sessions.filter(x => x.park).map(x => ({ ...x, known: dev.get(x.mac) || null, seen: un.get(x.mac) || null }));
   }
-  // The card "Ohne Zugriff" into el (hidden without a parked device): each with its name, why, MAC, switch and port, since; with
-  // Ändern (may) "Freigeben" - the form of a known device, else a new one, released (editDevice(…, release))
+  // The card "Ohne Zugriff" into el (one sentence without a parked device): each with its name, why, MAC, switch and port, since;
+  // with Ändern (may) "Freigeben", for a locked device "Entsperren" - the form of a known device, else a new one, released
+  // (editDevice(…, release))
   function renderParkedInto(el, parked, may) {
     if (!el) return;
-    el.hidden = !parked.length;
-    if (!parked.length) { el.innerHTML = ""; return; }
-    const why = x => x.known ? (x.known.allowed ? "freigegeben, PacketFence parkt es trotzdem" : "in SwitchView, nicht freigegeben") : "unbekannt";
+    if (!parked.length) { el.innerHTML = `<div class="card-h"><h2>Ohne Zugriff</h2></div><div class="empty">Gerade kein Gerät ohne Zugriff.</div>`; return; }
+    const why = x => x.known ? (x.known.allowed ? "freigegeben, PacketFence parkt es trotzdem" : "in den MAC-Freigaben gesperrt") : "unbekannt";
     el.innerHTML = `<div class="card-h"><h2>Ohne Zugriff</h2><span class="sub">${parked.length === 1 ? "1 Gerät" : `${parked.length} Geräte`} im Park-VLAN: MAC-Anmeldung ohne Freigabe</span></div>`
       + `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Switch · Port</th><th>Seit</th>${may ? "<th></th>" : ""}</tr></thead><tbody>`
       + parked.map((x, i) => `<tr><td>${esc(x.known ? x.known.name : (x.seen && (x.seen.name || x.seen.vendor)) || "unbekannt")}<span class="cellnote">${why(x)}</span></td>`
         + `<td class="mono">${esc(x.mac)}</td><td>${esc(x.switch_name || "–")} · ${esc(x.port || "–")}</td><td class="num">${esc(x.since)}</td>`
-        + `${may ? `<td><button class="btn small primary" type="button" data-park="${i}">Freigeben</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`;
+        + `${may ? `<td><button class="btn small primary" type="button" data-park="${i}">${x.known && !x.known.allowed ? "Entsperren" : "Freigeben"}</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`;
     el.onclick = e => {
       const b = e.target.closest("[data-park]"); if (!b) return;
       const x = parked[+b.dataset.park];
@@ -110,7 +110,7 @@
     if (!["all", "dot1x", "mac"].includes(authFilter)) authFilter = "all";
     const draw = () => {
       const list = live.filter(x => authFilter === "all" || authKind(x) === authFilter);
-      el.innerHTML = `<div class="card-h">${title}<span class="sub">${n("dot1x")} per 802.1X · ${n("mac")} per MAC-Freigabe${n("park") ? ` · ${n("park")} ohne Zugriff im Park-VLAN (oben unter „Ohne Zugriff“)` : ""}</span>
+      el.innerHTML = `<div class="card-h">${title}<span class="sub">${n("dot1x")} per 802.1X · ${n("mac")} per MAC-Freigabe${n("park") ? ` · ${n("park")} ohne Zugriff im Park-VLAN (Reiter „Ohne Zugriff“)` : ""}</span>
         <div class="right"><div class="seg" role="group" aria-label="Anmeldungen filtern" id="auf">${[["all", "Alle"], ["dot1x", "802.1X"], ["mac", "MAC-Freigabe"]]
           .map(([k, l]) => `<button type="button" data-af="${k}" aria-pressed="${authFilter === k}">${l}</button>`).join("")}</div></div></div>`
         + (list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Anmeldung</th><th>Rolle · VLAN</th><th>Switch · Port</th><th>Seit</th></tr></thead><tbody>`

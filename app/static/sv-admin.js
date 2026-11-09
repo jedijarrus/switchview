@@ -316,7 +316,7 @@
   const KINDS = { drucker: "Drucker", telefon: "Telefon", kamera: "Kamera", iot: "IoT / Sensor", zugang: "Zugangskontrolle", server: "Server", netzwerk: "Netzwerkgerät", sonstiges: "Sonstiges" };
   let ROLES = { configured: false, roles: [] }, devFilter = "all", devText = "";
   const today = () => new Date().toISOString().slice(0, 10);
-  const freePill = d => !d.allowed ? `<span class="pill neutral">nicht freigegeben</span>` : d.valid_until && d.valid_until < today() ? `<span class="pill warn">abgelaufen</span>` : `<span class="pill st-known">freigegeben</span>`;
+  const freePill = d => !d.allowed ? `<span class="pill neutral">gesperrt</span>` : d.valid_until && d.valid_until < today() ? `<span class="pill warn">abgelaufen</span>` : `<span class="pill st-known">freigegeben</span>`;
   const pfPill = d => d.pf_state === "ok" && d.pf_error ? `<span class="pill warn" title="${esc(d.pf_error)}">übernommen, Hinweis</span>` : d.pf_state === "ok" ? `<span class="pill ok" title="${esc(fmtTime(d.pf_synced_at))}">übernommen</span>` : d.pf_state === "fehler" ? `<span class="pill crit" title="${esc(d.pf_error || "")}">Fehler</span>` : d.pf_state === "aus" ? `<span class="pill neutral" title="PacketFence-API nicht eingerichtet">nicht verbunden</span>` : `<span class="muted">–</span>`;
   // PacketFence's error under the pill (a title reaches no touch or keyboard user): for "übernommen, Hinweis" and "Fehler"
   const pfNote = d => d.pf_error && (d.pf_state === "ok" || d.pf_state === "fehler") ? `<span class="cellnote">${esc(d.pf_error)}</span>` : "";
@@ -326,25 +326,43 @@
   const UNKNOWN_FLAG_TEXT = { uplink_lldp: () => "Port gilt als Uplink (unbestätigt)",
     uplink_bm: () => "Port gilt als Uplink (unbestätigt): dort wird die Basis-MAC eines Switches gelernt",
     lldp: d => d.lldp ? `hinter LLDP-Gerät „${d.lldp}“` : "hinter LLDP-Gerät", many: d => `Port mit ${d.mc} Geräten` };
+  // The tab of the devices view: park (Ohne Zugriff), net (Im Netz), rel (MAC-Freigaben; "Freigaben" is the four-eyes tab), watch (Beobachtung); null until the sessions
+  // are there the first time: Ohne Zugriff while a device is parked, else Im Netz. devBehind: Im Netz shows the unknown devices behind
+  // an LLDP device or at a port with many devices too
+  let devTab = null, devBehind = false;
+  const DEV_TABS = [["park", "Ohne Zugriff"], ["net", "Im Netz"], ["rel", "MAC-Freigaben"], ["watch", "Beobachtung"]];
+  const NOISE_FLAGS = ["lldp", "many"];
+  // The devices view, one question per tab: who has no access now (sessions PacketFence parked), who is on the network and how
+  // (sessions logged in by 802.1X or a MAC release, and devices the switches learned at ports without login), what is released (the
+  // device database) and which MACs are watched. A device stands once per tab
   async function renderDevices() {
     const v = $("#view"); v.innerHTML = `<div class="empty">Lade …</div>`;
     let list;
     try { [list, ROLES] = await Promise.all([api("GET", "/api/devices"), api("GET", "/api/pf/roles")]); } catch (e) { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
     // Creating, changing and allowing devices (and the PacketFence sync, which writes there) is Ändern: below it the list only reads
-    const may = roleOk("aendern");
+    const may = roleOk("aendern"), tab = devTab || "park";
+    const panel = (k, html) => `<div data-panel="${k}" id="dp-${k}" role="tabpanel" aria-labelledby="dt-${k}" style="display:grid;gap:20px"${tab === k ? "" : " hidden"}>${html}</div>`;
     v.innerHTML = `
       ${!ROLES.configured ? `<div class="banner warn">Die PacketFence-API ist nicht eingerichtet (Einstellungen). Freigaben wirken erst, wenn sie in PacketFence stehen.</div>` : ROLES.error ? `<div class="error">PacketFence: ${esc(ROLES.error)}</div>` : ""}
-      <section class="card" id="park-card" hidden></section>
-      <section class="card"><div class="card-h"><h2>Geräte</h2><span class="sub">${list.length} bekannt · ${list.filter(d => d.allowed).length} ohne Zertifikat freigegeben</span>
-        <div class="right toolrow"><div class="seg" role="group" aria-label="Geräte filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Nicht freigegeben"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
-          <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
-          ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button>` : ""}</div></div>
+      <div class="dtabs" role="tablist" aria-label="Geräte" id="dtabs">${DEV_TABS.map(([k, l]) => `<button type="button" role="tab" id="dt-${k}" data-tab="${k}" aria-controls="dp-${k}" aria-selected="${tab === k}">${l}<span class="count" id="dn-${k}"></span></button>`).join("")}</div>
+      ${panel("park", `<section class="card" id="park-card"><div class="card-h"><h2>Ohne Zugriff</h2></div><div class="empty">Lade …</div></section>`)}
+      ${panel("net", `<section class="card" id="auth-card"></section>
+        <section class="card"><div class="card-h"><h2>Ohne Anmeldung</h2><span class="sub">an Ports ohne Anmeldung gelernt und nicht freigegeben: sie haben Zugang, PacketFence fragt dort nicht</span>
+          <label class="check right" style="font-size:12.5px"><input type="checkbox" id="d-behind"${devBehind ? " checked" : ""}> auch hinter anderen Geräten <span id="d-behind-n"></span></label></div><div id="ulist"><div class="empty">Lade …</div></div></section>`)}
+      ${panel("rel", `<section class="card"><div class="card-h"><h2>MAC-Freigaben</h2><span class="sub">${list.length} ${list.length === 1 ? "Gerät" : "Geräte"} ohne Zertifikat · ${list.filter(d => !d.allowed).length} gesperrt</span>
+        <div class="right toolrow"><div class="seg" role="group" aria-label="MAC-Freigaben filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Gesperrt"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
+          <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="MAC-Freigaben durchsuchen" value="${esc(devText)}">
+          ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät freigeben</button>` : ""}</div></div>
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
-        <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Anmeldung</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
-      <section class="card" id="auth-card"></section>
-      <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>
-      <section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`;
-    const watched = renderWatchInto($("#w-card"));    // the watch list (sv-alerts.js), beside the unknown devices
+        <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Status</th><th>Anmeldung</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>`)}
+      ${panel("watch", `<section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`)}`;
+    const show = k => {
+      devTab = k;
+      document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === k)));
+      document.querySelectorAll("[data-panel]").forEach(p => { p.hidden = p.dataset.panel !== k; });
+    };
+    $("#dtabs").addEventListener("click", e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); });
+    const watched = renderWatchInto($("#w-card"));    // the watch list (sv-alerts.js)
     const rows = () => {
       const t = devText.toLowerCase();
       const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "err" && d.pf_state === "fehler"))
@@ -352,11 +370,10 @@
       $("#dbody").innerHTML = f.length ? f.map(d => `<tr${may ? ` class="clickrow" data-mac="${esc(d.mac)}"` : ""}><td><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}</div></td>
         <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td><td>${authCell(d.mac)}</td>
         <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}${pfNote(d)}</td></tr>`).join("")
-        : `<tr><td colspan="7" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“." : "Noch keine Geräte."}</td></tr>`;
+        : `<tr><td colspan="7" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine MAC-Freigaben. Unter „Ohne Zugriff“ oder „Im Netz“ freigeben, oder „Gerät freigeben“." : "Noch keine MAC-Freigaben."}</td></tr>`;
     };
     rows();
-    // Who is logged in now (sv-auth.js): the card, then the column of the list, once PacketFence answered
-    renderAuthInto($("#auth-card")).then(() => { if ($("#dbody")) rows(); });
+    $("#dn-rel").textContent = list.length;
     $("#df").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (!b) return; devFilter = b.dataset.f; document.querySelectorAll("#df [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.f === devFilter))); rows(); });
     $("#dq").addEventListener("input", e => { devText = e.target.value.trim(); rows(); });
     if (may) {
@@ -365,18 +382,29 @@
       $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     }
     try {
-      // With the sessions (sv-auth.js): a parked device stands under "Ohne Zugriff", one logged in (802.1X, MAC release) is not
-      // unknown; here only those without a session (a port without login)
+      // With the sessions (sv-auth.js): a parked device stands under "Ohne Zugriff", one logged in (802.1X, MAC release) under
+      // "Angemeldet"; "Ohne Anmeldung" lists the unknown ones without a session (a port without login)
       const [got] = await Promise.all([api("GET", "/api/devices/unknown"), loadAuth()]), all = Array.isArray(got) ? got : [];
-      renderParkedInto($("#park-card"), parkedOf(list, all), may);
-      const un = all.filter(d => !authSession(d.mac));
+      const parked = parkedOf(list, all);
+      renderParkedInto($("#park-card"), parked, may);
+      renderAuthInto($("#auth-card")).then(() => { if ($("#dbody")) rows(); });
+      const un = all.filter(d => !authSession(d.mac)), noise = d => (d.flags || []).some(f => NOISE_FLAGS.includes(f));
+      const live = authReady() ? SESS.sessions.filter(x => !x.park).length : 0;
+      $("#dn-park").textContent = parked.length || ""; $("#dn-park").classList.toggle("alert", parked.length > 0);
+      $("#dn-net").textContent = live + un.length;
+      if (devTab == null) show(parked.length ? "park" : "net");
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
-      if (!$("#ulist")) return;
-      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
-        `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
-        : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
-      $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
+      const drawUnknown = () => {
+        const shown = un.filter(d => devBehind || !noise(d));
+        $("#d-behind-n").textContent = `(${un.filter(noise).length})`;
+        $("#ulist").innerHTML = shown.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + shown.map(d =>
+          `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${un.indexOf(d)}">Freigeben</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
+          : `<div class="empty">${un.length ? "Nur Geräte hinter anderen Geräten (oben einblenden)." : "Keine Geräte ohne Anmeldung."}</div>`;
+      };
+      drawUnknown();
+      $("#d-behind").addEventListener("change", e => { devBehind = e.target.checked; drawUnknown(); });
+      $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     await watched;
   }
@@ -398,7 +426,7 @@
         <label class="field"><span>Standort</span><input id="dv-loc" value="${esc(d.location || "")}" maxlength="64"></label>
         <label class="field"><span>Verantwortlich</span><input id="dv-owner" value="${esc(d.owner || "")}" maxlength="64"></label></div>
       <label class="field"><span>Notiz</span><textarea id="dv-notes" rows="2" maxlength="500">${esc(d.notes || "")}</textarea></label>
-      <fieldset class="fs"><legend>Freigabe</legend><label class="check"><input type="checkbox" id="dv-allowed" ${d.allowed || release ? "checked" : ""}> Ohne Zertifikat freigeben (MAC-Anmeldung an Ports „RADIUS“ und „Bekannte Geräte“)</label>
+      <fieldset class="fs"><legend>Freigabe</legend><label class="check"><input type="checkbox" id="dv-blocked" ${!isNew && !release && !d.allowed ? "checked" : ""}> Gesperrt (Eintrag bleibt, kein Zugang)</label>
         <label class="field" style="max-width:220px"><span>Gültig bis (optional)</span><input id="dv-until" type="date" value="${esc(d.valid_until || "")}"></label>
         <p class="note" style="margin:0">MAC-Adressen lassen sich fälschen. Nur für Geräte freigeben, die kein Zertifikat können, zum Beispiel Drucker oder Telefone.</p></fieldset>`;
     const btns = [];
@@ -408,9 +436,9 @@
       try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || `Gelöscht${AUTH_SWITCH_NOTE}`); MAP = null; authAfterChange(); if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
-    btns.push({ label: release ? "Freigeben" : isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {
+    btns.push({ label: release || isNew ? "Freigeben" : "Speichern", cls: "primary", onClick: async b => {
       const payload = { mac: $("#dv-mac").value.trim(), name: $("#dv-name").value.trim(), kind: $("#dv-kind").value, role: $("#dv-role").value.trim(), location: $("#dv-loc").value.trim(),
-        owner: $("#dv-owner").value.trim(), notes: $("#dv-notes").value.trim(), allowed: $("#dv-allowed").checked, valid_until: $("#dv-until").value || null };
+        owner: $("#dv-owner").value.trim(), notes: $("#dv-notes").value.trim(), allowed: !$("#dv-blocked").checked, valid_until: $("#dv-until").value || null };
       if (!payload.mac || !payload.name) { toast("MAC und Name sind Pflicht"); return; }
       b.disabled = true;
       try {
@@ -420,7 +448,7 @@
         MAP = null; authAfterChange(); if (current === "devices") renderDevices();    // the sessions anew now and once the port switched
       } catch (e) { toast(e.message); b.disabled = false; }
     } });
-    modal(release ? "Gerät freigeben" : isNew ? "Gerät hinzufügen" : `Gerät: ${d.name}`, body, btns);
+    modal(release || isNew ? "Gerät freigeben" : `Gerät: ${d.name}`, body, btns);
   }
 
   /* ── Sicherungen ── */

@@ -60,14 +60,17 @@ async def list_devices(user=Depends(auth.require(roles.LESEN))):
     async with db() as conn:
         async with conn.execute("SELECT * FROM devices ORDER BY name COLLATE NOCASE") as cur:
             devs = [dict(r) for r in await cur.fetchall()]
-        async with conn.execute("SELECT m.mac, m.port, m.vlan, m.last_seen, s.name AS sw, p.mac_count, n.ip, n.name AS hn FROM macs m "
+        async with conn.execute("SELECT m.mac, m.port, m.vlan, m.last_seen, s.name AS sw, p.mac_count, p.trunk, n.ip, n.name AS hn FROM macs m "
                                 "JOIN devices d ON d.mac = m.mac JOIN switches s ON s.id = m.switch_id "
                                 "LEFT JOIN ports p ON p.switch_id = m.switch_id AND p.name = m.port LEFT JOIN names n ON n.mac = m.mac") as cur:
             seen = await cur.fetchall()
     best: dict[str, dict] = {}
-    for r in seen:  # Zugangsport = der Port mit den wenigsten MACs
+    # Zugangsport = kein Trunk (Trk, LAG oder ein Mitglied: dort lernt ein Uplink die MACs eines ganzen Switches), dann der Port mit
+    # den wenigsten MACs
+    rank = lambda r: (bool(str(r["port"]).startswith("Trk") or r["trunk"]), r["mac_count"] or 999)    # noqa: E731
+    for r in seen:
         b = best.get(r["mac"])
-        if not b or (r["mac_count"] or 999) < (b["mac_count"] or 999):
+        if not b or rank(r) < rank(b):
             best[r["mac"]] = dict(r)
     for d in devs:
         d["seen"] = best.get(d["mac"])

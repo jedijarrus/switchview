@@ -189,7 +189,7 @@ def test_the_card_lists_every_login_and_only_counts_the_parked(pick, rows):
     then = ('const el = $("#c"); await renderAuthInto(el); %s return el.innerHTML;'
             % ("" if pick == "all" else 'el.onclick({target: {closest: () => ({dataset: {af: "%s"}})}});' % pick))
     html = view(then)
-    assert "1 per 802.1X · 1 per MAC-Freigabe · 1 ohne Zugriff im Park-VLAN (oben unter „Ohne Zugriff“)" in html
+    assert "1 per 802.1X · 1 per MAC-Freigabe · 1 ohne Zugriff im Park-VLAN (Reiter „Ohne Zugriff“)" in html
     assert html.count("<tr><td>") == rows and GUEST not in html and 'data-af="park"' not in html
     if pick == "all":
         assert ('<tr><td>Drucker EK</td><td class="mono">00:11:22:33:44:55</td><td><span class="pill au-m">MAC</span></td><td>vlan_140 · 140</td>'
@@ -236,21 +236,64 @@ def test_a_known_device_parked_opens_its_own_form_and_a_reader_gets_no_button():
 
 
 @NODE
-def test_without_a_parked_device_the_card_is_gone():
+def test_without_a_parked_device_the_card_says_so_and_the_view_opens_on_the_network():
     answer = {**ANSWER, "sessions": [s for s in SESS if not s["park"]]}
-    assert view_devices('return [$("#park-card").hidden, $("#park-card").innerHTML];', answer=answer) == [True, ""]
+    card, tab, count = view_devices('return [$("#park-card").innerHTML, devTab, $("#dn-park").textContent];', answer=answer)
+    assert "Gerade kein Gerät ohne Zugriff." in card and tab == "net" and count == ""
 
 
 @NODE
-@pytest.mark.parametrize("release, title, button", [(True, "Gerät freigeben", "Freigeben"), (False, "Gerät hinzufügen", "Anlegen")])
-def test_the_release_form_has_the_box_ticked(release, title, button):
+def test_a_parked_device_opens_the_view_on_its_tab_with_a_count():
+    tab, park, net, rel, alert = view_devices('return [devTab, $("#dn-park").textContent, $("#dn-net").textContent, $("#dn-rel").textContent, '
+                                              '$("#dn-park").classList.contains("alert")];')
+    # the guest parked; logged in: the laptop and the printer; without a session: one learned device; released: the printer
+    assert (tab, park, net, rel, alert) == ("park", 1, 3, 1, True)
+
+
+@NODE
+def test_the_devices_behind_other_devices_are_hidden_until_asked_for():
+    unknown = [*UNKNOWN, {"mac": "00:00:00:00:00:0a", "sw": "SW-TEST", "sid": 8, "port": "4", "vlan": "1", "st": "", "flags": ["many"], "lldp": "",
+                          "mc": 9, "name": "", "vendor": ""}]
+    js = (DEVICES_VIEW.replace("%s })()", "") % ("aendern", json.dumps(ANSWER), json.dumps(unknown), PRINTER)
+          + 'const before = $("#ulist").innerHTML; $("#d-behind").handlers.change[0]({target: {checked: true}}); '
+            'return [before, $("#ulist").innerHTML, $("#d-behind-n").textContent]; })()')
+    from test_frontend_dom import in_dom
+    before, after, n = in_dom(js)
+    assert "00:00:00:00:00:0a" not in before and "00:00:00:00:00:0a" in after and n == "(1)"
+
+
+@NODE
+@pytest.mark.parametrize("dev, is_new, release, title, button, locked", [
+    ({}, True, False, "Gerät freigeben", "Freigeben", False), ({}, True, True, "Gerät freigeben", "Freigeben", False),
+    ({"name": "Drucker", "allowed": 0}, False, False, "Gerät: Drucker", "Speichern", True),
+    ({"name": "Drucker", "allowed": 0}, False, True, "Gerät freigeben", "Freigeben", False),
+    ({"name": "Drucker", "allowed": 1}, False, False, "Gerät: Drucker", "Speichern", False)],
+    ids=["new", "new-release", "locked", "unlock", "released"])
+def test_a_device_is_released_unless_locked(dev, is_new, release, title, button, locked):
+    # Saving a device releases it; "Gesperrt" keeps the entry without access, ticked only for a locked device opened to edit
     from test_frontend_dom import in_dom
     got = in_dom('(async () => { ME = {name: "x", role: "aendern"}; ROLES = {configured: true, roles: []}; let cap = null; '
                  'modal = (t, b, btns) => { cap = [t, b, btns.map(x => x.label)]; }; '
-                 'await editDevice({mac: "aa:bb:cc:00:00:01", name: "", kind: "sonstiges"}, true, %s); '
-                 'return cap; })()' % json.dumps(release))
-    assert got[0] == title and got[2][-1] == button
-    assert ('<input type="checkbox" id="dv-allowed" checked>' in got[1]) == release
+                 'await editDevice(%s, %s, %s); return cap; })()'
+                 % (json.dumps({"mac": "aa:bb:cc:00:00:01", "name": "", "kind": "sonstiges", **dev}), json.dumps(is_new), json.dumps(release)))
+    assert got[0] == title and got[2][-1] == button and "Ohne Zertifikat freigeben" not in got[1]
+    assert re.search(r'<input type="checkbox" id="dv-blocked" ?(checked)?> Gesperrt \(Eintrag bleibt, kein Zugang\)</label>', got[1]).group(1) == (
+        "checked" if locked else None)
+
+
+def test_last_seen_is_an_access_port_never_a_trunk(api, packetfence):
+    async def go():
+        async with db.db() as conn:
+            await conn.execute("INSERT INTO switches (id, name, host) VALUES (9, 'SW-CORE', '192.0.2.201')")
+            await conn.executemany("INSERT INTO ports (switch_id, ifindex, name, trunk, mac_count) VALUES (?, ?, ?, ?, ?)",
+                                   [(9, 300, "Trk2", None, 2), (9, 25, "25", "Trk2", 2)])
+            await conn.execute("UPDATE ports SET mac_count = 5 WHERE switch_id = 8 AND name = '10'")
+            await conn.executemany("INSERT INTO macs (switch_id, port, mac, vlan, last_seen) VALUES (?, ?, ?, ?, '2026-11-09 14:00:00')",
+                                   [(9, "Trk2", PRINTER, "100"), (9, "25", PRINTER, "200"), (8, "10", PRINTER, "100")])
+            await conn.commit()
+    asyncio.run(go())
+    seen = {d["mac"]: d["seen"] for d in api.get("/api/devices").json()}[PRINTER]
+    assert (seen["sw"], seen["port"]) == ("SW-TEST", "10")
 
 
 def view_devices(then: str, answer=ANSWER, role: str = "aendern"):
