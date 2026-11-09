@@ -311,6 +311,8 @@
   }
 
   /* ── Geräte-Datenbank ── */
+  // The PacketFence role a new device starts with (an example value: the role of the client VLAN)
+  const DEVICE_ROLE = "vlan_140";
   const KINDS = { drucker: "Drucker", telefon: "Telefon", kamera: "Kamera", iot: "IoT / Sensor", zugang: "Zugangskontrolle", server: "Server", netzwerk: "Netzwerkgerät", sonstiges: "Sonstiges" };
   let ROLES = { configured: false, roles: [] }, devFilter = "all", devText = "";
   const today = () => new Date().toISOString().slice(0, 10);
@@ -383,9 +385,11 @@
   // freigeben" ticked (it can still be unticked) and the button "Freigeben", for a new device or a known one
   async function editDevice(d, isNew, release = false) {
     if (!ROLES.configured && !ROLES.roles.length) { try { ROLES = await api("GET", "/api/pf/roles"); } catch (e) { /* egal */ } }
+    // A new device starts in DEVICE_ROLE: a release without a role would get PacketFence's role "default"
+    const role = d.role || (isNew ? DEVICE_ROLE : "");
     const roleField = ROLES.roles.length
-      ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${d.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
-      : `<input id="dv-role" value="${esc(d.role || "")}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
+      ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
+      : `<input id="dv-role" value="${esc(role)}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
     // PacketFence's error of a stored device stands above the form (the list shows it under the pill)
     const body = `${!isNew && d.pf_error ? `<div class="banner warn"><span><b>PacketFence:</b> ${esc(d.pf_error)}</span></div>` : ""}<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
         <label class="field"><span>Name</span><input id="dv-name" value="${esc(d.name || "")}" maxlength="64" required autocomplete="off"></label>

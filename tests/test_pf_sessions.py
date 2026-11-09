@@ -5,6 +5,7 @@ PacketFence is a fake httpx (apifix.fake_httpx): nothing leaves the process.
 """
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -262,3 +263,15 @@ def view_devices(then: str, answer=ANSWER, role: str = "aendern"):
                                           ({"configured": True, "ok": False, "error": "HTTP 500 <x>", "sessions": []}, "HTTP 500 &lt;x&gt;")])
 def test_the_card_says_why_it_has_nothing(answer, said):
     assert said in view('const el = $("#c"); await renderAuthInto(el); return el.innerHTML;', answer)
+
+
+@NODE
+@pytest.mark.parametrize("dev, is_new, want", [({}, True, "vlan_140"), ({"role": "vlan_130"}, True, "vlan_130"), ({"role": ""}, False, None)],
+                         ids=["new", "new-with-role", "stored-default"])
+def test_a_new_device_starts_in_the_client_lan(dev, is_new, want):
+    from test_frontend_dom import in_dom
+    body = in_dom('(async () => { ME = {name: "x", role: "aendern"}; ROLES = {configured: true, roles: [{name: "vlan_140"}, {name: "vlan_130"}, '
+                  '{name: "vlan_3999"}]}; let cap = ""; modal = (t, b) => { cap = b; }; await editDevice(%s, %s, true); return cap; })()'
+                  % (json.dumps({"mac": "aa:bb:cc:00:00:01", "name": "", "kind": "sonstiges", **dev}), json.dumps(is_new)))
+    selected = re.findall(r'<option value="([^"]*)" selected>', body.split('<select id="dv-role">')[1].split("</select>")[0])
+    assert selected == ([want] if want else [])
