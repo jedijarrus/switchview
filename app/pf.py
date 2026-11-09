@@ -181,6 +181,57 @@ async def unregister(mac: str) -> str | None:
     return None if code is None else f"In PacketFence zurückgenommen, aber Neubewertung (CoA) fehlgeschlagen: HTTP {code}"
 
 
+# The LAN logins of the locationlog: by 802.1X and by MAC (MAC authentication bypass)
+WIRED = ("Ethernet-EAP", "Ethernet-NoEAP")
+LOGIN_FIELDS = ["mac", "connection_type", "dot1x_username", "role", "switch", "port", "start_time"]
+
+
+async def wired_logins(since: str, *, limit: int = 1000, pages: int = 20) -> list[dict]:
+    """The LAN logins PacketFence recorded from since on (its locationlog; start_time in PacketFence's own clock, as since): by 802.1X
+    (Ethernet-EAP) and by MAC (Ethernet-NoEAP), oldest first, each with LOGIN_FIELDS. At most pages pages of limit entries, the rest
+    comes with the next call. RuntimeError without PacketFence set up or when it does not answer the search."""
+    query = {"op": "and", "values": [{"op": "or", "values": [{"field": "connection_type", "op": "equals", "value": w} for w in WIRED]},
+                                     {"field": "start_time", "op": "greater_than_equals", "value": since}]}
+    out: list[dict] = []
+    async with session() as cl:
+        cursor = 0
+        for _ in range(pages):
+            r = await cl.post("/locationlogs/search", json={"query": query, "fields": LOGIN_FIELDS, "sort": ["start_time ASC"], "limit": limit,
+                                                            "cursor": cursor})
+            if r.status_code != 200:
+                raise RuntimeError(f"PacketFence-Verlauf nicht lesbar (HTTP {r.status_code})")
+            data = r.json()
+            items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+            out += items
+            nxt = data.get("nextCursor")
+            if not items or not nxt:
+                break
+            cursor = nxt
+    return out
+
+
+async def hand_back(mac: str) -> bool:
+    """Takes SwitchView's MAC release of a computer that logs in by 802.1X back without disturbing it: its node, as long as SwitchView
+    owns it (pid OWNER), unregistered and given back to "default", without a re-evaluation (a running 802.1X session stays; its next
+    802.1X login registers it anew, PacketFence's connection profile). A node of another owner (registered by its 802.1X login) or one
+    PacketFence does not know stays as it is. Nothing without PacketFence set up. True when it unregistered the node; RuntimeError when
+    PacketFence does not confirm reading or writing it."""
+    if not await configured():
+        return False
+    async with session() as cl:
+        r = await cl.get(f"/node/{mac}")
+        if r.status_code == 404:
+            return False
+        if r.status_code != 200:
+            raise RuntimeError(f"Node lesen: HTTP {r.status_code}")
+        if (r.json().get("item") or {}).get("pid") != OWNER:
+            return False
+        r = await cl.patch(f"/node/{mac}", json={"status": "unreg", "pid": "default"})
+        if r.status_code not in (200, 201, 204):
+            raise RuntimeError(f"Node zurücknehmen: HTTP {r.status_code} {r.text[:150]}")
+    return True
+
+
 async def expire_and_sync():
     """Naechtlich: abgelaufene Freigaben zuruecknehmen, dann alles abgleichen."""
     async with db() as conn:

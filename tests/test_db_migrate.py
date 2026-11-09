@@ -401,10 +401,11 @@ async def _default_of(conn, table: str, column: str):
         return (await cur.fetchone())[0]
 
 
-# The RMM sync (app/rmm.py): the memory of the MACs per computer (with idx_rmm_macs_agent) and the exclusion list, and per device
+# The RMM sync (app/rmm.py): the memory of the MACs per computer (with idx_rmm_macs_agent), the exclusion list, the computers
+# proven by 802.1X and those of them parked, and per device
 # where it comes from, its agent and its last confirmation. A database of before has none of them, and its devices read NULL there:
 # kept by hand.
-RMM_TABLES = {"rmm_macs", "rmm_excluded"}
+RMM_TABLES = {"rmm_macs", "rmm_excluded", "rmm_dot1x", "rmm_parked"}
 RMM_COLUMNS: set[tuple[str, str]] = {("devices", "source"), ("devices", "rmm_agent"), ("devices", "rmm_seen_at")}
 
 

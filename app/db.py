@@ -276,6 +276,18 @@ CREATE INDEX IF NOT EXISTS idx_rmm_macs_agent ON rmm_macs(agent_id);
 -- löscht, legt der Abgleich nicht wieder an (die Hand gewinnt), bis jemand es wieder aufnimmt (DELETE /api/rmm/excluded/{mac}).
 CREATE TABLE IF NOT EXISTS rmm_excluded (
     mac TEXT PRIMARY KEY, hostname TEXT NOT NULL DEFAULT '', created_by TEXT, created_at TEXT NOT NULL);
+-- RMM-Abgleich, 802.1X statt MAC: ein Rechner, den PacketFence am LAN per 802.1X mit seinem Maschinenkonto angemeldet hat
+-- (Ethernet-EAP, der Name vor dem ersten Punkt sein Rechnername, eine Rolle außer Park), bekommt keine MAC-Freigabe (kein Rückfall).
+-- Einmal nachgewiesen bleibt nachgewiesen, solange es den Rechner im RMM gibt. mac: die Karte der Anmeldung; proven_at (UTC,
+-- SwitchViews Uhr) und last_eap_at (die Uhr von PacketFence, wie sein Verlauf sie schreibt). Geschrieben nur von rmm._run.
+CREATE TABLE IF NOT EXISTS rmm_dot1x (
+    agent_id TEXT PRIMARY KEY, hostname TEXT NOT NULL, mac TEXT NOT NULL, proven_at TEXT NOT NULL, last_eap_at TEXT NOT NULL);
+-- RMM-Abgleich: ein nachgewiesener Rechner, dessen letzte LAN-Anmeldung per MAC im Park-VLAN endete (seen_at: ihre Zeit in der
+-- Uhr von PacketFence; switch: die Adresse, die PacketFence nennt). noted_at: wann der Abgleich es sah (UTC); alerted_at: wann er es
+-- meldete, nachdem es rmm.PARK_GRACE so blieb (NULL: noch nicht). Die nächste 802.1X-Anmeldung des Rechners löscht die Zeile.
+CREATE TABLE IF NOT EXISTS rmm_parked (
+    agent_id TEXT PRIMARY KEY, hostname TEXT NOT NULL, mac TEXT NOT NULL, switch TEXT NOT NULL DEFAULT '', port TEXT NOT NULL DEFAULT '',
+    seen_at TEXT NOT NULL, noted_at TEXT NOT NULL, alerted_at TEXT);
 -- Phase 4c, Task 7: the switches of a bulk change in their order (pos): the switch (NULL once it is deleted; switch_name keeps its
 -- name), its ports (JSON), the write way and the preview token of its preview (NULL for a skipped switch), status (waiting, running,
 -- done, failed, skipped, not_started), the change it started (change_id, no foreign key: the change goes with its switch) and the
