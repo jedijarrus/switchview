@@ -19,13 +19,13 @@
   // beside its field
   function alertCardHtml(s, admin) {
     const head = `<div class="card-h"><h2>Benachrichtigungen</h2></div>`;
-    if (!admin) return head + `<div class="card-b" style="max-width:640px"><p class="note gate">Benachrichtigungen einrichten braucht die Rolle „Admin“.</p></div>`;
+    if (!admin) return head + `<div class="card-b"><p class="note gate">Benachrichtigungen einrichten braucht die Rolle „Admin“.</p></div>`;
     if (!s || !s.events) return head + (s && s.error ? `<div class="empty">${esc(s.error)}</div>` : "");
     const lim = s.limits || {}, on = (id, key) => `<label class="check"><input id="${id}" type="checkbox"${s[key] ? " checked" : ""}>`;
     const boxes = (attr, picked) => `<fieldset class="evs"><legend>Ereignisse</legend>${Object.keys(s.events).map(k => `<label class="check"><input type="checkbox" `
       + `data-${attr}="${esc(k)}"${(picked || []).includes(k) ? " checked" : ""}> ${esc(s.events[k])}</label>`).join("")}</fieldset>`;
     const text = (id, label, v, extra = "") => `<label class="field"><span>${label}</span><input id="${id}" value="${esc(v)}"${extra} autocomplete="off"></label>`;
-    return head + `<div class="card-b" style="display:grid;gap:16px;max-width:640px">
+    return head + `<div class="card-b set-b">
       <p class="note" style="margin:0">SwitchView meldet Ereignisse per Mail und per Webhook (Microsoft Teams oder JSON). Dieselbe Meldung geht innerhalb von ${esc(lim.dedup_minutes)} Minuten einmal hinaus, je Weg höchstens ${esc(lim.cap_per_hour)} in der Stunde.</p>
       <fieldset class="fs"><legend>Mail (SMTP)</legend>${on("a-mail-on", "mail_on")} Mail senden</label>
         <div class="grid2">${text("a-host", "Mailserver", s.smtp_host, ' maxlength="253"')}<label class="field"><span>Port</span><input id="a-port" type="number" min="1" max="65535" value="${esc(s.smtp_port)}"></label></div>
@@ -41,8 +41,8 @@
         <div class="grid2"><label class="field"><span>Format</span><select id="a-fmt">${choices(HOOK_FORMATS, s.hook_format)}</select></label></div>
         ${on("a-htls", "hook_verify_tls")} TLS-Zertifikat prüfen</label>
         ${boxes("hev", s.hook_events)}<div><button class="btn small" type="button" id="a-htest">Test senden</button></div></fieldset>
-      <p class="note" style="margin:0">Die Test-Knöpfe senden über den gespeicherten Stand: vorher speichern.${s.public_url ? "" : " Ohne PUBLIC_URL enthalten die Meldungen keinen Link zu SwitchView."}</p>
-      <div><button class="btn primary" type="button" id="a-save">Benachrichtigungen speichern</button></div></div>
+      <p class="note" style="margin:0">Die Test-Knöpfe senden über den gespeicherten Stand: vorher speichern.${s.public_url ? "" : " Ohne PUBLIC_URL enthalten die Meldungen keinen Link zu SwitchView."}</p></div>
+      ${cardFoot("a-save", "Benachrichtigungen")}
       <div class="card-h sub-h"><h3>Letzte Meldungen</h3><span class="sub">die letzten 20, nicht zugestellte zuerst</span></div><div id="a-deliv"><div class="empty">Lade …</div></div>`;
   }
   // The rows of "Letzte Meldungen" (GET /api/alerts/deliveries): the ones not delivered first, the rest as the server sends them
@@ -57,7 +57,7 @@
       + `<td>${esc(ALERT_WAYS[r.channel] || r.channel)}</td><td>${esc(r.title)}${r.repeats > 0 ? ` · ${esc(r.repeats)}× wiederholt` : ""}</td><td>${state(r)}</td></tr>`).join("");
   }
   // The card's controls for an Admin: the note of a new mail server, the test buttons (POST /api/alerts/test: the stored channel,
-  // the answer as a message), "Benachrichtigungen speichern" (PUT /api/settings/alerts with every field; a secret left empty is null
+  // the answer as a message), "Speichern" (PUT /api/settings/alerts with every field; a secret left empty is null
   // and stays; what the server's 422 would say in English is said here first), then "Letzte Meldungen"
   async function bindAlertCard(s) {
     if (!roleOk("admin") || !s || !s.events) return;
@@ -81,6 +81,7 @@
           smtp_security: $("#a-sec").value, smtp_verify_tls: $("#a-mtls").checked, smtp_user: $("#a-user").value.trim(), smtp_pass: $("#a-pass").value || null,
           mail_from: $("#a-from").value.trim(), mail_to: to.list, mail_events: picked("[data-mev]", "mev"), hook_on: $("#a-hook-on").checked,
           webhook_url: url || null, hook_format: $("#a-fmt").value, hook_verify_tls: $("#a-htls").checked, hook_events: picked("[data-hev]", "hev") });
+        setDirty("alert-card", false);
         toast(savedTxt(r.cleared) + (r.dropped ? `. ${SVLogic.plural(r.dropped, "wartende Meldung", "wartende Meldungen")} verworfen` : ""));
         // Read again: the *_set of a secret entered, the messages a channel switched off dropped
         const fresh = await api("GET", "/api/settings/alerts");
@@ -111,15 +112,15 @@
     const head = `<div class="card-h"><h2>Sicherheitsregeln</h2><span class="sub">geprüft an jeder gelesenen Konfiguration und am SNMP-Zugang jedes Switches</span></div>`;
     if (!r || !Array.isArray(r.rules)) return head + (r && r.error ? `<div class="empty">${esc(r.error)}</div>` : "");
     const dis = admin ? "" : " disabled", own = r.rules.filter(x => x.custom);
-    return head + `<div class="card-b" style="display:grid;gap:12px;max-width:640px">${admin ? "" : `<p class="note gate">Regeln ändern braucht die Rolle „Admin“.</p>`}
+    return head + `<div class="card-b set-b">${admin ? "" : `<p class="note gate">Regeln ändern braucht die Rolle „Admin“.</p>`}
       <div class="rules">${r.rules.filter(x => !x.custom).map(x => `<div class="rule"><label class="check"><input type="checkbox" data-rule="${esc(x.id)}"${x.on ? " checked" : ""}${dis} `
         + `aria-describedby="rh-${esc(x.id)}"> <b>${esc(x.label)}</b></label><span class="hint" id="rh-${esc(x.id)}">${esc(x.hint)}</span></div>`).join("")}</div>
       <fieldset class="fs"><legend>Eigene Regeln</legend><p class="note" style="margin:0">Eine eigene Regel sucht einen Text in jeder Zeile der Konfiguration, ohne Muster: „keine Zeile enthält“ meldet jede Zeile mit dem Text, „eine Zeile enthält“ meldet, wenn keine ihn hat.</p>
         <div id="r-custom">${own.length ? own.map(x => customRuleRow(x, admin)).join("") : `<p class="note" id="r-none" style="margin:0">Keine eigenen Regeln.</p>`}</div>
         ${admin ? `<div><button class="btn small" type="button" id="r-add">Regel hinzufügen</button></div>` : ""}</fieldset>
-      ${admin ? `<div><button class="btn primary" type="button" id="r-save">Regeln speichern</button></div>` : ""}</div>`;
+      </div>${admin ? cardFoot("r-save", "Sicherheitsregeln") : ""}`;
   }
-  // An Admin's controls of the rules card: "Regel hinzufügen" appends an empty row, "Entfernen" takes its row away, "Regeln speichern"
+  // An Admin's controls of the rules card: "Regel hinzufügen" appends an empty row, "Entfernen" takes its row away, "Speichern"
   // sends the boxes switched off and the custom rows (PUT /api/compliance/rules; a row left empty is dropped, a half one named first)
   // and draws the card from the answer
   function bindRulesCard(r) {
@@ -142,7 +143,7 @@
       e.target.disabled = true;
       try {
         const saved = await api("PUT", "/api/compliance/rules", { off, custom });
-        $("#rules-card").innerHTML = rulesCardHtml(saved, true); bindRulesCard(saved); toast("Gespeichert");
+        $("#rules-card").innerHTML = rulesCardHtml(saved, true); bindRulesCard(saved); setDirty("rules-card", false); toast("Gespeichert");
         const again = $("#r-save"); if (again) again.focus();
       } catch (err) { toast(err.message); e.target.disabled = false; }
     });

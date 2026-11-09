@@ -93,7 +93,8 @@ def test_an_admin_gets_the_alert_card_and_saves_without_resending_secrets():
                   '<option value="teams">Microsoft Teams (Workflow)</option>', '<option value="json" selected>JSON</option>',
                   '<input id="a-htls" type="checkbox"> TLS-Zertifikat prüfen</label>',
                   '<input type="checkbox" data-hev="drift" checked> Änderung außerhalb von SwitchView</label>', 'id="a-htest">Test senden</button>',
-                  'id="a-save">Benachrichtigungen speichern</button>', 'Ohne PUBLIC_URL enthalten die Meldungen keinen Link zu SwitchView.',
+                  'id="a-save" aria-label="Benachrichtigungen speichern">Speichern</button>',
+                  'Ohne PUBLIC_URL enthalten die Meldungen keinen Link zu SwitchView.',
                   'Letzte Meldungen'):
         assert piece in card, piece
     assert not re.search(r"<label\b(?:(?!</label>).)*<p\b", card, re.S)
@@ -216,7 +217,7 @@ def test_the_rules_card_switches_rules_and_keeps_custom_ones():
             '</select><input data-ctext name="r-text" aria-label="Text der Regel" placeholder="Text, z. B. vlan 666" maxlength="200" '
             'value="vlan 666 &quot;x&quot;">'
             '<button class="btn small" type="button" data-cdel aria-label="Entfernen: Kein VLAN 666">Entfernen</button></div>') in card
-    assert 'id="r-add">Regel hinzufügen</button>' in card and 'id="r-save">Regeln speichern</button>' in card
+    assert 'id="r-add">Regel hinzufügen</button>' in card and 'id="r-save" aria-label="Sicherheitsregeln speichern">Speichern</button>' in card
     assert added == [["beforeend", '<div class="crule" data-crow=""><input data-cname name="r-name" aria-label="Name der Regel" placeholder="Name" '
                                    'maxlength="80" value="">'
                                    '<select data-cmode name="r-mode" aria-label="Art der Regel"><option value="must_not" selected>keine Zeile enthält</option>'

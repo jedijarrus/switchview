@@ -107,7 +107,7 @@
   const confirmModal = (title, text, label, danger) => new Promise(res => modal(title, `<p style="margin:0">${text}</p>`,
     [{ label: "Abbrechen", onClick: () => { closeModal(); res(false); } }, { label, cls: danger ? "danger" : "primary", onClick: () => { closeModal(); res(true); } }]));
 
-  /* ── Secret fields of the settings: one rule for the cards of renderSettings (sv-admin.js) and alertCardHtml (sv-alerts.js) - a
+  /* ── Secret fields of the settings: one rule for the cards of renderSettings (sv-settings.js) and alertCardHtml (sv-alerts.js) - a
      stored secret is never shown, an empty field keeps it, and one that does not decrypt is named beside its field ── */
   const SECRET_KEPT = "gesetzt – leer lassen = unverändert";
   // A stored secret that does not decrypt (s = GET /api/settings or /api/settings/alerts, k its key in s.unreadable; SECRET_KEY
@@ -124,6 +124,11 @@
       + `${o.max ? ` maxlength="${o.max}"` : ""}${desc ? ` aria-describedby="${desc}"` : ""}${o.disabled ? " disabled" : ""}>`
       + `${o.hint ? `<span class="hint" id="${id}-hint">${esc(o.hint)}</span>` : ""}${note}</div>`;
   };
+  // The foot of a settings card: left a hint (hint, HTML) or, while the card holds changes not saved (setDirty of sv-settings.js),
+  // "Ungespeicherte Änderungen"; right the card's other buttons (extra, HTML) and "Speichern" (saveId; none: no button). Every card
+  // says "Speichern", its name is the button's for a screen reader ("<what> speichern")
+  const cardFoot = (saveId, what, extra = "", hint = "") => `<div class="card-f"><span class="f-hint">${hint}</span><span class="f-dirty">Ungespeicherte Änderungen</span>`
+    + `<div class="f-btns">${extra}${saveId ? `<button class="btn primary" type="button" id="${saveId}" aria-label="${what} speichern">Speichern</button>` : ""}</div></div>`;
 
   /* ── Login ── */
   let authCfg = null, msalApp = null, ME = null; // ME: the signed-in user (/api/auth/me), set by start()

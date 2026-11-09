@@ -370,7 +370,8 @@ def test_the_four_eyes_card_saves_and_rereads_the_user():
             '(Rolle „Freigeben“ oder „Admin“)</label>') in html
     assert ('<label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" '
             'max="168" value="24"></label>') in html
-    assert f'<p class="note warn" style="margin:0">{ONE_PERSON}</p>' in html and 'id="s-4save">Vier-Augen-Einstellung speichern</button>' in html
+    assert f'<p class="note warn" style="margin:0">{ONE_PERSON}</p>' in html
+    assert 'id="s-4save" aria-label="Vier-Augen-Prinzip speichern">Speichern</button>' in html
     assert html.index("<h2>Zonen</h2>") < html.index("<h2>Vier-Augen-Prinzip</h2>") < html.index("<h2>Sitzungen</h2>")
     freigeben = in_dom((FOUR_EYES_CARD % (role_me("freigeben"), "return html;")).replace("four_eyes: false, approval_hours: 24",
                                                                                      "four_eyes: true, approval_hours: 24"))

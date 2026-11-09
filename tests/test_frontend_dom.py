@@ -1172,7 +1172,7 @@ def test_a_second_401_keeps_the_reason_the_login_page_shows(answers, between, wa
 
 
 # Review round 1: a stored zone list the field cannot hold as it is (SVLogic.lossyScopes) is named above the field, which names the
-# note in aria-describedby; a list it holds has no note. Task 10: only an Admin, who has „Zonen speichern“, reads that saving would
+# note in aria-describedby; a list it holds has no note. Task 10: only an Admin, who has the card's „Speichern“, reads that saving would
 # change them (the T8-o rule: no sentence points at a button the reader lacks)
 LOSSY = ("Diese Einträge zeigt das Feld nicht so, wie sie gespeichert sind: „A=B“, „Z.H“. Eine Zone mit Komma oder mit dem Namen "
          "„Ohne Zone“ und eine App-Rolle mit „=“ oder „#“ am Anfang lassen sich hier nicht schreiben")
@@ -1185,13 +1185,13 @@ def test_the_zones_card_names_entries_the_field_cannot_hold(entries, noted, role
     prefix = SETTINGS.replace('ME = {name: "x", role: "admin", zones: null, four_eyes: false}; ', role_me(role))
     js = '(async () => { ' + prefix.replace("{entries: []}", json.dumps({"entries": entries})) + 'return $("#view").innerHTML; })()'
     html = in_dom(js)
-    end = "; „Zonen speichern“ würde sie ändern." if role == "admin" else "."
+    end = "; „Speichern“ würde sie ändern." if role == "admin" else "."
     assert (f'<p class="note warn" id="s-scopes-lossy" style="margin:0">{LOSSY}{end}</p>' in html) == noted
     assert "würde sie ändern" not in html or role == "admin"
     assert ('aria-describedby="s-scopes-hint s-scopes-lossy"' in html) == noted and ('aria-describedby="s-scopes-hint"' in html) == (not noted)
 
 
-# Task 10 (browser check): after "Zonen speichern" the field holds what the server stored; a warning about stored entries it could not
+# Task 10 (browser check): after saving the zones the field holds what the server stored; a warning about stored entries it could not
 # hold goes with them (hidden, no longer the field's description), and stays when the answer still has such an entry
 @pytest.mark.parametrize("answer, kept", [([{"principal": "Z.EK", "zones": ["EK"]}], False), ([{"principal": "A=B", "zones": ["EK"]}], True)])
 def test_saving_the_zones_drops_a_warning_that_no_longer_holds(answer, kept):

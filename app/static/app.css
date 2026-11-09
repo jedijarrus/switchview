@@ -65,7 +65,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .field > span { color: var(--fg-2); font-weight: 500; }
 .field input, .field select { height: 34px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); padding: 0 10px; font-size: 13px; }
 .field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
-.field .hint { color: var(--muted); font-size: 11.5px; }
+.field .hint { color: var(--muted); font-size: 12px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fs { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; display: grid; gap: 12px; margin: 0; }
 .fs legend { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 0 4px; font-weight: 500; }
@@ -395,11 +395,11 @@ a.btn { color: var(--fg); text-decoration: none; }
 .au-tools { border-bottom: 1px solid var(--border); }
 .card-h.sub-h { border-top: 1px solid var(--border); }
 .card-h h3 { font-size: 13.5px; }
-.evs { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+.evs { border: 0; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; min-width: 0; }
 .evs legend { padding: 0; margin-bottom: 6px; color: var(--fg-2); font-size: 12.5px; font-weight: 500; text-transform: none; letter-spacing: 0; }
 .rules { display: grid; gap: 10px; }
 .rule { display: grid; gap: 2px; }
-.rule .hint { padding-left: 28px; color: var(--muted); font-size: 11.5px; }
+.rule .hint { padding-left: 28px; color: var(--muted); font-size: 12px; }
 .crule { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr) auto; gap: 8px; align-items: center; margin-bottom: 8px; }
 .crule input, .crule select { height: 32px; min-width: 0; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); padding: 0 8px; font-size: 13px; }
 .crule input:focus, .crule select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
@@ -409,3 +409,28 @@ a.btn { color: var(--fg); text-decoration: none; }
    made the alert card wider than the phone */
 #alert-card .fs { min-width: 0; }
 #alert-card select { min-width: 0; max-width: 100%; }
+/* Einstellungen (sv-settings.js): links die Abschnitte (mitlaufend, der Abschnitt oben markiert), rechts die Karten; jede Karte mit
+   Fuß (cardFoot, sv-core.js): links Hinweis bzw. "Ungespeicherte Änderungen", rechts ihre Knöpfe. Unter 960 px nur die Karten */
+.set-layout { display: grid; grid-template-columns: 208px minmax(0, 760px); gap: 32px; align-items: start; }
+.set-nav { position: sticky; top: 76px; display: grid; gap: 1px; }
+.set-nav button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 6px 10px; border: 0; border-radius: 6px;
+  background: none; color: var(--muted); font-size: 13px; text-align: left; cursor: pointer; }
+.set-nav button:hover { color: var(--fg); background: var(--surface-2); }
+.set-nav button[aria-current] { color: var(--fg); background: var(--surface-2); font-weight: 500; }
+.set-nav .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: none; visibility: hidden; }
+.set-nav button.dirty .dot { visibility: visible; }
+.set-main { display: grid; gap: 20px; min-width: 0; }
+.set-main > .card { scroll-margin-top: 76px; }
+.set-main > .card:focus { outline: none; }
+.set-main > .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r); }
+.set-b { display: grid; gap: 16px; }
+.set-hr { border: 0; border-top: 1px solid var(--border); margin: 0; }
+.card-f { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 52px; padding: 10px 16px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.card-f:last-child { border-radius: 0 0 var(--r) var(--r); }
+.card-f .f-hint { color: var(--muted); font-size: 12px; }
+.card-f .f-dirty { display: none; align-items: center; gap: 6px; color: var(--warn); font-size: 12px; font-weight: 500; }
+.card-f .f-dirty::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.dirty > .card-f .f-dirty { display: inline-flex; }
+.dirty > .card-f .f-hint { display: none; }
+.card-f .f-btns { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 960px) { .set-layout { grid-template-columns: minmax(0, 1fr); } .set-nav { display: none; } }

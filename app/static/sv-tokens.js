@@ -37,7 +37,7 @@
   // none) - and "Token anlegen" (POST /api/tokens, showNewToken). The emergency login only reads why it gets none, without a request
   async function renderTokensInto(el) {
     if (!el) return;
-    const box = inner => `<div class="card-b" style="display:grid;gap:12px;max-width:640px">${inner}</div>`;
+    const box = inner => `<div class="card-b" style="display:grid;gap:12px">${inner}</div>`;
     if (ME && ME.method === "local") { el.innerHTML = box(`<p class="note gate">Der Notfall-Login bekommt keine API-Tokens: er ist kein persönliches Konto.</p>`); return; }
     let got;
     try { got = await api("GET", "/api/tokens"); } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }

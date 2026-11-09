@@ -147,7 +147,7 @@ def create(api, **fields) -> int:
 
 
 def settings_body(**fields) -> dict:
-    """A complete SettingsIn body as the settings view sends it (sv-admin.js renderSettings): every field, each secret None (= keep)."""
+    """A complete SettingsIn body as the settings view sends it (sv-settings.js, any of its three cards): every field, each secret None (= keep)."""
     return {"poll_minutes": 15, "opnsense_url": "", "opnsense_key": None, "opnsense_secret": None, "opnsense_verify_tls": False,
             "radius_server": "", "radius_key": None, "pf_url": "", "pf_user": "", "pf_pass": None, "pf_verify_tls": False, **fields}
 
