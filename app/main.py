@@ -19,6 +19,7 @@ import api_bulk
 import api_changes
 import api_devices
 import api_history
+import api_rmm
 import api_settings
 import api_switches
 import api_tokens
@@ -382,3 +383,4 @@ app.include_router(api_alerts.router)    # Phase 4b, Task 6
 app.include_router(api_tokens.router)    # Phase 4c, Task 2
 app.include_router(confirm.router)    # Phase 4c, Task 4
 app.include_router(api_bulk.router)    # Phase 4c, Task 6
+app.include_router(api_rmm.router)    # RMM-Abgleich

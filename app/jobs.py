@@ -16,6 +16,7 @@ import history
 import names as names_mod
 import pf
 import poller
+import rmm
 import sshcli
 from db import get_setting
 
@@ -35,3 +36,5 @@ async def _schedule():
     # The deadlines are in the database (changes.confirm_until): the first run right away takes back what ran out while SwitchView was down
     scheduler.add_job(confirm.watch, "interval", seconds=confirm.CHECK_S, id="confirm", replace_existing=True, max_instances=1, coalesce=True,
                       next_run_time=datetime.now(timezone.utc))
+    # RMM-Abgleich: stündlich, nur wenn eingeschaltet (rmm.scheduled prüft es bei jedem Lauf)
+    scheduler.add_job(rmm.scheduled, "interval", minutes=60, id="rmm", replace_existing=True, max_instances=1, coalesce=True)

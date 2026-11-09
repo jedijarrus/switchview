@@ -78,7 +78,7 @@ ZONE_INVALID = "Zonen-Angabe der Adresse ungültig (erlaubt: Buchstaben, Ziffern
 # The fields of a request whose value a 422 answer never sends back (pydantic puts it into "input"): the secrets of the switches and
 # those of the other forms (login, settings, and since Phase 4b the alerts: the SMTP password and the webhook URL with its token).
 SECRET_INPUTS = frozenset(SECRET_FIELDS) | {"password", "id_token", "opnsense_key", "opnsense_secret", "radius_key", "pf_pass", "smtp_pass",
-                                            "webhook_url"}
+                                            "webhook_url", "rmm_key"}
 
 
 # The SNMP credential fields, read and RW identity. Their secrets travel in a line of a snmp.conf (snmp._conf_lines, R45), which a

@@ -286,7 +286,7 @@
   }
 
   /* ── Geräte-Datenbank ── */
-  const KINDS = { drucker: "Drucker", telefon: "Telefon", kamera: "Kamera", iot: "IoT / Sensor", zugang: "Zugangskontrolle", server: "Server", netzwerk: "Netzwerkgerät", sonstiges: "Sonstiges" };
+  const KINDS = { drucker: "Drucker", telefon: "Telefon", kamera: "Kamera", iot: "IoT / Sensor", zugang: "Zugangskontrolle", server: "Server", netzwerk: "Netzwerkgerät", rechner: "Rechner", sonstiges: "Sonstiges" };
   let ROLES = { configured: false, roles: [] }, devFilter = "all", devText = "";
   const today = () => new Date().toISOString().slice(0, 10);
   const freePill = d => !d.allowed ? `<span class="pill neutral">nicht freigegeben</span>` : d.valid_until && d.valid_until < today() ? `<span class="pill warn">abgelaufen</span>` : `<span class="pill st-known">freigegeben</span>`;
@@ -308,19 +308,21 @@
     v.innerHTML = `
       ${!ROLES.configured ? `<div class="banner warn">Die PacketFence-API ist nicht eingerichtet (Einstellungen). Freigaben wirken erst, wenn sie in PacketFence stehen.</div>` : ROLES.error ? `<div class="error">PacketFence: ${esc(ROLES.error)}</div>` : ""}
       <section class="card"><div class="card-h"><h2>Geräte</h2><span class="sub">${list.length} bekannt · ${list.filter(d => d.allowed).length} ohne Zertifikat freigegeben</span>
-        <div class="right toolrow"><div class="seg" role="group" aria-label="Geräte filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Nicht freigegeben"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
+        <div class="right toolrow"><div class="seg" role="group" aria-label="Geräte filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Nicht freigegeben"], ["rmm", "RMM"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
           ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button>` : ""}</div></div>
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
+      <section class="card" id="rmm-card"></section>
       <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>
       <section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`;
     const watched = renderWatchInto($("#w-card"));    // the watch list (sv-alerts.js), beside the unknown devices
+    renderRmmInto($("#rmm-card"), () => { if (current === "devices") renderDevices(); });    // the RMM sync (sv-rmm.js)
     const rows = () => {
       const t = devText.toLowerCase();
-      const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "err" && d.pf_state === "fehler"))
+      const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "rmm" && isRmm(d)) || (devFilter === "err" && d.pf_state === "fehler"))
         && (!t || [d.name, d.mac, d.location, d.owner, d.role, d.notes, KINDS[d.kind]].some(x => String(x || "").toLowerCase().includes(t))));
-      $("#dbody").innerHTML = f.length ? f.map(d => `<tr${may ? ` class="clickrow" data-mac="${esc(d.mac)}"` : ""}><td><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}</div></td>
+      $("#dbody").innerHTML = f.length ? f.map(d => `<tr${may ? ` class="clickrow" data-mac="${esc(d.mac)}"` : ""}><td><b>${esc(d.name)}</b>${rmmPill(d)}<div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}${isRmm(d) && d.owner ? " · " + esc(d.owner) : ""}</div></td>
         <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td>
         <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}${pfNote(d)}</td></tr>`).join("")
         : `<tr><td colspan="6" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“." : "Noch keine Geräte."}</td></tr>`;
@@ -352,7 +354,7 @@
       ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${d.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
       : `<input id="dv-role" value="${esc(d.role || "")}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
     // PacketFence's error of a stored device stands above the form (the list shows it under the pill)
-    const body = `${!isNew && d.pf_error ? `<div class="banner warn"><span><b>PacketFence:</b> ${esc(d.pf_error)}</span></div>` : ""}<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
+    const body = `${rmmFormNote(d)}${!isNew && d.pf_error ? `<div class="banner warn"><span><b>PacketFence:</b> ${esc(d.pf_error)}</span></div>` : ""}<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
         <label class="field"><span>Name</span><input id="dv-name" value="${esc(d.name || "")}" maxlength="64" required autocomplete="off"></label>
         <label class="field"><span>Typ</span><select id="dv-kind">${Object.entries(KINDS).map(([k, l]) => `<option value="${k}" ${d.kind === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <label class="field"><span>Rolle</span>${roleField}</label>
@@ -365,8 +367,8 @@
     const btns = [];
     if (!isNew) btns.push({ label: "Löschen", cls: "danger", onClick: async () => {
       closeModal();
-      if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.`, "Löschen", true))) return editDevice(d, false);
-      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || "Gelöscht"); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
+      if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.${rmmDeleteNote(d)}`, "Löschen", true))) return editDevice(d, false);
+      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || (r.excluded ? "Gelöscht und vom RMM-Abgleich ausgeschlossen" : "Gelöscht")); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     btns.push({ label: isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {
@@ -426,7 +428,7 @@
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
     zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet",
-    token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen", change_pending: "Änderung wartet auf Bestätigung", change_confirm: "Änderung bestätigt" };
+    token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen", rmm_sync: "RMM-Abgleich", rmm_settings: "RMM-Einstellungen geändert", rmm_include: "Wieder in den RMM-Abgleich", change_pending: "Änderung wartet auf Bestätigung", change_confirm: "Änderung bestätigt" };
   // The audit log asks the server at every change of a filter (GET /api/audit, SVLogic.auditParams; 100 a page, "Mehr laden" by
   // the cursor, loadPaged): text and user AUDIT_DELAY ms after the last key, which drops the answer to the filter before, the
   // choices at once; "Als CSV" carries what the fields say. Each entry names its user's role then ("–" before Phase 4a) and its
@@ -481,11 +483,11 @@
   // "API-Tokens" for everyone, "Alle API-Tokens" only for an Admin
   async function renderSettings() {
     const v = $("#view"), failed = e => ({ error: e.message });
-    const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), roleOk("admin") ? api("GET", "/api/settings/alerts").catch(failed) : null]);
+    const cards = Promise.all([api("GET", "/api/compliance/rules").catch(failed), roleOk("admin") ? api("GET", "/api/settings/alerts").catch(failed) : null, roleOk("admin") ? api("GET", "/api/settings/rmm").catch(failed) : null]);
     const got = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/zone-scopes")])
       .catch(e => { v.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return null; });
     if (!got) return;
-    const [s, scopes] = got, [rules, alertSet] = await cards, admin = roleOk("admin"), dis = admin ? "" : " disabled";
+    const [s, scopes] = got, [rules, alertSet, rmmSet] = await cards, admin = roleOk("admin"), dis = admin ? "" : " disabled";
     // Stored entries the field cannot hold as they are (SVLogic.lossyScopes): named above it, so a save does not change them unseen;
     // that saving would change them is said to an Admin only, who has the button
     const lossy = SVLogic.lossyScopes(scopes.entries);
@@ -524,7 +526,7 @@
         <label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" max="168" value="${esc(s.approval_hours)}"${dis}></label>
         <p class="note warn" style="margin:0">Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit „Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus dann nicht.</p>
         ${admin ? `<div><button class="btn small" type="button" id="s-4save">Vier-Augen-Einstellung speichern</button></div>` : ""}</div></section>
-      <section class="card" id="alert-card">${alertCardHtml(alertSet, admin)}</section><section class="card" id="rules-card">${rulesCardHtml(rules, admin)}</section>
+      <section class="card" id="alert-card">${alertCardHtml(alertSet, admin)}</section><section class="card" id="rmm-set">${rmmCardHtml(rmmSet, admin)}</section><section class="card" id="rules-card">${rulesCardHtml(rules, admin)}</section>
       <section class="card"><div class="card-h"><h2>Sitzungen</h2></div><div class="card-b" style="display:grid;gap:12px;max-width:640px">
         <p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p>
         <div><button class="btn danger" type="button" id="s-logout-all">Alle meine Sitzungen beenden</button></div></div></section>
@@ -582,5 +584,5 @@
     });
     $("#s-pftest").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/pf/test"); modal("PacketFence", `<div class="testres"><div><span class="st-dot ${r.ok ? "" : "bad"}"></span><b>${r.ok ? "Verbunden" : "Fehlgeschlagen"}</b> <span class="muted">${esc(r.detail || r.error || "")}</span></div></div><p class="note">Vorher speichern, getestet wird der gespeicherte Stand.</p>`, [{ label: "Schließen", onClick: closeModal }]); } catch (err) { toast(err.message); } e.target.disabled = false; });
     $("#s-names").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/names/refresh"); toast(r.ok ? `${SVLogic.plural(r.entries, "Eintrag", "Einträge")} aus der ARP-Tabelle${r.skipped ? `, ${r.skipped} übersprungen` : ""}` : r.error); MAP = null; } catch (err) { toast(err.message); } e.target.disabled = false; });
-    bindTokenCards(admin); bindRulesCard(rules); await bindAlertCard(alertSet);
+    bindTokenCards(admin); bindRulesCard(rules); bindRmmCard(rmmSet); await bindAlertCard(alertSet);
   }

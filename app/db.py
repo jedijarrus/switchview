@@ -264,6 +264,18 @@ CREATE TABLE IF NOT EXISTS bulks (
     summary TEXT NOT NULL, change TEXT NOT NULL, expert INTEGER NOT NULL DEFAULT 0, on_error TEXT NOT NULL, confirm_minutes INTEGER,
     status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, finished_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_bulks_status ON bulks(status);
+-- RMM-Abgleich (app/rmm.py): das Gedächtnis der kabelgebundenen MACs je RMM-Rechner, eine Zeile je MAC mit dem Agent, dem
+-- Rechnernamen und der Netzwerkkarte, als das RMM sie zuerst und zuletzt meldete (UTC). Das RMM hält nur den letzten Stand eines
+-- Rechners, ein Laptop steckt nicht immer im Dock: eine MAC bleibt, solange es ihren Rechner im RMM als Workstation gibt.
+-- Geschrieben nur von rmm._run.
+CREATE TABLE IF NOT EXISTS rmm_macs (
+    mac TEXT PRIMARY KEY, agent_id TEXT NOT NULL, hostname TEXT NOT NULL DEFAULT '', nic TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_rmm_macs_agent ON rmm_macs(agent_id);
+-- RMM-Abgleich: die Ausschlussliste. Ein Gerät des Abgleichs (oder eine MAC eines RMM-Rechners), das jemand in SwitchView
+-- löscht, legt der Abgleich nicht wieder an (die Hand gewinnt), bis jemand es wieder aufnimmt (DELETE /api/rmm/excluded/{mac}).
+CREATE TABLE IF NOT EXISTS rmm_excluded (
+    mac TEXT PRIMARY KEY, hostname TEXT NOT NULL DEFAULT '', created_by TEXT, created_at TEXT NOT NULL);
 -- Phase 4c, Task 7: the switches of a bulk change in their order (pos): the switch (NULL once it is deleted; switch_name keeps its
 -- name), its ports (JSON), the write way and the preview token of its preview (NULL for a skipped switch), status (waiting, running,
 -- done, failed, skipped, not_started), the change it started (change_id, no foreign key: the change goes with its switch) and the
@@ -361,6 +373,12 @@ ADDED_COLUMNS = (
     # Phase 4c, Task 7: the bulk change a change belongs to (bulks.id, written by changes.create_change for each switch bulk.run
     # starts; NULL for every other change and every row of before). No foreign key: a bulk change is never deleted.
     ("changes", "bulk_id", "INTEGER"),
+    # RMM-Abgleich (app/rmm.py): woher ein Gerät kommt ('rmm': angelegt und gepflegt vom Abgleich; NULL: von Hand, auch jedes
+    # Gerät des Abgleichs, das jemand in SwitchView gespeichert hat - die Hand gewinnt), der RMM-Agent dahinter und wann der
+    # Abgleich es zuletzt bestätigt hat (UTC). Bestandszeilen haben NULL: von Hand.
+    ("devices", "source", "TEXT"),
+    ("devices", "rmm_agent", "TEXT"),
+    ("devices", "rmm_seen_at", "TEXT"),
 )
 
 

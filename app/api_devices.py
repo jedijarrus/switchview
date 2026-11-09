@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import auth
 import names as names_mod
 import pf
+import rmm
 import roles
 from db import audit, db
 from topology import build_map, device_port, switch_keys
@@ -19,7 +20,7 @@ router = APIRouter()
 
 
 # ── Geraete-Datenbank ─────────────────────────────────────────────────────────
-KINDS = ("drucker", "telefon", "kamera", "iot", "zugang", "server", "netzwerk", "sonstiges")
+KINDS = ("drucker", "telefon", "kamera", "iot", "zugang", "server", "netzwerk", "rechner", "sonstiges")    # rechner: RMM-Abgleich
 
 
 def norm_mac(v: str) -> str:
@@ -32,7 +33,7 @@ def norm_mac(v: str) -> str:
 class DeviceIn(BaseModel):
     mac: str = Field(max_length=20)
     name: str = Field(min_length=1, max_length=64)
-    kind: str = Field(default="sonstiges", pattern=r"^(drucker|telefon|kamera|iot|zugang|server|netzwerk|sonstiges)$")
+    kind: str = Field(default="sonstiges", pattern=r"^(drucker|telefon|kamera|iot|zugang|server|netzwerk|rechner|sonstiges)$")
     location: str = Field(default="", max_length=64)
     owner: str = Field(default="", max_length=64)
     notes: str = Field(default="", max_length=500)
@@ -123,6 +124,7 @@ async def unknown_devices(user=Depends(auth.require(roles.LESEN))):
 async def _save_device(body: DeviceIn, user: dict, mac: str, create: bool):
     """Creates (create) or updates the device mac from body for the signed-in user, syncs it to PacketFence and audits it."""
     vu = _valid_until(body)
+    taken = False    # an update of a device of the RMM sync, which takes it over into the care by hand
     async with db() as conn:
         if create:
             try:
@@ -135,15 +137,21 @@ async def _save_device(body: DeviceIn, user: dict, mac: str, create: bool):
                     raise HTTPException(409, "Dieses Gerät ist schon in der Datenbank")
                 raise
         else:
+            async with conn.execute("SELECT source FROM devices WHERE mac = ?", (mac,)) as cur:
+                was = await cur.fetchone()
+            # Saved by hand, a device of the RMM sync becomes a device kept by hand (source NULL): the sync never touches it again
+            # (app/rmm.py, "die Hand gewinnt"), whatever was changed - a block too
             cur = await conn.execute("UPDATE devices SET name=?, kind=?, location=?, owner=?, notes=?, role=?, allowed=?, valid_until=?, "
-                                     "updated_at=datetime('now') WHERE mac=?",
+                                     "updated_at=datetime('now'), source=NULL WHERE mac=?",
                                      (body.name.strip(), body.kind, body.location.strip(), body.owner.strip(), body.notes.strip(),
                                       body.role.strip(), int(body.allowed), vu, mac))
             if cur.rowcount == 0:
                 raise HTTPException(404, "Gerät nicht gefunden")
+            taken = bool(was and was["source"] == "rmm")
         await conn.commit()
     res = await pf.sync([mac])
-    await audit(user["username"], "device_create" if create else "device_update", mac, f"{body.name} freigegeben={int(body.allowed)}",
+    await audit(user["username"], "device_create" if create else "device_update", mac,
+                f"{body.name} freigegeben={int(body.allowed)}" + (", aus dem RMM-Abgleich übernommen" if taken else ""),
                 role=user["role"])
     return {"ok": True, "pf": res}
 
@@ -169,12 +177,17 @@ async def delete_device(mac: str, user=Depends(auth.require(roles.AENDERN))):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"In PacketFence nicht zurückgenommen ({e}). Gerät bleibt erhalten.")
     async with db() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        # A device the RMM sync knows stays deleted: its MAC goes on the sync's exclusion list in the same transaction
+        excluded = await rmm.exclude(conn, mac, user["username"])
         cur = await conn.execute("DELETE FROM devices WHERE mac = ?", (mac,))
+        if cur.rowcount == 0:
+            await conn.rollback()
+            raise HTTPException(404, "Gerät nicht gefunden")
         await conn.commit()
-    if cur.rowcount == 0:
-        raise HTTPException(404, "Gerät nicht gefunden")
-    await audit(user["username"], "device_delete", mac, warning or "", role=user["role"])
-    return {"ok": True, "warning": warning}
+    await audit(user["username"], "device_delete", mac, ", ".join(x for x in (warning or "", "vom RMM-Abgleich ausgeschlossen" if excluded else "") if x),
+                role=user["role"])
+    return {"ok": True, "warning": warning, **({"excluded": True} if excluded else {})}    # the keys of before, "excluded" only when set
 
 
 @router.post("/api/devices/sync")

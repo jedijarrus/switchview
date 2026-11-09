@@ -122,7 +122,17 @@ MATRIX_4C: dict = {
     ("POST", "/api/bulk/{blk}/cancel"): "aendern",
     ("POST", "/api/bulk/{blk}/confirm"): "aendern",
 }
-MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C
+# The routes of the RMM sync (the table of docs/rmm-abgleich.md); "Rücknahmen trotzdem ausführen" (force) inside
+# POST /api/rmm/sync is Admin (tests/test_rmm.py)
+MATRIX_RMM: dict = {
+    ("GET", "/api/settings/rmm"): "admin",
+    ("PUT", "/api/settings/rmm"): "admin",
+    ("POST", "/api/rmm/test"): "admin",
+    ("POST", "/api/rmm/sync"): "aendern",
+    ("GET", "/api/rmm/status"): "lesen",
+    ("DELETE", "/api/rmm/excluded/{mac}"): "aendern",
+}
+MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM
 
 
 @pytest.fixture
@@ -154,8 +164,9 @@ def test_the_rights_are_the_matrix_of_the_plan():
 
 
 def test_the_three_parts_of_the_matrix_do_not_overlap():
-    assert not set(MATRIX_4A) & set(MATRIX_4B) and not set(MATRIX_4A) & set(MATRIX_4C) and not set(MATRIX_4B) & set(MATRIX_4C)
-    assert MATRIX == MATRIX_4A | MATRIX_4B | MATRIX_4C
+    parts = (MATRIX_4A, MATRIX_4B, MATRIX_4C, MATRIX_RMM)
+    assert all(not set(a) & set(b) for i, a in enumerate(parts) for b in parts[i + 1:])
+    assert MATRIX == MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM
 
 
 def test_there_is_one_dependency_per_role():

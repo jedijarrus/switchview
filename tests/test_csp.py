@@ -78,8 +78,10 @@ def test_msal_needs_no_eval():
 
 
 def test_the_only_origin_a_script_reaches_is_the_sso_host():
-    """The two others are placeholder texts of the settings form, never fetched by the browser."""
-    admin = (STATIC / "sv-admin.js").read_text(encoding="utf-8")
-    placeholders = set(re.findall(r'placeholder="(https?://[^"]+)"', admin))
+    """The others are placeholder texts of the settings forms (sv-admin.js, the RMM card of sv-rmm.js), never fetched by the
+    browser."""
+    forms = "".join((STATIC / n).read_text(encoding="utf-8") for n in ("sv-admin.js", "sv-rmm.js"))
+    placeholders = set(re.findall(r'placeholder="(https?://[^"]+)"', forms))
     origins = {o for n in SCRIPTS[1:] for o in re.findall(r"https?://[\w.:-]+", (STATIC / n).read_text(encoding="utf-8"))}
-    assert placeholders == {"https://opnsense.example.com", "https://packetfence:9999"} and origins - placeholders == {main.SSO_ORIGIN}
+    assert placeholders == {"https://opnsense.example.com", "https://packetfence:9999", "https://rmm.example.com"}
+    assert origins - placeholders == {main.SSO_ORIGIN}
