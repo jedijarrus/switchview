@@ -178,20 +178,83 @@ def test_a_port_tile_shows_its_highest_way():
             'await paintAuth({id: 8}); return [["au-x", "au-m", "au-p"].map(c => [t1, t10, t3].map(t => t.classList.contains(c))), legend];')
     marks, legend = view(then)
     assert marks == [[False, False, False], [False, True, False], [True, False, False]]    # port 1: park before 802.1X; port 3 has none
-    assert legend.count('<span class="au-lg">') == 3 and "angemeldet: 802.1X" in legend
+    assert legend.count('<span class="au-lg">') == 3 and "angemeldet: 802.1X" in legend and "nicht angemeldet: Park" in legend
 
 
 @NODE
-@pytest.mark.parametrize("pick, rows", [("all", 3), ("dot1x", 1), ("park", 1)])
-def test_the_card_lists_every_session_and_filters_by_way(pick, rows):
+@pytest.mark.parametrize("pick, rows", [("all", 2), ("dot1x", 1), ("mac", 1)])
+def test_the_card_lists_every_login_and_only_counts_the_parked(pick, rows):
+    # A device in the park VLAN is not logged in: the card counts it and points to the unknown devices, where it stands
     then = ('const el = $("#c"); await renderAuthInto(el); %s return el.innerHTML;'
             % ("" if pick == "all" else 'el.onclick({target: {closest: () => ({dataset: {af: "%s"}})}});' % pick))
     html = view(then)
-    assert "1 per 802.1X · 1 per MAC · 1 im Park-VLAN" in html and html.count("<tr><td>") == rows
+    assert "1 per 802.1X · 1 per MAC-Freigabe · 1 ohne Zugriff im Park-VLAN (oben unter „Ohne Zugriff“)" in html
+    assert html.count("<tr><td>") == rows and GUEST not in html and 'data-af="park"' not in html
     if pick == "all":
         assert ('<tr><td>Drucker EK</td><td class="mono">00:11:22:33:44:55</td><td><span class="pill au-m">MAC</span></td><td>vlan_140 · 140</td>'
                 '<td>SW-TEST · 10</td><td class="num">2026-11-09 07:00:00</td></tr>') in html
-        assert "<tr><td>PC-ANNA.example.local</td>" in html and "<tr><td>unbekannt</td>" in html
+        assert "<tr><td>PC-ANNA.example.local</td>" in html
+
+
+# The devices view with these sessions: the printer a device of the database (released), the guest parked and unknown (learned with a
+# vendor), the laptop logged in by 802.1X, and one learned device without a session
+UNKNOWN = [{"mac": m, "sw": "SW-TEST", "sid": 8, "port": p, "vlan": v, "st": "radius", "flags": [], "lldp": "", "mc": 1, "name": "", "vendor": vd}
+           for m, p, v, vd in ((LAPTOP, "1", "140", "Example"), (GUEST, "1", "3999", "Acme"), ("00:00:00:00:00:09", "4", "1", ""))]
+DEVICES_VIEW = ('(async () => { ME = {name: "x", role: "%s"}; const opened = []; editDevice = (d, isNew, release) => { opened.push([d, isNew, release]); }; '
+                'api = async (m, u) => u === "/api/pf/sessions" ? %s : u === "/api/devices/unknown" ? %s '
+                ': u === "/api/pf/roles" ? {configured: true, roles: []} '
+                ': u === "/api/devices" ? [{mac: "%s", name: "Drucker EK", kind: "drucker", allowed: 1, pf_state: "ok", pf_error: ""}] : []; '
+                'await renderDevices(); %s })()')
+
+
+@NODE
+def test_the_unknown_devices_are_those_without_a_session():
+    html = view_devices('return $("#ulist").innerHTML;')
+    assert LAPTOP not in html and GUEST not in html and html.count('data-u="') == 1 and "00:00:00:00:00:09" in html
+
+
+@NODE
+def test_the_card_without_access_lists_the_parked_and_releases_them():
+    card, hidden, opened = view_devices('const c = $("#park-card"); const html = c.innerHTML, hidden = c.hidden; '
+                                        'c.onclick({target: {closest: () => ({dataset: {park: "0"}})}}); return [html, hidden, opened];')
+    assert hidden is False and '<h2>Ohne Zugriff</h2><span class="sub">1 Gerät im Park-VLAN: MAC-Anmeldung ohne Freigabe</span>' in card
+    assert ('<tr><td>Acme<span class="cellnote">unbekannt</span></td><td class="mono">aa:bb:cc:00:00:01</td><td>SW-TEST · 1</td>'
+            '<td class="num">2026-11-09 09:00:00</td><td><button class="btn small primary" type="button" data-park="0">Freigeben</button></td></tr>') in card
+    assert opened == [[{"mac": GUEST, "name": "", "kind": "sonstiges", "location": "SW-TEST Port 1"}, True, True]]
+
+
+@NODE
+def test_a_known_device_parked_opens_its_own_form_and_a_reader_gets_no_button():
+    answer = {**ANSWER, "sessions": [{**SESS[1], "park": True, "role": "vlan_3999"}]}
+    card, opened = view_devices('$("#park-card").onclick({target: {closest: () => ({dataset: {park: "0"}})}}); return [$("#park-card").innerHTML, opened];',
+                                answer=answer)
+    assert '<td>Drucker EK<span class="cellnote">freigegeben, PacketFence parkt es trotzdem</span></td>' in card
+    assert opened[0][0]["name"] == "Drucker EK" and opened[0][1:] == [False, True]
+    reader = view_devices('return $("#park-card").innerHTML;', role="lesen")
+    assert "Ohne Zugriff" in reader and "data-park" not in reader
+
+
+@NODE
+def test_without_a_parked_device_the_card_is_gone():
+    answer = {**ANSWER, "sessions": [s for s in SESS if not s["park"]]}
+    assert view_devices('return [$("#park-card").hidden, $("#park-card").innerHTML];', answer=answer) == [True, ""]
+
+
+@NODE
+@pytest.mark.parametrize("release, title, button", [(True, "Gerät freigeben", "Freigeben"), (False, "Gerät hinzufügen", "Anlegen")])
+def test_the_release_form_has_the_box_ticked(release, title, button):
+    from test_frontend_dom import in_dom
+    got = in_dom('(async () => { ME = {name: "x", role: "aendern"}; ROLES = {configured: true, roles: []}; let cap = null; '
+                 'modal = (t, b, btns) => { cap = [t, b, btns.map(x => x.label)]; }; '
+                 'await editDevice({mac: "aa:bb:cc:00:00:01", name: "", kind: "sonstiges"}, true, %s); '
+                 'return cap; })()' % json.dumps(release))
+    assert got[0] == title and got[2][-1] == button
+    assert ('<input type="checkbox" id="dv-allowed" checked>' in got[1]) == release
+
+
+def view_devices(then: str, answer=ANSWER, role: str = "aendern"):
+    from test_frontend_dom import in_dom
+    return in_dom(DEVICES_VIEW % (role, json.dumps(answer), json.dumps(UNKNOWN), PRINTER, then))
 
 
 @NODE

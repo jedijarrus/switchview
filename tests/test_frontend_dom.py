@@ -1155,7 +1155,7 @@ def test_a_trunk_is_offered_for_editing_only_with_expert_mode(role, four, zones,
 def test_a_learned_device_is_offered_as_a_new_device_with_aendern(role, offered):
     js = (role_me(role) + PANEL + 'Object.assign(portIdx["1"], {mc: 1, d: [["aa:bb:cc:00:00:09", "1", "10.0.0.9", "", "", 0]]}); '
           + OPEN_PANEL + '$("#dr-body").innerHTML')
-    assert ('data-newdev="aa:bb:cc:00:00:09">Als Gerät anlegen</button>' in in_dom(js)) == offered
+    assert ('data-newdev="aa:bb:cc:00:00:09">Freigeben</button>' in in_dom(js)) == offered
 
 
 PORT = {"n": "1", "l": [], "d": [], "u": ["1"], "t": [], "mc": 0, "tr": "", "a": "", "pv": "1", "st": "", "o": True, "ad": True, "s": 1000}

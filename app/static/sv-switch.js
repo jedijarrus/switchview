@@ -508,7 +508,7 @@
     $("#dr-title").textContent = (isTrunkPort(p) ? "" : "Port ") + p.n; $("#dr-sub").textContent = [s.k, s.model].filter(Boolean).join(" · ");
     const lldp = p.l.length ? p.l.map(x => `<div><b>${esc(x[0])}</b> <span class="mono muted">Port ${esc(x[1])}</span></div>`).join("") : "–";
     const kn = d => d[5] === 2 ? `<span class="pill st-known">freigegeben</span>` : d[5] === 1 ? `<span class="pill neutral">bekannt</span>`
-      : roleOk("aendern") ? `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Als Gerät anlegen</button>` : "";
+      : roleOk("aendern") ? `<button class="btn small" type="button" data-newdev="${esc(d[0])}">Freigeben</button>` : "";
     const devs = p.mc ? `<p class="eyebrow">Gelernte Geräte (${p.mc})</p>${p.mc > p.d.length ? `<p class="note">Viele Geräte, hier die ersten ${p.d.length}.</p>` : ""}<div class="devs">` +
       p.d.map(d => `<div class="dev"><div class="dn">${esc(d[3] || d[4] || "unbekannt")}</div><div>${chip(d[1])}</div><div class="dm">${esc(d[0])}${d[2] ? " · " + esc(d[2]) : ""}${d[3] && d[4] ? " · " + esc(d[4]) : ""}</div><div>${isUplink(p) ? "" : kn(d)}</div></div>`).join("") + `</div>` : "";
     // A trunk opens its own form (VLANs only, editTrunk, expert mode only), every other port the port form. Where SwitchView could
@@ -524,7 +524,7 @@
     if (canEdit) $("#dr-edit").addEventListener("click", () => { closeDrawer(true); if (trunk) editTrunk(s, p.n); else editPorts(s, [p.n]); });
     // "Bisher an diesem Port" asks the server only on this click (sv-history.js); a trunk or a confirmed uplink has no button
     const hb = $("#dr-hist-btn"); if (hb) hb.addEventListener("click", () => loadPortHistory(s, p));
-    $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges" }, true); };
+    $("#dr-body").onclick = e => { const b = e.target.closest("[data-newdev]"); if (!b) return; const d = p.d.find(x => x[0] === b.dataset.newdev); closeDrawer(true); editDevice({ mac: d[0], name: (d[3] || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${s.k} Port ${p.n}` }, true, true); };
     $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false"); $("#scrim").hidden = false; syncLayers(); $("#dr-x").focus();
   }
   // The focus leaves the panel before it is hidden: a browser refuses aria-hidden on an ancestor of the focused element, and after a

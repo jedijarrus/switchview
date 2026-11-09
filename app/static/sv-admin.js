@@ -332,6 +332,7 @@
     const may = roleOk("aendern");
     v.innerHTML = `
       ${!ROLES.configured ? `<div class="banner warn">Die PacketFence-API ist nicht eingerichtet (Einstellungen). Freigaben wirken erst, wenn sie in PacketFence stehen.</div>` : ROLES.error ? `<div class="error">PacketFence: ${esc(ROLES.error)}</div>` : ""}
+      <section class="card" id="park-card" hidden></section>
       <section class="card"><div class="card-h"><h2>Geräte</h2><span class="sub">${list.length} bekannt · ${list.filter(d => d.allowed).length} ohne Zertifikat freigegeben</span>
         <div class="right toolrow"><div class="seg" role="group" aria-label="Geräte filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Nicht freigegeben"], ["rmm", "RMM"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
@@ -364,19 +365,25 @@
       $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     }
     try {
-      const [un] = await Promise.all([api("GET", "/api/devices/unknown"), loadAuth()]);    // with the sessions (sv-auth.js) for "Anmeldung"
+      // With the sessions (sv-auth.js): a parked device stands under "Ohne Zugriff", one logged in (802.1X, MAC release) is not
+      // unknown; here only those without a session (a port without login)
+      const [got] = await Promise.all([api("GET", "/api/devices/unknown"), loadAuth()]), all = Array.isArray(got) ? got : [];
+      renderParkedInto($("#park-card"), parkedOf(list, all), may);
+      const un = all.filter(d => !authSession(d.mac));
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
       if (!$("#ulist")) return;
-      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th>Anmeldung</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
+      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td><td>${authCell(d.mac)}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     await watched;
   }
 
-  async function editDevice(d, isNew) {
+  // The device form; release: "Gerät freigeben" from the card "Ohne Zugriff" or the port panel - the box "Ohne Zertifikat
+  // freigeben" ticked (it can still be unticked) and the button "Freigeben", for a new device or a known one
+  async function editDevice(d, isNew, release = false) {
     if (!ROLES.configured && !ROLES.roles.length) { try { ROLES = await api("GET", "/api/pf/roles"); } catch (e) { /* egal */ } }
     const roleField = ROLES.roles.length
       ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${d.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
@@ -389,7 +396,7 @@
         <label class="field"><span>Standort</span><input id="dv-loc" value="${esc(d.location || "")}" maxlength="64"></label>
         <label class="field"><span>Verantwortlich</span><input id="dv-owner" value="${esc(d.owner || "")}" maxlength="64"></label></div>
       <label class="field"><span>Notiz</span><textarea id="dv-notes" rows="2" maxlength="500">${esc(d.notes || "")}</textarea></label>
-      <fieldset class="fs"><legend>Freigabe</legend><label class="check"><input type="checkbox" id="dv-allowed" ${d.allowed ? "checked" : ""}> Ohne Zertifikat freigeben (MAC-Anmeldung an Ports „RADIUS“ und „Bekannte Geräte“)</label>
+      <fieldset class="fs"><legend>Freigabe</legend><label class="check"><input type="checkbox" id="dv-allowed" ${d.allowed || release ? "checked" : ""}> Ohne Zertifikat freigeben (MAC-Anmeldung an Ports „RADIUS“ und „Bekannte Geräte“)</label>
         <label class="field" style="max-width:220px"><span>Gültig bis (optional)</span><input id="dv-until" type="date" value="${esc(d.valid_until || "")}"></label>
         <p class="note" style="margin:0">MAC-Adressen lassen sich fälschen. Nur für Geräte freigeben, die kein Zertifikat können, zum Beispiel Drucker oder Telefone.</p></fieldset>`;
     const btns = [];
@@ -399,7 +406,7 @@
       try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || (r.excluded ? "Gelöscht und vom RMM-Abgleich ausgeschlossen" : "Gelöscht")); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
-    btns.push({ label: isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {
+    btns.push({ label: release ? "Freigeben" : isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {
       const payload = { mac: $("#dv-mac").value.trim(), name: $("#dv-name").value.trim(), kind: $("#dv-kind").value, role: $("#dv-role").value.trim(), location: $("#dv-loc").value.trim(),
         owner: $("#dv-owner").value.trim(), notes: $("#dv-notes").value.trim(), allowed: $("#dv-allowed").checked, valid_until: $("#dv-until").value || null };
       if (!payload.mac || !payload.name) { toast("MAC und Name sind Pflicht"); return; }
@@ -408,10 +415,10 @@
         const r = isNew ? await api("POST", "/api/devices", payload) : await api("PUT", `/api/devices/${encodeURIComponent(d.mac)}`, payload);
         closeModal();
         toast(r.pf && r.pf.ok ? "Gespeichert und in PacketFence übernommen" : `Gespeichert. PacketFence: ${(r.pf && (r.pf.error || "Fehler, siehe Liste")) || "–"}`);
-        MAP = null; if (current === "devices") renderDevices();
+        MAP = null; SESS_AT = 0; if (current === "devices") renderDevices();    // the sessions anew: the port switches over (CoA)
       } catch (e) { toast(e.message); b.disabled = false; }
     } });
-    modal(isNew ? "Gerät hinzufügen" : `Gerät: ${d.name}`, body, btns);
+    modal(release ? "Gerät freigeben" : isNew ? "Gerät hinzufügen" : `Gerät: ${d.name}`, body, btns);
   }
 
   /* ── Sicherungen ── */
