@@ -20,6 +20,14 @@
   // Whether mac has a session now (logged in, or parked): such a device is not among the unknown ones
   const authSession = mac => authReady() && SESS.sessions.some(x => x.mac === mac);
 
+  // After a release was saved or deleted PacketFence bounces the port and the device logs in anew, about AUTH_SWITCH_MS later: the
+  // sessions are read anew at once (the server dropped its own, api_devices) and the devices view once more then
+  const AUTH_SWITCH_MS = 15000;
+  const AUTH_SWITCH_NOTE = " · der Port schaltet in etwa 15 Sekunden um";
+  function authAfterChange() {
+    SESS_AT = 0;
+    setTimeout(() => { SESS_AT = 0; if (current === "devices") renderDevices(); }, AUTH_SWITCH_MS);
+  }
   // The sessions (GET /api/pf/sessions), reused for AUTH_TTL; a failed request is kept as an answer with its reason
   function loadAuth(force) {
     if (!force && SESS && Date.now() - SESS_AT < AUTH_TTL) return Promise.resolve(SESS);

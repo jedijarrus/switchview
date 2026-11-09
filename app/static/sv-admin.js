@@ -405,7 +405,7 @@
     if (!isNew) btns.push({ label: "Löschen", cls: "danger", onClick: async () => {
       closeModal();
       if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.`, "Löschen", true))) return editDevice(d, false);
-      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || "Gelöscht"); MAP = null; if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
+      try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || `Gelöscht${AUTH_SWITCH_NOTE}`); MAP = null; authAfterChange(); if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
     btns.push({ label: "Abbrechen", onClick: closeModal });
     btns.push({ label: release ? "Freigeben" : isNew ? "Anlegen" : "Speichern", cls: "primary", onClick: async b => {
@@ -416,8 +416,8 @@
       try {
         const r = isNew ? await api("POST", "/api/devices", payload) : await api("PUT", `/api/devices/${encodeURIComponent(d.mac)}`, payload);
         closeModal();
-        toast(r.pf && r.pf.ok ? "Gespeichert und in PacketFence übernommen" : `Gespeichert. PacketFence: ${(r.pf && (r.pf.error || "Fehler, siehe Liste")) || "–"}`);
-        MAP = null; SESS_AT = 0; if (current === "devices") renderDevices();    // the sessions anew: the port switches over (CoA)
+        toast(r.pf && r.pf.ok ? `Gespeichert und in PacketFence übernommen${AUTH_SWITCH_NOTE}` : `Gespeichert. PacketFence: ${(r.pf && (r.pf.error || "Fehler, siehe Liste")) || "–"}`);
+        MAP = null; authAfterChange(); if (current === "devices") renderDevices();    // the sessions anew now and once the port switched
       } catch (e) { toast(e.message); b.disabled = false; }
     } });
     modal(release ? "Gerät freigeben" : isNew ? "Gerät hinzufügen" : `Gerät: ${d.name}`, body, btns);

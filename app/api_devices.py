@@ -144,6 +144,7 @@ async def _save_device(body: DeviceIn, user: dict, mac: str, create: bool):
                 raise HTTPException(404, "Gerät nicht gefunden")
         await conn.commit()
     res = await pf.sync([mac])
+    _sessions["items"] = None    # PacketFence bounces the port: the next GET /api/pf/sessions asks it anew
     await audit(user["username"], "device_create" if create else "device_update", mac, f"{body.name} freigegeben={int(body.allowed)}",
                 role=user["role"])
     return {"ok": True, "pf": res}
@@ -175,6 +176,7 @@ async def delete_device(mac: str, user=Depends(auth.require(roles.AENDERN))):
     if cur.rowcount == 0:
         raise HTTPException(404, "Gerät nicht gefunden")
     await audit(user["username"], "device_delete", mac, warning or "", role=user["role"])
+    _sessions["items"] = None    # as in _save_device
     return {"ok": True, "warning": warning}
 
 

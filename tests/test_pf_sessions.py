@@ -275,3 +275,13 @@ def test_a_new_device_starts_in_the_client_lan(dev, is_new, want):
                   % (json.dumps({"mac": "aa:bb:cc:00:00:01", "name": "", "kind": "sonstiges", **dev}), json.dumps(is_new)))
     selected = re.findall(r'<option value="([^"]*)" selected>', body.split('<select id="dv-role">')[1].split("</select>")[0])
     assert selected == ([want] if want else [])
+
+
+def test_saving_or_deleting_a_device_drops_the_kept_sessions(api, packetfence, monkeypatch):
+    with apifix.signed_in(monkeypatch, apifix.user("aendern")) as client:
+        client.get("/api/pf/sessions")
+        assert api_devices._sessions["items"] is not None
+        assert client.post("/api/devices", json={"mac": GUEST, "name": "Gast", "kind": "sonstiges", "role": "vlan_140", "allowed": True}).status_code == 200
+        assert api_devices._sessions["items"] is None
+        client.get("/api/pf/sessions")
+        assert client.delete(f"/api/devices/{GUEST}").status_code == 200 and api_devices._sessions["items"] is None
