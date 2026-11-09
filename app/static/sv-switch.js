@@ -61,7 +61,7 @@
           <div class="filterhint" id="sw-hint"></div>
           <div class="plate"><div class="plate-in" id="plate"></div></div>
           ${trunks.length ? `<div class="trunks">${trunks.map(t => `<button type="button" class="trk" data-p="${esc(t.n)}"><b>${esc(t.n)}</b><span>Ports ${esc(t.mb.join(", "))} · ${speedTxt(t.s)}</span></button>`).join("")}</div>` : ""}
-          <div class="legend"><span><i class="lg-port up" style="--lgc:#2563eb"></i>aktiv · Farbe oben = ungetaggtes VLAN</span><span><i class="lg-port down"></i>kein Link</span><span><i class="lg-port up link"></i>zu anderem Switch</span><span><b class="mono" style="color:var(--accent);font-size:10px">R</b>RADIUS</span><span><b class="mono" style="color:var(--violet);font-size:10px">K</b>Bekannte Geräte</span><span><i class="lg-port adown"></i>Aus</span><span><span class="mono muted">+8</span>getaggte VLANs</span><span><span class="mono" style="color:var(--accent);font-size:10px">T2</span>in Trunk 2</span></div>
+          <div class="legend" id="plate-legend"><span><i class="lg-port up" style="--lgc:#2563eb"></i>aktiv · Farbe oben = ungetaggtes VLAN</span><span><i class="lg-port down"></i>kein Link</span><span><i class="lg-port up link"></i>zu anderem Switch</span><span><b class="mono" style="color:var(--accent);font-size:10px">R</b>RADIUS</span><span><b class="mono" style="color:var(--violet);font-size:10px">K</b>Bekannte Geräte</span><span><i class="lg-port adown"></i>Aus</span><span><span class="mono muted">+8</span>getaggte VLANs</span><span><span class="mono" style="color:var(--accent);font-size:10px">T2</span>in Trunk 2</span></div>
         </div></section>
       <section class="card"><div class="card-h"><h2>Port-Liste</h2>
           <div class="right toolrow"><div class="seg" role="group" aria-label="Ports filtern" id="pf">${[["all", "Alle"], ["up", "Aktiv"], ["free", "Frei"], ["nac", "RADIUS/Bekannt"], ["uplink", "Uplinks"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${swPortFilter === k}">${l}</button>`).join("")}</div>
@@ -131,6 +131,7 @@
     for (let i = 0; i < main.length; i += 12) { const g = main.slice(i, i + 12); html += `<div><div class="blabel">${g[0].n}–${g[g.length - 1].n}</div><div class="block">${g.filter(p => +p.n % 2 === 1).map(tile).join("")}${g.filter(p => +p.n % 2 === 0).map(tile).join("")}</div></div>`; }
     if (extra.length) html += `<div><div class="blabel">Uplink</div><div class="block" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(extra.length / 2))},32px)">${extra.filter((_, i) => i % 2 === 0).map(tile).join("")}${extra.filter((_, i) => i % 2 === 1).map(tile).join("")}</div></div>`;
     $("#plate").innerHTML = html || `<div class="empty">Noch keine Portdaten.</div>`;
+    paintAuth(s);    // the sessions of PacketFence on its ports (sv-auth.js), once they are there
   }
   function applySwFilter(s) {
     const plate = $("#plate").closest(".plate"); plate.classList.toggle("dim", !!swVlan);
@@ -516,7 +517,7 @@
     const noEdit = rightsWhy(s) || "Einen Trunk ändern geht nur im Expertenmodus, und der braucht die Rolle „Freigeben“.";
     $("#dr-body").innerHTML = `${canEdit ? `<div style="margin-bottom:12px"><button class="btn small primary" type="button" id="dr-edit">${trunk ? "Trunk bearbeiten" : "Port bearbeiten"}</button></div>`
       : writable(s) ? `<div style="margin-bottom:12px"><p class="note gate" id="dr-why">${esc(noEdit)}</p></div>` : ""}
-      <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
+      <dl class="kv"><dt>Zugang</dt><dd>${stPill(stOf(s, p.st))}${p.lim ? ` <span class="muted">max. ${p.lim} Geräte</span>` : ""}</dd>${authKv(s, p)}${why ? `<dt>Uplink</dt><dd><span class="pill warn">unbestätigt</span> ${esc(why)}</dd>` : ""}<dt>Link</dt><dd><span class="st-dot ${p.o ? "" : "down"}"></span>${p.o ? "aktiv, " + speedTxt(p.s) : p.ad ? "kein Link" : "administrativ aus"}</dd>
       ${has(s, "snmp_poe") && p.poe ? `<dt>PoE</dt><dd>${esc(poeTxt(p.poe))}</dd>` : ""}
       <dt>Beschreibung</dt><dd>${esc(p.a) || "–"}</dd><dt>Ungetaggt</dt><dd>${chips(p.u, "")}</dd><dt>PVID</dt><dd class="mono">${esc(p.pv) || "–"}</dd><dt>Getaggt</dt><dd>${chips(p.t, "")}</dd>
       <dt>Trunk</dt><dd>${trunk ? "Ports " + esc(p.mb.join(", ")) : esc(p.tr) || "–"}</dd><dt>Nachbar (LLDP)</dt><dd>${lldp}</dd></dl>${portHistoryHtml(s, p)}${devs}`;

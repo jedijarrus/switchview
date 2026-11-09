@@ -132,7 +132,11 @@ MATRIX_RMM: dict = {
     ("GET", "/api/rmm/status"): "lesen",
     ("DELETE", "/api/rmm/excluded/{mac}"): "aendern",
 }
-MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM
+# Who is logged in now, as PacketFence holds it (the table of docs/anmeldungen.md)
+MATRIX_AUTH: dict = {
+    ("GET", "/api/pf/sessions"): "lesen",
+}
+MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM | MATRIX_AUTH
 
 
 @pytest.fixture
@@ -164,9 +168,9 @@ def test_the_rights_are_the_matrix_of_the_plan():
 
 
 def test_the_three_parts_of_the_matrix_do_not_overlap():
-    parts = (MATRIX_4A, MATRIX_4B, MATRIX_4C, MATRIX_RMM)
+    parts = (MATRIX_4A, MATRIX_4B, MATRIX_4C, MATRIX_RMM, MATRIX_AUTH)
     assert all(not set(a) & set(b) for i, a in enumerate(parts) for b in parts[i + 1:])
-    assert MATRIX == MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM
+    assert MATRIX == MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_RMM | MATRIX_AUTH
 
 
 def test_there_is_one_dependency_per_role():

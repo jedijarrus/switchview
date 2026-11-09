@@ -318,6 +318,14 @@ Recommended PacketFence setup:
 
 Unknown devices are accepted into the park role (not rejected), so PacketFence keeps a session it can change via CoA once the device is approved. `unauth-vid 3999` on the switch remains as a fallback.
 
+## Who is logged in
+
+The switch view marks each port by how PacketFence logged its device in (802.1X, MAC login, park VLAN) and lists the sessions
+of a port in its panel; the devices view adds a column to the device list and a card with every open session. Read from
+PacketFence's locationlog (its open entries), at most once a minute; without PacketFence the views stay as they are.
+
+PacketFence logins notes (German): [docs/anmeldungen.md](docs/anmeldungen.md)
+
 ## History and alerts
 
 The settings, in `.env` (see the table under [Security](#security)): `HISTORY_DAYS` (default 180) bounds the history, the events,

@@ -2,6 +2,7 @@
 PacketFence roles and test. Split from main.py (Phase 3, Task 11), the code as it was."""
 import json
 import re
+import time
 from collections import defaultdict
 from datetime import date
 
@@ -210,3 +211,71 @@ async def pf_roles(user=Depends(auth.require(roles.LESEN))):
 @router.post("/api/pf/test")
 async def pf_test(user=Depends(auth.require(roles.LESEN))):
     return await pf.test()
+
+
+# ── Anmeldungen: who is logged in on the LAN now, as PacketFence holds it (docs/anmeldungen.md) ──────────────────────────────────
+SESSIONS_TTL = 60.0     # seconds an answer of PacketFence is reused (the switch view and the devices view ask at each render)
+_sessions: dict = {"at": 0.0, "items": None}
+
+
+def _mac_or_none(v) -> str | None:
+    h = re.sub(r"[^0-9a-fA-F]", "", str(v or "")).lower()
+    return ":".join(h[i:i + 2] for i in range(0, 12, 2)) if len(h) == 12 else None
+
+
+async def _open_sessions() -> list[dict]:
+    """pf.open_sessions, its answer reused for SESSIONS_TTL seconds (a failure is not kept)."""
+    if _sessions["items"] is None or time.monotonic() - _sessions["at"] > SESSIONS_TTL:
+        _sessions["items"] = await pf.open_sessions()
+        _sessions["at"] = time.monotonic()
+    return _sessions["items"]
+
+
+def session_view(items: list[dict], switches: list[dict], ports: list[dict], devices: dict[str, str]) -> list[dict]:
+    """The sessions of PacketFence (pf.open_sessions) as the views show them: per session the MAC, how (dot1x: 802.1X, mac: a MAC
+    login), park (in the park role), the user of an 802.1X login, role, VLAN, since (PacketFence's clock), the switch SwitchView knows
+    under the base MAC PacketFence names, else under its address (switch_id and switch_name; None and the address without one), the
+    port by name (ifDesc when the switch has such a port, else the port of that ifIndex, else as PacketFence names it) and the name of
+    the device of that MAC in the database (device, "" without one); sorted by switch, port and MAC."""
+    by_mac = {_mac_or_none(s["base_mac"]): s for s in switches if _mac_or_none(s["base_mac"])}
+    by_host = {str(s["host"]).strip().lower(): s for s in switches}
+    names = {(p["switch_id"], p["name"]) for p in ports}
+    by_index = {(p["switch_id"], str(p["ifindex"])): p["name"] for p in ports}
+    out = []
+    for x in items:
+        mac = _mac_or_none(x.get("mac"))
+        if not mac:
+            continue
+        sw = by_mac.get(_mac_or_none(x.get("switch_mac"))) or by_host.get(str(x.get("switch_ip") or x.get("switch") or "").strip().lower())
+        sid = sw["id"] if sw else None
+        desc, idx = str(x.get("ifDesc") or ""), str(x.get("port") or "")
+        port = desc if (sid, desc) in names else by_index.get((sid, idx)) or desc or idx
+        eap = x.get("connection_type") == "Ethernet-EAP"
+        out.append({"mac": mac, "how": "dot1x" if eap else "mac", "park": x.get("role") == pf.PARK_ROLE,
+                    "user": str(x.get("dot1x_username") or "") if eap else "", "role": str(x.get("role") or ""), "vlan": str(x.get("vlan") or ""),
+                    "since": str(x.get("start_time") or ""), "switch_id": sid,
+                    "switch_name": sw["name"] if sw else str(x.get("switch_ip") or x.get("switch") or ""), "port": port,
+                    "device": devices.get(mac, "")})
+    nat = lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]    # noqa: E731 - port 2 before port 10
+    return sorted(out, key=lambda s: (s["switch_name"].lower(), nat(s["port"]), s["mac"]))
+
+
+@router.get("/api/pf/sessions")
+async def pf_sessions(user=Depends(auth.require(roles.LESEN))):
+    """Who is logged in on the LAN now, as PacketFence holds it (session_view of pf.open_sessions, at most SESSIONS_TTL seconds
+    old). Without PacketFence set up {"configured": False, "sessions": []}; when it does not answer, ok False with its reason."""
+    if not await pf.configured():
+        return {"configured": False, "ok": True, "sessions": []}
+    try:
+        items = await _open_sessions()
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "ok": False, "error": str(e)[:200] if isinstance(e, RuntimeError) else f"{type(e).__name__}: {str(e)[:160]}",
+                "sessions": []}
+    async with db() as conn:
+        async with conn.execute("SELECT id, name, host, base_mac FROM switches") as cur:
+            switches = [dict(r) for r in await cur.fetchall()]
+        async with conn.execute("SELECT switch_id, ifindex, name FROM ports") as cur:
+            ports = [dict(r) for r in await cur.fetchall()]
+        async with conn.execute("SELECT mac, name FROM devices") as cur:
+            devices = {r["mac"]: r["name"] for r in await cur.fetchall()}
+    return {"configured": True, "ok": True, "sessions": session_view(items, switches, ports, devices)}

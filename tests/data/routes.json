@@ -282,6 +282,12 @@
 ]
 ],
 [
+"/api/pf/sessions",
+[
+"GET"
+]
+],
+[
 "/api/pf/test",
 [
 "POST"

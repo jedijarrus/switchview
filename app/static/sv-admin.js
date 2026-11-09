@@ -337,7 +337,8 @@
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="Geräte durchsuchen" value="${esc(devText)}">
           ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät hinzufügen</button>` : ""}</div></div>
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
-        <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
+        <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Freigabe</th><th>Anmeldung</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>
+      <section class="card" id="auth-card"></section>
       <section class="card" id="rmm-card"></section>
       <section class="card"><div class="card-h"><h2>Unbekannte Geräte an Zugangsports</h2><span class="sub">noch nicht in der Datenbank · Einträge hinter LLDP-Geräten, unbestätigten Uplinks oder an Ports mit vielen Geräten stehen markiert am Ende</span></div><div id="ulist"><div class="empty">Lade …</div></div></section>
       <section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`;
@@ -348,11 +349,13 @@
       const f = list.filter(d => (devFilter === "all" || (devFilter === "allowed" && d.allowed) || (devFilter === "blocked" && !d.allowed) || (devFilter === "rmm" && isRmm(d)) || (devFilter === "err" && d.pf_state === "fehler"))
         && (!t || [d.name, d.mac, d.location, d.owner, d.role, d.notes, KINDS[d.kind]].some(x => String(x || "").toLowerCase().includes(t))));
       $("#dbody").innerHTML = f.length ? f.map(d => `<tr${may ? ` class="clickrow" data-mac="${esc(d.mac)}"` : ""}><td><b>${esc(d.name)}</b>${rmmPill(d)}<div class="muted" style="font-size:12px">${esc(KINDS[d.kind] || d.kind)}${d.location ? " · " + esc(d.location) : ""}${isRmm(d) && d.owner ? " · " + esc(d.owner) : ""}</div></td>
-        <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td>
+        <td class="mono">${esc(d.mac)}${d.vendor ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td><td>${esc(d.role || "default")}</td><td>${freePill(d)}${d.valid_until ? `<div class="muted" style="font-size:12px">bis ${esc(d.valid_until)}</div>` : ""}</td><td>${authCell(d.mac)}</td>
         <td>${d.seen ? `${esc(d.seen.sw)} · Port ${esc(d.seen.port)} · VLAN ${esc(d.seen.vlan)}${d.seen.ip ? `<div class="mono muted">${esc(d.seen.ip)}</div>` : ""}` : `<span class="muted">nicht gesehen</span>`}</td><td>${pfPill(d)}${pfNote(d)}</td></tr>`).join("")
-        : `<tr><td colspan="6" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“." : "Noch keine Geräte."}</td></tr>`;
+        : `<tr><td colspan="7" class="muted">${list.length ? "Kein Gerät passt zum Filter." : may ? "Noch keine Geräte. Unten aus den unbekannten übernehmen oder „Gerät hinzufügen“." : "Noch keine Geräte."}</td></tr>`;
     };
     rows();
+    // Who is logged in now (sv-auth.js): the card, then the column of the list, once PacketFence answered
+    renderAuthInto($("#auth-card")).then(() => { if ($("#dbody")) rows(); });
     $("#df").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (!b) return; devFilter = b.dataset.f; document.querySelectorAll("#df [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.f === devFilter))); rows(); });
     $("#dq").addEventListener("input", e => { devText = e.target.value.trim(); rows(); });
     if (may) {
@@ -361,12 +364,12 @@
       $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     }
     try {
-      const un = await api("GET", "/api/devices/unknown");
+      const [un] = await Promise.all([api("GET", "/api/devices/unknown"), loadAuth()]);    // with the sessions (sv-auth.js) for "Anmeldung"
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
       if (!$("#ulist")) return;
-      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
+      $("#ulist").innerHTML = un.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th><th>Anmeldung</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + un.map((d, i) =>
         `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td><td>${authCell(d.mac)}</td>${may ? `<td><button class="btn small" type="button" data-u="${i}">Übernehmen</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
         : `<div class="empty">Keine unbekannten Geräte an Zugangsports.</div>`;
       $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }

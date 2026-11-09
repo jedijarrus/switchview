@@ -292,6 +292,15 @@ table.matrix td:first-child, table.matrix th:first-child { text-align: left; }
 .mcell:hover { border-color: var(--accent); }
 .mcell .u { color: var(--fg); font-weight: 500; }
 .mcell .t { color: var(--muted); }
+/* Anmeldungen (sv-auth.js): die Port-Kachel unten farbig nach Anmeldung (802.1X grün, MAC violett, Park gelb), Pillen in Liste und Panel */
+.port.au-x::after, .port.au-m::after, .port.au-p::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; }
+.port.au-x::after, .lg-au.x { background: var(--ok); }
+.port.au-m::after, .lg-au.m { background: var(--violet); }
+.port.au-p::after, .lg-au.p { background: var(--warn); }
+.lg-au { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
+.pill.au-x { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.pill.au-m { color: var(--violet); background: color-mix(in srgb, var(--violet) 13%, transparent); }
+.pill.au-p { color: var(--warn); background: var(--warn-bg); }
 .mdef { display: inline-flex; font-size: 11.5px; color: var(--muted); padding: 1px 6px; border: 1px dashed var(--border-strong); border-radius: 4px; }
 table.matrix td.num { color: var(--muted); }
 table.matrix td.num.part { color: var(--fg); font-weight: 500; }
