@@ -355,7 +355,7 @@
       ${panel("rel", `<section class="card"><div class="card-h"><h2>MAC-Freigaben</h2><span class="sub">${list.length} ${list.length === 1 ? "Gerät" : "Geräte"} ohne Zertifikat · ${list.filter(d => !d.allowed).length} gesperrt</span>
         <div class="right toolrow"><div class="seg" role="group" aria-label="MAC-Freigaben filtern" id="df">${[["all", "Alle"], ["allowed", "Freigegeben"], ["blocked", "Gesperrt"], ["err", "Fehler"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${devFilter === k}">${l}</button>`).join("")}</div>
           <input type="search" id="dq" placeholder="Name, MAC, Standort" aria-label="MAC-Freigaben durchsuchen" value="${esc(devText)}">
-          ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small primary" type="button" id="d-add">Gerät freigeben</button>` : ""}</div></div>
+          ${may ? `<button class="btn small" type="button" id="d-sync">Mit PacketFence abgleichen</button><button class="btn small" type="button" id="d-csv">CSV importieren</button><button class="btn small primary" type="button" id="d-add">Gerät freigeben</button>` : ""}</div></div>
         ${may ? "" : `<p class="note gate" id="d-why" style="margin:12px 16px">Geräte anlegen, ändern und freigeben braucht die Rolle „Ändern“.</p>`}
         <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>MAC</th><th>Rolle</th><th>Status</th><th>Anmeldung</th><th>Zuletzt gesehen</th><th>PacketFence</th></tr></thead><tbody id="dbody"></tbody></table></div></section>`)}
       ${panel("watch", `<section class="card"><div class="card-h"><h2>Beobachtungsliste</h2><span class="sub">meldet, wenn eine dieser MAC-Adressen auftaucht, den Port wechselt oder wiederkommt</span></div><div id="w-card"><div class="empty">Lade …</div></div></section>`)}`;
@@ -383,6 +383,7 @@
     if (may) {
       $("#dbody").addEventListener("click", e => { const r = e.target.closest("[data-mac]"); if (r) editDevice(list.find(d => d.mac === r.dataset.mac), false); });
       $("#d-add").addEventListener("click", () => editDevice({ mac: "", name: "", kind: "drucker" }, true));
+      $("#d-csv").addEventListener("click", () => openImport());    // the CSV import (sv-triage.js)
       $("#d-sync").addEventListener("click", async e => { e.target.disabled = true; try { const r = await api("POST", "/api/devices/sync"); toast(r.ok ? `${r.done} Geräte abgeglichen` : (r.error || `${r.failed} Fehler`)); renderDevices(); } catch (err) { toast(err.message); e.target.disabled = false; } });
     }
     try {
@@ -399,31 +400,36 @@
       if (devTab == null) show(parked.length ? "park" : "net", false);
       $("#dn-unknown").textContent = un.length;
       const unknownFlags = d => (d.flags || []).filter(f => UNKNOWN_FLAG_TEXT[f]).map(f => `<div class="muted">${esc(UNKNOWN_FLAG_TEXT[f](d))}</div>`).join("");
+      // The triage (sv-triage.js), only with an answer that carries suggestions: the column "Vorschlag", "neu" and the first
+      // sighting, and with Ändern the choice per row with its bar - of the entries shown: a hidden one is not released
+      const tri = triageOn(un), pick = tri && may;
       const drawUnknown = () => {
         const shown = un.filter(d => devBehind || !noise(d));
         $("#d-behind-n").textContent = `(${un.filter(noise).length})`;
-        $("#ulist").innerHTML = shown.length ? `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${may ? "<th></th>" : ""}</tr></thead><tbody>` + shown.map(d =>
-          `<tr><td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
-          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${may ? `<td><button class="btn small" type="button" data-u="${un.indexOf(d)}">Freigeben</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
+        $("#ulist").innerHTML = shown.length ? `${pick ? triageBar("net") : ""}<div class="tbl-wrap"><table><thead><tr>${pick ? "<th></th>" : ""}<th>Gerät</th><th>MAC</th><th>Ort</th><th>Port-Zustand</th>${tri ? "<th>Vorschlag</th>" : ""}${may ? "<th></th>" : ""}</tr></thead><tbody>` + shown.map(d =>
+          `<tr>${pick ? pickCell(d.mac, true) : ""}<td>${esc(d.name || d.vendor || "unbekannt")}${d.ip ? `<div class="mono muted">${esc(d.ip)}</div>` : ""}${tri ? firstSeenHtml(d) : ""}</td><td class="mono">${esc(d.mac)}${d.vendor && d.name ? `<div class="muted" style="font-family:var(--sans)">${esc(d.vendor)}</div>` : ""}</td>
+          <td>${esc(d.sw)} · Port ${esc(d.port)} · ${chip(d.vlan)}${unknownFlags(d)}</td><td>${stPill(stOf(MAP && swById(d.sid), d.st))}</td>${tri ? `<td>${suggestHtml(d.suggest)}</td>` : ""}${may ? `<td><button class="btn small" type="button" data-u="${un.indexOf(d)}">Freigeben</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`
           : `<div class="empty">${un.length ? "Nur Geräte hinter anderen Geräten (oben einblenden)." : "Keine Geräte ohne Anmeldung."}</div>`;
+        if (pick && shown.length) bindTriage($("#ulist"), "net", shown);
       };
       drawUnknown();
       $("#d-behind").addEventListener("change", e => { devBehind = e.target.checked; drawUnknown(); });
       $("#d-fold").addEventListener("click", () => { devOpen = !devOpen; devKeep(DEV_OPEN_KEY, devOpen ? "1" : "0"); $("#d-fold").setAttribute("aria-expanded", String(devOpen)); $("#d-unknown").hidden = !devOpen; });
-      $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice({ mac: d.mac, name: (d.name || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${d.sw} Port ${d.port}` }, true, true); };
+      $("#ulist").onclick = e => { const b = e.target.closest("[data-u]"); if (!b) return; const d = un[+b.dataset.u]; editDevice(triageDevice(d, `${d.sw} Port ${d.port}`), true, true); };
     } catch (e) { if ($("#ulist")) $("#ulist").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     await watched;
   }
 
+  // The field "Rolle" of a device form (id): PacketFence's roles to choose from, else text
+  const roleFieldHtml = (id, role) => ROLES.roles.length
+    ? `<select id="${id}"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
+    : `<input id="${id}" value="${esc(role)}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
   // The device form; release: "Gerät freigeben" from the card "Ohne Zugriff" or the port panel - the box "Ohne Zertifikat
   // freigeben" ticked (it can still be unticked) and the button "Freigeben", for a new device or a known one
   async function editDevice(d, isNew, release = false) {
     if (!ROLES.configured && !ROLES.roles.length) { try { ROLES = await api("GET", "/api/pf/roles"); } catch (e) { /* egal */ } }
     // A new device starts in DEVICE_ROLE: a release without a role would get PacketFence's role "default"
-    const role = d.role || (isNew ? DEVICE_ROLE : "");
-    const roleField = ROLES.roles.length
-      ? `<select id="dv-role"><option value="">default</option>${ROLES.roles.filter(r => r.name !== "default").map(r => `<option value="${esc(r.name)}" ${role === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select><span class="hint">PacketFence ordnet der Rolle das VLAN zu</span>`
-      : `<input id="dv-role" value="${esc(role)}" maxlength="64" placeholder="default"><span class="hint">${ROLES.configured ? "Rollen aus PacketFence nicht lesbar" : "PacketFence-API nicht eingerichtet, Rolle als Text"}</span>`;
+    const roleField = roleFieldHtml("dv-role", d.role || (isNew ? DEVICE_ROLE : ""));
     // PacketFence's error of a stored device stands above the form (the list shows it under the pill)
     const body = `${!isNew && d.pf_error ? `<div class="banner warn"><span><b>PacketFence:</b> ${esc(d.pf_error)}</span></div>` : ""}<div class="grid2"><label class="field"><span>MAC-Adresse</span><input id="dv-mac" value="${esc(d.mac || "")}" ${isNew ? "" : "readonly"} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" required></label>
         <label class="field"><span>Name</span><input id="dv-name" value="${esc(d.name || "")}" maxlength="64" required autocomplete="off"></label>
@@ -441,6 +447,7 @@
       if (!(await confirmModal("Gerät löschen", `<b>${esc(d.name)}</b> (${esc(d.mac)}) löschen? Die Freigabe in PacketFence wird zurückgenommen.`, "Löschen", true))) return editDevice(d, false);
       try { const r = await api("DELETE", `/api/devices/${encodeURIComponent(d.mac)}`); toast(r.warning || `Gelöscht${AUTH_SWITCH_NOTE}`); MAP = null; authAfterChange(d.mac); if (current === "devices") renderDevices(); } catch (e) { toast(e.message); }
     } });
+    if (!isNew && !release && roleOk("aendern")) btns.push(reevalButton(d));    // "Neu bewerten" (sv-triage.js)
     btns.push({ label: "Abbrechen", onClick: closeModal });
     btns.push({ label: release || isNew ? "Freigeben" : "Speichern", cls: "primary", onClick: async b => {
       const payload = { mac: $("#dv-mac").value.trim(), name: $("#dv-name").value.trim(), kind: $("#dv-kind").value, role: $("#dv-role").value.trim(), location: $("#dv-loc").value.trim(),
@@ -495,7 +502,7 @@
   // The text of each audit action (api_*.audit / changes.audit); an action without one shows its key
   const AUDIT_LABELS = { login: "Anmeldung", login_failed: "Anmeldung fehlgeschlagen", logout_all: "Überall abgemeldet", switch_create: "Switch angelegt", switch_update: "Switch geändert", switch_delete: "Switch gelöscht", switch_hostkey_reset: "SSH-Hostschlüssel vergessen", backup: "Sicherung", settings_update: "Einstellungen geändert",
     change_ok: "Änderung erledigt", change_unclear: "Änderung unklar", change_failed: "Änderung fehlgeschlagen", change_aborted: "Änderung abgebrochen",
-    device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich",
+    device_create: "Gerät angelegt", device_update: "Gerät geändert", device_delete: "Gerät gelöscht", device_sync: "PacketFence-Abgleich", device_reevaluate: "Gerät neu bewertet",
     approval_requested: "Freigabe angefordert", approval_approved: "Freigegeben", approval_run: "Freigegebene Änderung gestartet", approval_rejected: "Freigabe abgelehnt",
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
     zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet",

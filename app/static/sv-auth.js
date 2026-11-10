@@ -103,22 +103,28 @@
   }
   // The card "Ohne Zugriff" into el (one sentence without a parked device): each with its name, why, MAC, switch and port, since;
   // with Ändern (may) "Freigeben", for a locked device "Entsperren" - the form of a known device, else a new one, released
-  // (editDevice(…, release))
+  // (editDevice(…, release)). The triage (sv-triage.js), only where the unknown entries carry suggestions: the column "Vorschlag"
+  // for an unknown device, with Ändern the choice per unknown device with its bar, and the form filled with the suggestion. A
+  // released device PacketFence parks anyway gets "Neu bewerten" beside its button
   function renderParkedInto(el, parked, may) {
     if (!el) return;
     if (!parked.length) { el.innerHTML = `<div class="card-h"><h2>Ohne Zugriff</h2></div><div class="empty">Gerade kein Gerät ohne Zugriff.</div>`; return; }
     const why = x => x.known ? (x.known.allowed ? "freigegeben, PacketFence parkt es trotzdem" : "in den MAC-Freigaben gesperrt") : "unbekannt";
+    const tri = triageOn(parked.map(x => x.seen)), pick = tri && may;
+    const button = (x, i) => `<button class="btn small primary" type="button" data-park="${i}">${x.known && !x.known.allowed ? "Entsperren" : "Freigeben"}</button>`;
     el.innerHTML = `<div class="card-h"><h2>Ohne Zugriff</h2><span class="sub">${parked.length === 1 ? "1 Gerät" : `${parked.length} Geräte`} im Park-VLAN: MAC-Anmeldung ohne Freigabe</span></div>`
-      + `<div class="tbl-wrap"><table><thead><tr><th>Gerät</th><th>MAC</th><th>Switch · Port</th><th>Seit</th>${may ? "<th></th>" : ""}</tr></thead><tbody>`
-      + parked.map((x, i) => `<tr><td>${esc(x.known ? x.known.name : (x.seen && (x.seen.name || x.seen.vendor)) || "unbekannt")}<span class="cellnote">${why(x)}</span></td>`
-        + `<td class="mono">${esc(x.mac)}</td><td>${esc(x.switch_name || "–")} · ${esc(x.port || "–")}</td><td class="num">${esc(x.since)}</td>`
-        + `${may ? `<td><button class="btn small primary" type="button" data-park="${i}">${x.known && !x.known.allowed ? "Entsperren" : "Freigeben"}</button></td>` : ""}</tr>`).join("") + `</tbody></table></div>`;
+      + `${pick ? triageBar("park") : ""}<div class="tbl-wrap"><table><thead><tr>${pick ? "<th></th>" : ""}<th>Gerät</th><th>MAC</th><th>Switch · Port</th><th>Seit</th>${tri ? "<th>Vorschlag</th>" : ""}${may ? "<th></th>" : ""}</tr></thead><tbody>`
+      + parked.map((x, i) => `<tr>${pick ? pickCell(x.mac, !x.known) : ""}<td>${esc(x.known ? x.known.name : (x.seen && (x.seen.name || x.seen.vendor)) || "unbekannt")}<span class="cellnote">${why(x)}</span></td>`
+        + `<td class="mono">${esc(x.mac)}</td><td>${esc(x.switch_name || "–")} · ${esc(x.port || "–")}</td><td class="num">${esc(x.since)}</td>${tri ? `<td>${x.known ? "" : suggestHtml(x.seen && x.seen.suggest)}</td>` : ""}`
+        + `${!may ? "" : x.known && x.known.allowed ? `<td><div class="actions">${button(x, i)}<button class="btn small" type="button" data-re="${i}">Neu bewerten</button></div></td>` : `<td>${button(x, i)}</td>`}</tr>`).join("") + `</tbody></table></div>`;
     el.onclick = e => {
-      const b = e.target.closest("[data-park]"); if (!b) return;
+      const b = e.target.closest("[data-park]");
+      if (!b) { const re = e.target.closest("[data-re]"); if (re) reevaluateMac(parked[+re.dataset.re].mac); return; }
       const x = parked[+b.dataset.park];
       if (x.known) editDevice(x.known, false, true);
-      else editDevice({ mac: x.mac, name: ((x.seen && x.seen.name) || "").replace(/\..*$/, ""), kind: "sonstiges", location: `${x.switch_name} Port ${x.port}` }, true, true);
+      else editDevice(triageDevice({ mac: x.mac, name: x.seen && x.seen.name, suggest: x.seen && x.seen.suggest }, `${x.switch_name} Port ${x.port}`), true, true);
     };
+    if (pick) bindTriage(el, "park", parked.filter(x => !x.known).map(x => ({ mac: x.mac, name: x.seen && x.seen.name, suggest: x.seen && x.seen.suggest })));
   }
   // The card "Angemeldet" into el: every session logged in (not parked) with its device (the device of the database, else the account
   // of an 802.1X login), MAC, way, role and VLAN, switch and port, since; filtered by way (authFilter). The parked ones are only

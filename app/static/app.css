@@ -462,3 +462,5 @@ a.btn { color: var(--fg); text-decoration: none; }
 @media (prefers-reduced-motion: reduce) { .fold .chev { transition: none; } }
 /* Sammeländerung: the section of one switch in a preview, in the review and in the details of a request (sv-bulk.js) */
 .bulk-sec { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+/* Triage: the bar over a list of the devices view with its count and "Ausgewählte freigeben" (sv-triage.js) */
+.tr-bar { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--fg-2); }
