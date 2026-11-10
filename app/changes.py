@@ -29,12 +29,13 @@ import snmpwrite
 import sshcli
 from changeverify import _poe_entry_moved, verify_ports, verify_snmp
 from db import audit, db
-from radiusprep import PARK_VLAN, RADIUS_KEY_RE, _SWITCH_SECRETS, _secrets_of, plan_prepare, radius_settings, readiness, readiness_missing
+from radiusprep import (PARK_VLAN, RADIUS_KEY_RE, SNMP_PASS_RE, SNMP_USER_RE, _SWITCH_SECRETS, _secrets_of, plan_prepare, radius_settings,
+                        readiness, readiness_missing)
 
 # The names that moved out of changes into radiusprep and changeverify (Phase 3, Task 11): changes re-exports them, so every changes.X
 # stays valid, and calls them by these names (ruff takes a name listed here as used, F401)
-__all__ = ["PARK_VLAN", "RADIUS_KEY_RE", "_SWITCH_SECRETS", "_secrets_of", "plan_prepare", "radius_settings", "readiness",
-           "readiness_missing", "_poe_entry_moved", "verify_ports", "verify_snmp"]
+__all__ = ["PARK_VLAN", "RADIUS_KEY_RE", "SNMP_PASS_RE", "SNMP_USER_RE", "_SWITCH_SECRETS", "_secrets_of", "plan_prepare", "radius_settings",
+           "readiness", "readiness_missing", "_poe_entry_moved", "verify_ports", "verify_snmp"]
 
 log = logging.getLogger("switchview.changes")
 
@@ -732,8 +733,9 @@ async def run_change(cid: int):
                     after = cfgparse.parse_config(post)
                     await step("Konfiguration nachher gelesen")
                     if kind == "prepare":
-                        r = readiness(after, rs["server"])
-                        bad = [k for k in ("host", "coa", "tw", "eap", "active", "park") if not r[k]]
+                        # what the plan expects: the basics always, the SNMPv3 user of PacketFence only when the plan set it up
+                        r = readiness(after, rs["server"], (rs.get("snmp") or {}).get("user") or "")
+                        bad = [k for k in plan["expected"] if not r[k]]
                     else:
                         bad = verify_ports(after, plan["desired"])
                     if bad:

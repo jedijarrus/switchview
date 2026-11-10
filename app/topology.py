@@ -14,7 +14,7 @@ import drivers
 import names as names_mod
 import poller
 import roles
-from db import db, get_setting
+from db import db, load_settings
 
 router = APIRouter()
 
@@ -26,7 +26,8 @@ async def netmap(user=Depends(auth.require(roles.LESEN))):
 
 
 async def build_map() -> dict:
-    server = await get_setting("radius_server", "") or ""
+    st = await load_settings(["radius_server", "pf_snmp_user"])
+    server, snmp_user = st["radius_server"] or "", st["pf_snmp_user"] or ""
     async with db() as conn:
         async with conn.execute("SELECT * FROM switches WHERE enabled = 1 ORDER BY zone, sort, name") as cur:
             sws = await cur.fetchall()
@@ -90,7 +91,7 @@ async def build_map() -> dict:
                          "ssh": bool(s["ssh_user"] and s["ssh_pass"]), "driver": s["driver"], "caps": sorted(drivers.driver_for(s).caps),
                          "snmp_write": bool(s["snmp_write"]), "cfgAt": cfgs.get(s["id"], (None,))[0],
                          "cfgStale": cfgs.get(s["id"], (None, None, False))[2],
-                         "ready": changes.readiness(cfgs[s["id"]][1], server or None) if s["id"] in cfgs else None,
+                         "ready": changes.readiness(cfgs[s["id"]][1], server or None, snmp_user) if s["id"] in cfgs else None,
                          "limitMax": changes.limit_max(s["firmware"] or ""), "vl": vl_by.get(s["id"], []),
                          "credWarnings": poller.credential_warnings(s)})
     links = _links(switches, all_macs)

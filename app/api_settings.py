@@ -1,6 +1,6 @@
 """The settings API: OPNsense, RADIUS and PacketFence settings with their secrets bound to their destinations, the name refresh, the
-audit log (filtered and paged on the server, and as CSV: Phase 4b, Task 8), the zone scopes (Phase 4a, Task 5) and the four-eyes
-principle (Phase 4a, Task 6). Split from main.py (Phase 3, Task 11), the code as it was."""
+audit log (filtered and paged on the server, and as CSV: Phase 4b, Task 8), the zone scopes (Phase 4a, Task 5), the four-eyes
+principle (Phase 4a, Task 6) and the SNMPv3 user "Vorbereiten" sets up for PacketFence. Split from main.py (Phase 3, Task 11)."""
 import ipaddress
 import re
 from typing import Annotated
@@ -46,7 +46,7 @@ DESTINATION_SECRETS: dict[str, tuple[str, ...]] = {"opnsense_url": ("opnsense_ke
 
 
 # The secrets of the settings in the order "unreadable" lists them (sorted)
-SETTINGS_SECRETS = ("opnsense_key", "opnsense_secret", "pf_pass", "radius_key")
+SETTINGS_SECRETS = ("opnsense_key", "opnsense_secret", "pf_pass", "pf_snmp_auth", "pf_snmp_priv", "radius_key")
 
 
 @router.get("/api/settings")
@@ -55,7 +55,7 @@ async def get_settings(user=Depends(auth.require(roles.LESEN))):
     changed?), so the view asks for them anew; the four-eyes principle and the hours of a request (approvals.policy_of). One SELECT
     (db.load_settings)."""
     s = await load_settings(["poll_minutes", "opnsense_url", "opnsense_verify_tls", "radius_server", "pf_url", "pf_user", "pf_verify_tls",
-                             *SETTINGS_SECRETS, *approvals.SETTINGS_KEYS])
+                             "pf_snmp_user", *SETTINGS_SECRETS, *approvals.SETTINGS_KEYS])
     policy = approvals.policy_of(s)
     return {"poll_minutes": int(s["poll_minutes"] or 15),
             "opnsense_url": s["opnsense_url"] or "",
@@ -68,6 +68,9 @@ async def get_settings(user=Depends(auth.require(roles.LESEN))):
             "pf_user": s["pf_user"] or "",
             "pf_pass_set": bool(s["pf_pass"]),
             "pf_verify_tls": (s["pf_verify_tls"] or "1") == "1",
+            "pf_snmp_user": s["pf_snmp_user"] or "",
+            "pf_snmp_auth_set": bool(s["pf_snmp_auth"]),
+            "pf_snmp_priv_set": bool(s["pf_snmp_priv"]),
             "unreadable": sorted(k for k in SETTINGS_SECRETS if unreadable(s[k])),
             "four_eyes": policy["four_eyes"],
             "approval_hours": policy["hours"]}
@@ -138,6 +141,39 @@ async def put_approval_settings(body: ApprovalSettingsIn, user=Depends(auth.requ
         await conn.commit()
     await audit(user["username"], "approval_settings", "", f"Vier-Augen-Prinzip: {'an' if body.four_eyes else 'aus'}, Ablauf: {body.hours} h",
                 role=user["role"])
+    return {"ok": True}
+
+
+class PfSnmpIn(BaseModel):
+    user: str = Field(max_length=32)
+    auth_pass: str | None = Field(default=None, max_length=32)    # both in api_switches.SECRET_INPUTS: a 422 never echoes one
+    priv_pass: str | None = Field(default=None, max_length=32)
+
+
+def _secret_fate(value: str | None) -> str:
+    """What a PUT does to a stored secret, for the audit: None keeps it, "" deletes it, a value replaces it."""
+    return "unverändert" if value is None else "neu gesetzt" if value else "gelöscht"
+
+
+@router.put("/api/settings/pf-snmp")
+async def put_pf_snmp_settings(body: PfSnmpIn, user=Depends(auth.require(roles.ADMIN))):
+    """The SNMPv3 user "Vorbereiten" sets up on a switch (changes.plan_prepare), the one PacketFence re-evaluates a port with: its
+    name ("": none, "Vorbereiten" leaves SNMPv3 alone) and its two passphrases, each kept when the PUT carries none (None) and deleted
+    by "". Apart from PUT /api/settings like the four-eyes principle: that one sets every field it is not sent to its default. The
+    audit names the user and what became of each passphrase, never a passphrase."""
+    if body.user and not changes.SNMP_USER_RE.fullmatch(body.user):
+        raise HTTPException(422, "SNMP-Benutzer: 1–32 Zeichen aus Buchstaben, Ziffern, Punkt, Bindestrich und Unterstrich")
+    if any(v and not changes.SNMP_PASS_RE.fullmatch(v) for v in (body.auth_pass, body.priv_pass)):
+        raise HTTPException(422, "SNMP-Passwort: 8–32 Zeichen, ohne Leerzeichen, Anführungszeichen, Backslash, ? und ~ (die versteht die Switch-CLI nicht)")
+    new: dict[str, str | None] = {"pf_snmp_user": body.user}
+    for k, v in (("pf_snmp_auth", body.auth_pass), ("pf_snmp_priv", body.priv_pass)):
+        if v is not None:
+            new[k] = encrypt(v) if v else None
+    async with db() as conn:
+        await write_settings(conn, new)
+        await conn.commit()
+    await audit(user["username"], "pf_snmp_settings", "", f"Benutzer: {body.user or '–'}, Auth-Passwort: {_secret_fate(body.auth_pass)}, "
+                f"Priv-Passwort: {_secret_fate(body.priv_pass)}", role=user["role"])
     return {"ok": True}
 
 

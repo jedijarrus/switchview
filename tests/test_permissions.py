@@ -125,6 +125,7 @@ MATRIX_4C: dict = {
 # Who is logged in now, as PacketFence holds it (the table of docs/anmeldungen.md)
 MATRIX_AUTH: dict = {
     ("GET", "/api/pf/sessions"): "lesen",
+    ("PUT", "/api/settings/pf-snmp"): "admin",
 }
 MATRIX = MATRIX_4A | MATRIX_4B | MATRIX_4C | MATRIX_AUTH
 
@@ -252,7 +253,8 @@ AUDITED = [("POST", "/api/devices", {"mac": "aa:bb:cc:dd:ee:01", "name": "D"}, "
            ("POST", "/api/watch", {"mac": "aa:bb:cc:dd:ee:02", "note": ""}, "watch_add", "aendern"),
            ("POST", "/api/auth/logout-all", None, "logout_all", "lesen"),
            ("PUT", "/api/zone-scopes", {"entries": []}, "zone_scopes_update", "admin"),
-           ("PUT", "/api/settings/approvals", {"four_eyes": False}, "approval_settings", "admin")]
+           ("PUT", "/api/settings/approvals", {"four_eyes": False}, "approval_settings", "admin"),
+           ("PUT", "/api/settings/pf-snmp", {"user": "packetfence"}, "pf_snmp_settings", "admin")]
 
 
 @pytest.mark.parametrize("method, path, body, action, role", AUDITED)

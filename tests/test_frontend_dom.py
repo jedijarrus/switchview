@@ -1139,6 +1139,32 @@ def test_only_an_admin_is_offered_to_prepare_a_switch(role, missing, button, not
     assert ('data-a="prepare"' in html, PREPARE_NOTE in html) == (button, note)
 
 
+SNMP_LINE = "SNMPv3-Benutzer für PacketFence angelegt (schaltet Ports ohne Kabelziehen um)"
+SNMP_NOTES = ["„Vorbereiten“ legt den SNMPv3-Benutzer an und ändert keinen Port.",
+              "SNMPv3 ist am Switch ausgeschaltet. „snmpv3 enable“ muss einmal von Hand an der CLI laufen, danach legt „Vorbereiten“ den Benutzer an.",
+              "„Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port."]
+
+
+# snmp of the readiness: None (no user in the settings, or the configuration does not tell), there, missing; off: SNMPv3 is off
+@pytest.mark.parametrize("snmp, off, host, line, button, notes", [
+    (None, False, True, [], False, []), (True, False, True, ["ok"], False, []), (False, False, True, ["miss"], True, SNMP_NOTES[:1]),
+    (False, True, True, ["miss"], False, SNMP_NOTES[1:2]), (False, False, False, ["miss"], True, SNMP_NOTES[2:]),
+    (False, True, False, ["miss"], True, SNMP_NOTES[1:])])
+def test_the_radius_card_says_whether_the_snmp_user_of_packetfence_is_there(snmp, off, host, line, button, notes):
+    ready = {**READY, "host": host, "snmp": snmp, "snmp_off": off}
+    html = in_dom(role_me("admin") + f"radiusCard({json.dumps({**SW, 'ready': ready})})")
+    assert re.findall(r'<li class="(\w+)"><span class="st-dot \w*"></span>' + re.escape(SNMP_LINE) + "</li>", html) == line
+    assert ('data-a="prepare"' in html) is button and [n for n in SNMP_NOTES if n in html] == notes
+
+
+@pytest.mark.parametrize("host, off, sends", [(True, False, "die SNMP-Passwörter"), (False, False, "das RADIUS-Secret"), (True, True, None)])
+def test_below_admin_the_radius_card_says_what_preparing_the_snmp_user_needs(host, off, sends):
+    ready = {**READY, "host": host, "snmp": False, "snmp_off": off}
+    html = in_dom(role_me("aendern") + f"radiusCard({json.dumps({**SW, 'ready': ready})})")
+    assert 'data-a="prepare"' not in html
+    assert re.findall(r"„Vorbereiten“ braucht die Rolle „Admin“ \(es sendet ([^)]+) an den Switch\)\.", html) == ([sends] if sends else [])
+
+
 TRUNK_WHY = "Einen Trunk ändern geht nur im Expertenmodus, und der braucht die Rolle „Freigeben“."
 
 

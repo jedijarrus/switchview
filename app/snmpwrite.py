@@ -87,8 +87,8 @@ def build_cfg(W: dict, driver_name: str = "procurve", *, vmvlan_base: str | None
     None ohne einen (kein PoE, oder nicht sicher zuzuordnen). Ein Port mit vmVlan-Zeile ist ein Access-Port: u ist der vmVlan-Wert
     (0 = kein VLAN = None), t ist leer, die Q-BRIDGE-Sicht auf u / t zaehlt fuer ihn nicht. Alles andere liest SNMP hier nicht und steht
     auf dem Wert einer leeren Konfiguration: hostname "" (read_cfg traegt sys_name ein), primary_vlan "1", mgmt_vlan None, auth_active /
-    eap_radius / login_radius False, addr_format None, voice_vlans [], radius {}; pro Port x / m False, cl / al / xuv / muv None (802.1X /
-    MAC-Auth nur ueber die CLI).
+    eap_radius / login_radius False, addr_format None, voice_vlans [], radius {}, snmpv3 None (nicht gelesen); pro Port x / m False,
+    cl / al / xuv / muv None (802.1X / MAC-Auth nur ueber die CLI).
 
     raw: egress / untagged {vid: Bytes der PortList, wie gelesen}; pvid {Port: vid} ueber den effektiven Bridge-Port; admin
     {Port: int}; alias {Port: str}, nur wo der Switch eine Zeile liefert; poe {Port: {"group", "index", "admin", "status"}} (der
@@ -237,7 +237,7 @@ def _synth(rows: dict, vmvlan: dict[str, str], driver_name: str, text_hex: bool,
         "primary_vlan": "1", "mgmt_vlan": None, "auth_active": False, "eap_radius": False, "login_radius": False, "addr_format": None,
         "trunks": {ifname[hi]: [ifname.get(m, m) for m in mem] for hi, mem in members.items()},
         "vlans": {k: vname[k] for k in sorted(vname, key=int)},
-        "voice_vlans": [], "radius": {},
+        "voice_vlans": [], "radius": {}, "snmpv3": None,
         "ports": ports,
     }
     return cfg, raw

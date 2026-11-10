@@ -101,7 +101,8 @@ def test_the_audit_lists_every_action_sorted_by_its_text():                    #
     labels = in_dom("AUDIT_LABELS")
     for key, text in {"alert_settings": "Benachrichtigungen geändert", "alert_test": "Benachrichtigung getestet",
                       "alert_failed": "Benachrichtigung nicht zugestellt", "compliance_rules": "Sicherheitsregeln geändert",
-                      "watch_add": "MAC beobachtet", "watch_remove": "MAC nicht mehr beobachtet"}.items():
+                      "watch_add": "MAC beobachtet", "watch_remove": "MAC nicht mehr beobachtet",
+                      "pf_snmp_settings": "SNMP-Benutzer für PacketFence geändert"}.items():
         assert labels[key] == text
     rows = [{**AUDIT[0], "action": "neu_im_server"}]     # an action without a label shows its key, the choice offers only the labelled ones
     html, body = view({"rows": rows, "next": None}, 'return [$("#view").innerHTML, $("#au-list").innerHTML]; ')

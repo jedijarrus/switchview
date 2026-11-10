@@ -50,7 +50,7 @@ DRIVER = DRIVERS["procurve"]
 
 
 CFG_KEYS = ["hostname", "primary_vlan", "mgmt_vlan", "auth_active", "eap_radius", "login_radius", "addr_format", "trunks", "vlans",
-            "voice_vlans", "radius", "ports"]
+            "voice_vlans", "radius", "snmpv3", "ports"]
 PORT_KEYS = {"u", "t", "name", "en", "x", "m", "cl", "al", "xuv", "muv", "poe"}
 RAW_KEYS = {"egress", "untagged", "pvid", "admin", "alias", "poe", "poe_unmapped", "port2bp", "bp2port", "ifindex", "unmanaged", "vmvlan"}
 POE_BASES = {WALK_BASES[k] for k in ("poeAdmin", "poeStatus")}    # walked only for a change that touches PoE (R34, tests/test_poe.py)
@@ -115,7 +115,7 @@ def test_build_cfg_has_the_shape_of_parse_config():
     assert list(cfg) == CFG_KEYS == list(cfgparse.parse_config(""))
     assert {k: cfg[k] for k in CFG_KEYS if k not in ("trunks", "vlans", "ports")} == {
         "hostname": "", "primary_vlan": "1", "mgmt_vlan": None, "auth_active": False, "eap_radius": False, "login_radius": False,
-        "addr_format": None, "voice_vlans": [], "radius": {},
+        "addr_format": None, "voice_vlans": [], "radius": {}, "snmpv3": None,
     }
     for name, st in cfg["ports"].items():
         assert set(st) == PORT_KEYS == set(cfgparse._empty_port()) | {"poe"}, name

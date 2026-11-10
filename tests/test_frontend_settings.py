@@ -1,7 +1,8 @@
 """The settings page (app/static/sv-settings.js) against the recording DOM stub of tests/test_frontend_dom.py: the bar of its sections
 (in the order of the cards; a click marks its section and focuses the card), the three cards of GET /api/settings that share one
-PUT (each sends its own fields and the stored values of the others, and only it is drawn anew, so another card's input stays), and
-the mark of a card with changes not saved (an input sets it, its save clears it, a failed save keeps it; below Admin nothing is
+PUT (each sends its own fields and the stored values of the others, and only it is drawn anew, so another card's input stays), the
+card "SNMP für PacketFence" with its own PUT (a passphrase left empty stays as stored; what the switch CLI cannot take is named and
+not sent), and the mark of a card with changes not saved (an input sets it, its save clears it, a failed save keeps it; below Admin nothing is
 marked and no card has "Speichern"). Skipped without node."""
 import json
 import re
@@ -14,8 +15,9 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 
 STORED = {"poll_minutes": 15, "opnsense_url": "https://fw.example", "opnsense_key_set": True, "opnsense_secret_set": True, "opnsense_verify_tls": True,
           "radius_server": "192.0.2.1", "radius_key_set": True, "pf_url": "https://pf.example:9999", "pf_user": "webapi", "pf_pass_set": True,
-          "pf_verify_tls": True, "unreadable": [], "four_eyes": False, "approval_hours": 24}
-SECTIONS = ["set-general", "set-names", "set-pf", "alert-card", "set-zones", "set-4e", "rules-card", "set-sessions", "tok-card"]
+          "pf_verify_tls": True, "unreadable": [], "four_eyes": False, "approval_hours": 24, "pf_snmp_user": "packetfence",
+          "pf_snmp_auth_set": True, "pf_snmp_priv_set": False}
+SECTIONS = ["set-general", "set-names", "set-pf", "set-snmp", "alert-card", "set-zones", "set-4e", "rules-card", "set-sessions", "tok-card"]
 # renderSettings as role with the stored settings above (every other GET an empty answer, a PUT ok or, failing, refused); calls as
 # [method, url, body]; then: the statements after the render, their value the test's
 PAGE = ('(async () => { %s const calls = []; const failing = %s; api = async (m, u, b) => { calls.push([m, u, b === undefined ? null : b]); '
@@ -68,12 +70,45 @@ def test_a_card_of_the_settings_sends_its_fields_and_the_stored_rest_and_draws_o
 
 @pytest.mark.parametrize("card, save, prep", [("set-zones", "s-zones-save", '$("#s-scopes").value = "Z.EK = EK"; '),
                                               ("set-4e", "s-4save", '$("#s-4h").value = "24"; '),
-                                              ("set-general", "s-save", '$("#s-poll").value = "15"; ')])
+                                              ("set-general", "s-save", '$("#s-poll").value = "15"; '),
+                                              ("set-snmp", "s-snmp-save", '$("#s-snu").value = "packetfence"; ')])
 @pytest.mark.parametrize("failing", [False, True], ids=["saved", "refused"])
 def test_an_input_marks_its_card_and_only_its_save_clears_the_mark(card, save, prep, failing):
     then = (f'$("#{card}").fire("change"); const marked = [$("#{card}").classList.contains("dirty"), $("#nav-{card}").classList.contains("dirty")]; '
             + prep + CLICK % (save, save) + f'return [marked, $("#{card}").classList.contains("dirty"), $("#nav-{card}").classList.contains("dirty")]; ')
     assert page(then, failing=failing) == [[True, True], failing, failing]
+
+
+SNMP_SAVE = CLICK % ("s-snmp-save", "s-snmp-save")
+SNMP_SENT = ('return [calls.filter(c => c[0] === "PUT"), $("#set-snmp").innerHTML.includes("<h2>SNMP für PacketFence</h2>"), '
+             '$("#set-snmp").classList.contains("dirty"), $("#toasts").children.map(t => t.textContent)]; ')
+
+
+def test_the_snmp_card_shows_what_is_stored():
+    html = page('return $("#view").innerHTML; ')
+    card = html[html.index('<section class="card" id="set-snmp">'):html.index('<section class="card" id="alert-card">')]
+    assert '<input id="s-snu" value="packetfence" maxlength="32"' in card and "Port umschalten ohne Kabelziehen" in card
+    kept = 'placeholder="gesetzt – leer lassen = unverändert" maxlength="32">'    # only the auth passphrase is stored
+    assert f'<input id="s-sna" type="password" autocomplete="new-password" {kept}' in card
+    assert '<input id="s-snp" type="password" autocomplete="new-password" placeholder="" maxlength="32">' in card
+
+
+def test_the_snmp_card_sends_its_user_and_only_the_passphrases_typed():
+    then = ('$("#set-snmp").fire("input"); $("#s-snu").value = " pf-user "; $("#s-sna").value = "auth-pass-1"; ' + SNMP_SAVE + SNMP_SENT)
+    assert page(then) == [[["PUT", "/api/settings/pf-snmp", {"user": "pf-user", "auth_pass": "auth-pass-1", "priv_pass": None}]], True, False,
+                          ["Gespeichert"]]
+
+
+SNMP_USER_TOAST = "SNMP-Benutzer: 1–32 Zeichen aus Buchstaben, Ziffern, Punkt, Bindestrich und Unterstrich"
+SNMP_PASS_TOAST = "SNMP-Passwort: 8–32 Zeichen, ohne Leerzeichen, Anführungszeichen, Backslash, ? und ~ (die versteht die Switch-CLI nicht)"
+
+
+@pytest.mark.parametrize("field, value, toast", [
+    ("s-snu", "pf user", SNMP_USER_TOAST), ("s-sna", "short", SNMP_PASS_TOAST), ("s-snp", "back\\slash-pass", SNMP_PASS_TOAST),
+    ("s-snp", "question?mark", SNMP_PASS_TOAST), ("s-sna", "with space 12", SNMP_PASS_TOAST), ("s-snp", "x" * 33, SNMP_PASS_TOAST)])
+def test_the_snmp_card_names_what_the_switch_cli_cannot_take_and_sends_nothing(field, value, toast):
+    then = f'$("#set-snmp").fire("input"); $("#{field}").value = {json.dumps(value)}; ' + SNMP_SAVE + SNMP_SENT
+    assert page(then) == [[], False, True, [toast]]
 
 
 def test_adding_or_removing_a_custom_rule_marks_the_rules_card():
@@ -92,7 +127,8 @@ def test_below_admin_no_card_saves_and_nothing_is_marked(role):
 def test_every_save_button_of_the_page_is_named_for_its_card():
     html = page('return $("#view").innerHTML; ')
     names = re.findall(r'aria-label="([^"]+)">Speichern</button>', html)
-    assert names == ["Allgemein speichern", "Gerätenamen speichern", "RADIUS und PacketFence speichern", "Zonen speichern", "Vier-Augen-Prinzip speichern"]
+    assert names == ["Allgemein speichern", "Gerätenamen speichern", "RADIUS und PacketFence speichern", "SNMP für PacketFence speichern",
+                     "Zonen speichern", "Vier-Augen-Prinzip speichern"]
 
 
 def test_each_id_of_the_settings_page_is_there_once():

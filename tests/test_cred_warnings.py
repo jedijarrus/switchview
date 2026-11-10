@@ -188,9 +188,10 @@ def test_prepare_needs_no_key_where_the_host_line_stands():
 async def test_radius_settings_say_the_key_is_unreadable(api):
     await db.set_setting("radius_server", "10.0.0.1")
     await db.set_setting("radius_key", foreign("s3cret-key"))
-    assert await changes.radius_settings() == {"server": "10.0.0.1", "key": "", "key_unreadable": True}
+    none = {"user": "", "auth": "", "priv": "", "unreadable": False}
+    assert await changes.radius_settings() == {"server": "10.0.0.1", "key": "", "key_unreadable": True, "snmp": none}
     await db.set_setting("radius_key", enc("s3cret-key"))
-    assert await changes.radius_settings() == {"server": "10.0.0.1", "key": "s3cret-key", "key_unreadable": False}
+    assert await changes.radius_settings() == {"server": "10.0.0.1", "key": "s3cret-key", "key_unreadable": False, "snmp": none}
 
 
 async def test_packetfence_and_opnsense_say_their_secret_is_unreadable(api):
@@ -236,7 +237,7 @@ async def test_destination_and_secret_come_from_one_read(api, monkeypatch):
     assert await names.opnsense_arp() == []    # without a stored OPNsense address: no HTTP
     await changes.radius_settings()
     assert reads == [["pf_url", "pf_user", "pf_pass", "pf_verify_tls"], ["opnsense_url", "opnsense_key", "opnsense_secret", "opnsense_verify_tls"],
-                     ["radius_server", "radius_key"]]
+                     ["radius_server", "radius_key", "pf_snmp_user", "pf_snmp_auth", "pf_snmp_priv"]]
 
 
 async def test_the_tls_check_stays_on_without_a_stored_value(api):

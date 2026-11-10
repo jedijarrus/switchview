@@ -191,6 +191,8 @@ def parse_config(text: str) -> dict:
     vlans: dict[str, dict] = {}
     ports: dict[str, dict] = defaultdict(_empty_port)
     radius: dict[str, dict] = {}
+    # SNMPv3 as the running-config names it: on or off, the users (never their passphrases) and the ver3 groups of each user
+    snmpv3: dict = {"enabled": False, "users": [], "groups": {}}
     res = {"hostname": "", "primary_vlan": "1", "mgmt_vlan": None, "auth_active": False, "eap_radius": False,
            "login_radius": False, "addr_format": None, "trunks": {}}
     refs = 0
@@ -298,6 +300,15 @@ def parse_config(text: str) -> dict:
             tw = re.search(r"time-window (\d+)", rest)
             if tw and _num(tw.group(1)) is not None:
                 h["time_window"] = _num(tw.group(1))
+        elif line == "snmpv3 enable":
+            snmpv3["enabled"] = True
+        elif m := re.fullmatch(r'snmpv3 user "?([^"\s]+)"?', line):
+            if m.group(1) not in snmpv3["users"]:
+                snmpv3["users"].append(m.group(1))
+        elif m := re.fullmatch(r'snmpv3 group (\S+) user "?([^"\s]+)"? sec-model ver3', line):
+            groups = snmpv3["groups"].setdefault(m.group(2), [])
+            if m.group(1).lower() not in groups:
+                groups.append(m.group(1).lower())
 
     # Every VLAN key is a VLAN ID (_is_vid), so int() below cannot fail. The tagged VLANs of a port are collected in a set (a list
     # with "vid not in" made this quadratic: 9 s of CPU for 100 ports x 4000 VLANs), then sorted by number.
@@ -315,6 +326,7 @@ def parse_config(text: str) -> dict:
     res["vlans"] = {vid: v["name"] for vid, v in sorted(vlans.items(), key=lambda kv: int(kv[0]))}
     res["voice_vlans"] = [vid for vid, v in vlans.items() if v["voice"]]
     res["radius"] = radius
+    res["snmpv3"] = snmpv3
     res["ports"] = dict(ports)
     return res
 

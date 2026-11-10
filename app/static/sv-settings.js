@@ -6,13 +6,14 @@
      the bar (trackDirty marks it at every input, its save clears it: setDirty). The settings of GET /api/settings sit on three
      cards ("Allgemein", "Gerätenamen", "RADIUS und PacketFence") that share one PUT, which sets every field (one left out would be
      reset): each card sends its own fields and the stored values of the others, a secret of another card as null (= unchanged).
+     "SNMP für PacketFence" and "Vier-Augen-Prinzip" read from it too, each with a PUT of its own.
      Changing them is Admin: below it every field is locked and the save buttons are gone, one sentence on top says why; what only
      reads (names, PacketFence test) and ending the own sessions stay. The cards of sv-alerts.js and sv-tokens.js ask
      beside them, each on its own (a failure is its card's text): "Sicherheitsregeln" for everyone, "Benachrichtigungen" only for
      an Admin; "API-Tokens" for everyone, "Alle API-Tokens" only for an Admin, which no one waits for. ── */
   // The sections of the bar in the order of the cards: [the card's id, its label]
   const SETTINGS_SECTIONS = [["set-general", "Allgemein"], ["set-names", "Gerätenamen"], ["set-pf", "RADIUS und PacketFence"],
-    ["alert-card", "Benachrichtigungen"], ["set-zones", "Zonen"], ["set-4e", "Vier-Augen-Prinzip"], ["rules-card", "Sicherheitsregeln"],
+    ["set-snmp", "SNMP für PacketFence"], ["alert-card", "Benachrichtigungen"], ["set-zones", "Zonen"], ["set-4e", "Vier-Augen-Prinzip"], ["rules-card", "Sicherheitsregeln"],
     ["set-sessions", "Sitzungen"], ["tok-card", "API-Tokens"]];
   // A card whose top is above this line (px from the top of the window, below the header) is the one the bar marks
   const SETTINGS_SPY_LINE = 140;
@@ -54,6 +55,16 @@
       <label class="check"><input id="s-pftls" type="checkbox" ${s.pf_verify_tls ? "checked" : ""}${dis}> TLS-Zertifikat prüfen</label>
       ${setTlsNote("s-pftls")}</div>`
       + cardFoot(admin ? "s-pf-save" : "", "RADIUS und PacketFence", `<button class="btn" type="button" id="s-pftest">PacketFence testen</button>`, "Testen nutzt den gespeicherten Stand.");
+  }
+  // The card "SNMP für PacketFence" (pf_snmp_* of GET /api/settings): the SNMPv3 user „Vorbereiten“ sets up on a switch, with which
+  // PacketFence switches a port after a release. An empty passphrase field keeps what is stored
+  function snmpCard(s, admin) {
+    return setHead("SNMP für PacketFence", "Port umschalten ohne Kabelziehen") + `<div class="card-b set-b">
+      <p class="note" style="margin:0">Nach einer Freigabe schaltet PacketFence den Port per SNMPv3 um. „Vorbereiten“ legt dafür diesen Benutzer auf dem Switch an (SHA und AES, Gruppe „managerpriv“). Ohne Benutzer lässt „Vorbereiten“ SNMPv3 unberührt.</p>
+      <label class="field" style="max-width:320px"><span>SNMPv3-Benutzer</span><input id="s-snu" value="${esc(s.pf_snmp_user || "")}" maxlength="32" autocomplete="off" placeholder="packetfence"${admin ? "" : " disabled"}><span class="hint">wie in PacketFence beim Switch hinterlegt</span></label>
+      <div class="grid2">${secretInput(s, "s-sna", "Auth-Passwort (SHA)", "pf_snmp_auth", s.pf_snmp_auth_set, { max: 32, disabled: !admin })}
+      ${secretInput(s, "s-snp", "Priv-Passwort (AES)", "pf_snmp_priv", s.pf_snmp_priv_set, { max: 32, disabled: !admin })}</div></div>`
+      + (admin ? cardFoot("s-snmp-save", "SNMP für PacketFence") : "");
   }
   // The card "Zonen" (the list of GET /api/zone-scopes is put into the textarea after the render: SVLogic.formatScopes). Stored
   // entries the field cannot hold as they are (SVLogic.lossyScopes) are named above it, so a save does not change them unseen; that
@@ -127,7 +138,7 @@
     const section = (id, html) => `<section class="card" id="${id}">${html}</section>`;
     v.innerHTML = `<div class="set-layout"><nav class="set-nav" id="set-nav" aria-label="Abschnitte der Einstellungen">${SETTINGS_SECTIONS.map(([id, label]) => `<button type="button" id="nav-${id}" data-sec="${id}">${label}<span class="dot" aria-hidden="true"></span></button>`).join("")}</nav>
       <div class="set-main">${admin ? "" : `<p class="note gate">Einstellungen ändern braucht die Rolle „Admin“.</p>`}
-      ${section("set-general", generalCard(s, admin))}${section("set-names", namesCard(s, admin))}${section("set-pf", pfCard(s, admin))}
+      ${section("set-general", generalCard(s, admin))}${section("set-names", namesCard(s, admin))}${section("set-pf", pfCard(s, admin))}${section("set-snmp", snmpCard(s, admin))}
       ${section("alert-card", alertCardHtml(alertSet, admin))}
       ${section("set-zones", zonesCard(lossy, admin))}${section("set-4e", fourEyesCard(s, admin))}${section("rules-card", rulesCardHtml(rules, admin))}
       ${section("set-sessions", setHead("Sitzungen") + `<div class="card-b set-b"><p class="note" style="margin:0">Beendet jede Anmeldung von <b>${esc(ME.name)}</b> auf allen Geräten, auch diese.</p></div>`
@@ -168,6 +179,24 @@
       });
     };
     Object.keys(SCARDS).forEach(bindCard);
+    // The SNMPv3 user of PacketFence (PUT /api/settings/pf-snmp): a name or passphrase the switch CLI cannot take is named here, as
+    // the server would; saved, s is read again and the card drawn anew, so its fields say what is stored
+    const bindSnmp = () => {
+      const save = admin && document.getElementById("s-snmp-save");
+      if (save) save.addEventListener("click", async e => {
+        const name = $("#s-snu").value.trim(), bad = id => { const x = $("#" + id).value; return x !== "" && !/^(?!.*[?~"'\\])[!-~]{8,32}$/.test(x); };
+        if (name && !/^[A-Za-z0-9_.-]{1,32}$/.test(name)) { toast("SNMP-Benutzer: 1–32 Zeichen aus Buchstaben, Ziffern, Punkt, Bindestrich und Unterstrich"); return; }
+        if (bad("s-sna") || bad("s-snp")) { toast("SNMP-Passwort: 8–32 Zeichen, ohne Leerzeichen, Anführungszeichen, Backslash, ? und ~ (die versteht die Switch-CLI nicht)"); return; }
+        e.target.disabled = true;
+        try {
+          await api("PUT", "/api/settings/pf-snmp", { user: name, auth_pass: pw("s-sna"), priv_pass: pw("s-snp") }); toast("Gespeichert");
+          s = await api("GET", "/api/settings"); MAP = null;
+          $("#set-snmp").innerHTML = snmpCard(s, admin); bindSnmp(); setDirty("set-snmp", false);
+          const again = document.getElementById("s-snmp-save"); if (again) again.focus();
+        } catch (err) { toast(err.message); e.target.disabled = false; }
+      });
+    };
+    bindSnmp();
     $("#s-scopes").value = SVLogic.formatScopes(scopes.entries);
     // The zone list as typed: a line it cannot read is named and nothing is sent; saved, the field shows what the server stored
     // (merged, zones sorted)
@@ -203,7 +232,7 @@
       try { const r = await api("POST", "/api/auth/logout-all"); toast(r.ended === 1 ? "1 Sitzung beendet" : `${r.ended} Sitzungen beendet`); showLogin(); }
       catch (err) { toast(err.message); e.target.disabled = false; }
     });
-    if (admin) ["set-general", "set-names", "set-pf", "alert-card", "set-zones", "set-4e", "rules-card"].forEach(trackDirty);
+    if (admin) ["set-general", "set-names", "set-pf", "set-snmp", "alert-card", "set-zones", "set-4e", "rules-card"].forEach(trackDirty);
     bindSettingsNav();
     bindTokenCards(admin); bindRulesCard(rules); await bindAlertCard(alertSet);
   }

@@ -330,6 +330,12 @@
 ]
 ],
 [
+"/api/settings/pf-snmp",
+[
+"PUT"
+]
+],
+[
 "/api/settings/tokens",
 [
 "GET"

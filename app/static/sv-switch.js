@@ -107,13 +107,18 @@
     if (!s.ssh || !has(s, "nac")) return "";
     const r = s.ready, rs = !!(MAP && s.cfgAt);
     const li = (ok, t) => `<li class="${ok ? "ok" : "miss"}"><span class="st-dot ${ok ? "" : "down"}"></span>${t}</li>`;
-    const miss = r && !(r.host && r.coa && r.tw && r.eap && r.active && r.park);
+    // r.snmp: the SNMPv3 user of PacketFence (null: none set in the settings, or the configuration does not tell). It is set up by
+    // „Vorbereiten“ unless SNMPv3 is off on the switch (r.snmp_off: „snmpv3 enable“ asks back at the CLI, so it stays manual)
+    const base = r && !(r.host && r.coa && r.tw && r.eap && r.active && r.park), snmpMiss = r && r.snmp === false && !r.snmp_off;
+    const miss = base || snmpMiss;
     return `<section class="card"><div class="card-h"><h2>RADIUS am Switch</h2><span class="sub">${rs ? "Stand " + esc(fmtTime(s.cfgAt)) + (s.cfgStale ? " · veraltet (Switch seither geändert)" : "") : "noch nicht gelesen"}</span>
       <div class="right"><button class="btn small" type="button" data-a="readcfg">Neu lesen</button><button class="btn small" type="button" data-a="pa">Anmeldungen anzeigen</button>${miss && roleOk("admin") ? `<button class="btn small primary" type="button" data-a="prepare">Vorbereiten</button>` : ""}</div></div>
-      <div class="card-b">${r ? `<ul class="checks">${li(r.host, "RADIUS-Server (PacketFence) eingetragen")}${li(r.coa, "CoA erlaubt (dyn-authorization), damit PacketFence umschalten kann")}${li(r.tw, "CoA ohne Zeitstempel erlaubt (time-window 0), PacketFence schickt keinen")}${li(r.eap, "802.1X-Methode eap-radius")}${li(r.active, "802.1X am Switch aktiv")}${li(r.park, "Park-VLAN 3999 angelegt (für Unbekannte)")}</ul>
+      <div class="card-b">${r ? `<ul class="checks">${li(r.host, "RADIUS-Server (PacketFence) eingetragen")}${li(r.coa, "CoA erlaubt (dyn-authorization), damit PacketFence umschalten kann")}${li(r.tw, "CoA ohne Zeitstempel erlaubt (time-window 0), PacketFence schickt keinen")}${li(r.eap, "802.1X-Methode eap-radius")}${li(r.active, "802.1X am Switch aktiv")}${li(r.park, "Park-VLAN 3999 angelegt (für Unbekannte)")}${r.snmp == null ? "" : li(r.snmp, "SNMPv3-Benutzer für PacketFence angelegt (schaltet Ports ohne Kabelziehen um)")}</ul>
         ${r.login_radius ? `<p class="note">Die Anmeldung am Switch selbst nutzt RADIUS.</p>` : ""}${r.others && r.others.length ? `<p class="note">Weitere RADIUS-Server: ${esc(r.others.join(", "))}</p>` : ""}
-        ${miss ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}
-        ${miss && !roleOk("admin") ? `<p class="note">„Vorbereiten“ braucht die Rolle „Admin“ (es sendet das RADIUS-Secret an den Switch).</p>` : ""}`
+        ${r.snmp === false && r.snmp_off ? `<p class="note">SNMPv3 ist am Switch ausgeschaltet. „snmpv3 enable“ muss einmal von Hand an der CLI laufen, danach legt „Vorbereiten“ den Benutzer an.</p>` : ""}
+        ${base ? `<p class="note">Für die Zustände RADIUS und Bekannte Geräte muss der Switch vorbereitet sein. „Vorbereiten“ fügt nur fehlende Zeilen hinzu und ändert keinen Port.</p>` : ""}
+        ${snmpMiss && !base ? `<p class="note">„Vorbereiten“ legt den SNMPv3-Benutzer an und ändert keinen Port.</p>` : ""}
+        ${miss && !roleOk("admin") ? `<p class="note">„Vorbereiten“ braucht die Rolle „Admin“ (es sendet ${base ? "das RADIUS-Secret" : "die SNMP-Passwörter"} an den Switch).</p>` : ""}`
         : `<p class="note" style="margin:0">Konfiguration noch nicht gelesen.</p>`}</div></section>`;
   }
   function bindSide() {
