@@ -18,15 +18,19 @@ import asyncio
 import httpx
 import pytest
 from bulkfix import fake_plan, items_of, make_world
+from fastapi import HTTPException
 from loginfix import CSRF
+from test_alerts import configure
 from test_approvals import PLAN, H, approve, four_eyes
 
+import alerts
 import api_approvals
 import api_bulk
 import api_changes
 import apifix
 import approvals
 import bulk
+import crypto
 import db
 import dbfix
 import main
@@ -264,6 +268,91 @@ def test_a_changed_switch_makes_a_bulk_request_stale_and_starts_nothing(world, c
     assert dbfix.query("SELECT status, reason FROM approvals") == [("stale", reason)] and dbfix.query("SELECT count(*) FROM bulks") == [(0,)]
     assert world.scheduled == [] and dbfix.query("SELECT username, target, detail FROM audit WHERE action = 'approval_stale'") == [
         ("ben", "", f"#{aid} VLAN 30 · 3 Ports an 3 Switches: {reason}")]
+
+
+SECRET = "geheim-4711"
+UNREADABLE = HTTPException(502, f"Konfiguration des Switches per SNMP nicht lesbar: {SECRET} abgelehnt")
+
+
+def test_a_stale_bulk_request_keeps_no_secret_of_a_switch(world, client):
+    """A switch that cannot be read at the approval refuses with an SSH or SNMP error text (502), which may name a secret of the
+    switch: the reason is masked with them (confirm._mask_of) where it is stored (approvals.reason, read by every role), audited,
+    answered and announced (the alert's text)."""
+    four_eyes()
+    db.execute_sync("UPDATE switches SET snmp_community = ? WHERE id = ?", (crypto.encrypt(SECRET), world.a))
+    aid = request(client, world).json()["id"]
+    heard = []
+
+    async def ear(event, a):
+        heard.append((event, a["reason"]))
+
+    approvals.subscribe(ear)
+    world.plans["A"] = UNREADABLE
+    r = approve(client, aid, "ben")
+    reason = bulk.OUTDATED.format(list="A: Konfiguration des Switches per SNMP nicht lesbar: *** abgelehnt")
+    assert (r.status_code, r.json()["detail"]) == (409, f"{api_approvals.STALE_REQUEST} ({reason})")
+    assert dbfix.query("SELECT status, reason FROM approvals") == [("stale", reason)] and heard == [("stale", reason)]
+    assert dbfix.query("SELECT detail FROM audit WHERE action = 'approval_stale'") == [(f"#{aid} VLAN 30 · 3 Ports an 3 Switches: {reason}",)]
+    assert SECRET not in client.get("/api/approvals", headers=H("eva")).text
+
+
+def test_a_refused_bulk_names_no_secret_of_a_switch(world, client):
+    """The same mask in the 409 of a request and of a start (bulk.precheck is the check of both), each switch with its own secrets."""
+    preview = client.post("/api/bulk/plan", json=plan_body(world), headers=H("anna")).json()
+    db.execute_sync("UPDATE switches SET snmp_community = ? WHERE id = ?", (crypto.encrypt(SECRET), world.b))
+    world.plans["A"] = world.plans["B"] = UNREADABLE
+    masked = "Konfiguration des Switches per SNMP nicht lesbar: *** abgelehnt"
+    detail = bulk.OUTDATED.format(list=f"A: {UNREADABLE.detail}; B: {masked}")              # the secret is B's, not A's
+    r = client.post("/api/bulk", json=items_of(preview), headers=H("anna"))
+    assert (r.status_code, r.json()["detail"]) == (409, detail)
+    four_eyes()
+    r = client.post("/api/approvals", json={"kind": "bulk_change", "bulk": items_of(preview)}, headers=H("anna"))
+    assert (r.status_code, r.json()["detail"]) == (409, detail)
+
+
+def test_the_reviewers_preview_names_no_secret_of_a_switch(world, client):
+    four_eyes()
+    db.execute_sync("UPDATE switches SET snmp_community = ? WHERE id = ?", (crypto.encrypt(SECRET), world.a))
+    aid = request(client, world).json()["id"]
+    world.plans["A"] = UNREADABLE
+    p = client.post(f"/api/approvals/{aid}/preview", headers=H("ben")).json()
+    assert (p["sections"][0]["status"], p["sections"][0]["reason"], p["matches"]) == (
+        "error", "Konfiguration des Switches per SNMP nicht lesbar: *** abgelehnt", False)
+
+
+def test_the_reviewers_preview_plans_at_most_five_switches_at_once(world, client, monkeypatch):
+    four_eyes()
+    for i in range(12):
+        world.extra(f"S{i}")
+    preview = client.post("/api/bulk/plan", json={"targets": [{"switch_id": s, "ports": ["1"]} for s in world.extra_ids],
+                                                  "change": {"untagged": "30"}}, headers=H("anna")).json()
+    aid = client.post("/api/approvals", json={"kind": "bulk_change", "bulk": items_of(preview)}, headers=H("anna")).json()["id"]
+    busy, peak = [0], [0]
+
+    async def slow(row, body):
+        busy[0] += 1
+        peak[0] = max(peak[0], busy[0])
+        await asyncio.sleep(0.05)
+        busy[0] -= 1
+        return await fake_plan(row, body)
+
+    monkeypatch.setattr(api_changes, "_make_plan", slow)
+    p = client.post(f"/api/approvals/{aid}/preview", headers=H("ben")).json()
+    assert p["matches"] is True and len(p["sections"]) == 12 and peak[0] == bulk.PARALLEL
+
+
+def test_the_alerts_tell_a_bulk_request_without_a_switch(world, client):
+    """The real listener (alerts.on_approval; the world has none) with a request that has no switch of its own: no " an <switch>" in
+    the text, no fact "Switch", no switch in the row."""
+    four_eyes()
+    asyncio.run(configure(mail=True, events=["approval"]))
+    approvals.subscribe(alerts.on_approval)
+    aid = request(client, world).json()["id"]
+    assert approve(client, aid, "ben").status_code == 200
+    assert dbfix.query("SELECT event, title, text, switch_id, switch_name, facts FROM alert_outbox ORDER BY id") == [
+        ("approval", f"Freigabe #{aid} angefordert", "VLAN 30 · 3 Ports an 3 Switches, angefordert von Anna", None, "", '{"_view": "approvals"}'),
+        ("approval", f"Freigabe #{aid} freigegeben", "VLAN 30 · 3 Ports an 3 Switches, angefordert von Anna, entschieden von ben", None, "",
+         '{"_view": "approvals"}')]
 
 
 @pytest.mark.parametrize("asker, who, detail", [("ben", "ben", api_approvals.SELF), ("cleo", "cleo", api_approvals.SELF),

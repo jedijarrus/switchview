@@ -126,7 +126,7 @@ async def section(user: dict, target, change, expert: bool, four_eyes: bool) -> 
     reason, preview (the /plan answer: api_changes.preview_answer plus confirm, None without a plan). In the order of /plan: the
     switch (api_changes._enabled_row: gone or disabled is "error"), the rights (api_changes._mode_rights: a 403, another zone or the
     expert mode, is "denied"), the ports (resolve: none in the VLAN is "nothing", more than MAX_PORTS_PER_SWITCH "error"), the plan
-    (api_changes._make_plan: any HTTPException is "error" with its text), then _verdict: "blocked", "nothing" or "ready"."""
+    (api_changes._make_plan: any HTTPException is "error" with its text, _masked), then _verdict: "blocked", "nothing" or "ready"."""
     out = {"switch_id": target.switch_id, "switch": f"#{target.switch_id}", "zone": "", "ports": list(target.ports), "selection": "",
            "status": "", "reason": "", "preview": None}
     try:
@@ -147,10 +147,17 @@ async def section(user: dict, target, change, expert: bool, four_eyes: bool) -> 
         body = api_changes.PlanIn(mode="ports", ports=ports, change=change, expert=expert)
         plan, _, kind, text = await api_changes._make_plan(row, body)
     except HTTPException as e:
-        return out | {"status": "error", "reason": e.detail}
+        return out | {"status": "error", "reason": await _masked(target.switch_id, e.detail)}
     status, reason = _verdict(target, change, plan)
     answer = api_changes.preview_answer(row, plan, kind, text) | {"confirm": api_changes.confirm_info(row, plan, body)}
     return out | {"status": status, "reason": reason, "preview": answer}
+
+
+async def _masked(sid: int, detail):
+    """detail, the text of a refusal at switch sid, without the switch's secrets and the RADIUS key (confirm._mask_of; a switch that
+    is gone has only the key): a 502's reason is an SSH or SNMP error text, and the text goes into a preview, a 409, the reason of a
+    stale request, its audit and its alert. Anything but a text as it is."""
+    return (await confirm._mask_of(sid))(detail) if isinstance(detail, str) else detail
 
 
 def token_of(pairs: list[tuple[int, str]]) -> str:
@@ -261,8 +268,9 @@ async def precheck(body) -> list[dict]:
     """Every switch of body's items planned against its preview token as /apply plans it (api_changes.checked_plan, on the write way of
     its preview) and, with confirm_minutes, asked whether it can run with confirmation (api_changes.confirm_refusal), at most
     PARALLEL at once. Every HTTPException of a switch - outdated, blocked, unreadable, disabled, gone, nothing to change, no
-    confirmation possible, busy - means it does not match, with its text; if one does not match, api_changes.PreviewOutdated (409) with
-    OUTDATED naming each that does not ("<name>: <reason>", "; " between, "#<id>" for a switch that is gone), and nothing starts.
+    confirmation possible, busy - means it does not match, with its text (_masked: without the switch's secrets); if one does not match,
+    api_changes.PreviewOutdated (409) with OUTDATED naming each that does not ("<name>: <reason>", "; " between, "#<id>" for a switch
+    that is gone), and nothing starts.
     Else per switch {"switch_id", "switch", "ports", "preview"} in the order of the items, preview as api_changes.preview_answer.
     Before the plan, as start_change's early check, a switch that takes no change now (changes.busy_reason: one runs, or waits for its
     confirmation - a second bulk over the switches of a first that still waits) does not match either: else the run would change the
@@ -286,7 +294,7 @@ async def precheck(body) -> list[dict]:
                     if refusal:
                         raise HTTPException(409, refusal)
             except HTTPException as e:
-                return name, str(e.detail)
+                return name, str(await _masked(item.switch_id, e.detail))
         return {"switch_id": item.switch_id, "switch": name, "ports": list(item.ports),
                 "preview": api_changes.preview_answer(row, plan, kind, summary_)}
 
