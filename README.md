@@ -534,7 +534,7 @@ before you enable `snmp_write` on a production switch.
 
 Every rolled-out state has a number (`app/version.py`). The page shows it next to the name in the header once you are signed in,
 `GET /api/auth/me` names it as `version`, and its commit carries the git tag `v<number>`. What changed with each version (German):
-[CHANGELOG.md](CHANGELOG.md). A new function raises the middle number, a fix the last one.
+[CHANGELOG.md](CHANGELOG.md). Every change raises the last number by one.
 
 ## Stack
 

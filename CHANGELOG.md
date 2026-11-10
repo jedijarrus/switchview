@@ -3,8 +3,12 @@
 Jeder ausgerollte Stand von SwitchView hat eine Nummer und steht hier mit Datum, der neueste oben. Die Nummer steht in
 `app/version.py` und nach der Anmeldung oben neben „SwitchView“. Der Commit einer Version trägt den Git-Tag `v<Nummer>`.
 
-- Neue Funktion: die mittlere Zahl steigt, die letzte geht auf 0.
-- Korrektur: die letzte Zahl steigt.
+Jede Änderung erhöht die letzte Zahl um eins. Die beiden vorderen Zahlen bleiben, bis ein größerer Schritt eigens so benannt wird;
+die letzte beginnt dann wieder bei 0.
+
+## 0.5.1 – 2026-11-10
+
+- Regel der Nummern: jede Änderung erhöht die letzte Zahl um eins (vorher: neue Funktion die mittlere, Korrektur die letzte)
 
 ## 0.5.0 – 2026-11-10
 

@@ -31,3 +31,10 @@ def test_the_changelog_names_every_version_once_with_its_date_the_newest_first()
     days = [date.fromisoformat(day) for _, day in ENTRIES]
     assert numbers == sorted(set(numbers), reverse=True) and days == sorted(days, reverse=True)
     assert len(ENTRIES) == len(re.findall(r"^## ", CHANGELOG, flags=re.M))    # every "## " heading is an entry of that form
+
+
+def test_every_version_is_one_step_after_the_one_before():
+    """Every change raises the last number by one; a larger step raises a number in front and starts the last at 0 again."""
+    numbers = [tuple(int(n) for n in version.split(".")) for version, _ in ENTRIES]
+    for new, old in zip(numbers, numbers[1:]):
+        assert new == (*old[:2], old[2] + 1) or (new[:2] > old[:2] and new[2] == 0), (new, old)
