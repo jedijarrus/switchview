@@ -39,6 +39,7 @@ from config import Settings, settings
 from db import audit, init_db
 from jobs import _schedule, scheduler
 from topology import _links, _port_num, _vid_num, build_map, confirmed_endpoints, netmap, switch_keys
+from version import VERSION
 
 # The names that moved out of main into the routers, the netmap and the scheduler module (Phase 3, Task 11) and that the tests reach
 # as main.X: main re-exports them (ruff takes a name listed here as used, F401)
@@ -293,12 +294,12 @@ async def login_azure(body: AzureLogin, request: Request, response: Response):
 
 @app.get("/api/auth/me")
 async def me(user=Depends(auth.require(roles.LESEN))):
-    """The signed-in user for the page: name, role, zones, the idle limit, whether the four-eyes principle is on (approvals.policy)
-    and the name of the API token a request was made with (Phase 4c; null for a session); not the subject (it is for the server's
-    comparisons)."""
+    """The signed-in user for the page: name, role, zones, the idle limit, whether the four-eyes principle is on (approvals.policy),
+    the name of the API token a request was made with (Phase 4c; null for a session) and the version of SwitchView (version.VERSION,
+    the header shows it; no answer before the login names it); not the subject (it is for the server's comparisons)."""
     return {"username": user["username"], "name": user["name"], "method": user["method"], "role": user["role"], "zones": user["zones"],
             "idle_minutes": settings.idle_minutes, "four_eyes": (await approvals.policy())["four_eyes"],
-            "api_token": user["api_token"]["name"] if user["api_token"] else None}
+            "api_token": user["api_token"]["name"] if user["api_token"] else None, "version": VERSION}
 
 
 @app.post("/api/auth/logout")

@@ -530,6 +530,12 @@ Tested with ProCurve / ArubaOS-Switch firmware 15.x and 16.x.
 SNMP writes are tested against a simulated agent only; check the device checks in [docs/snmp-multivendor.md](docs/snmp-multivendor.md)
 before you enable `snmp_write` on a production switch.
 
+## Versions
+
+Every rolled-out state has a number (`app/version.py`). The page shows it next to the name in the header once you are signed in,
+`GET /api/auth/me` names it as `version`, and its commit carries the git tag `v<number>`. What changed with each version (German):
+[CHANGELOG.md](CHANGELOG.md). A new function raises the middle number, a fix the last one.
+
 ## Stack
 
 FastAPI, aiosqlite, APScheduler, net-snmp CLI tools, netmiko, cryptography (Fernet), PyJWT, vanilla JS frontend.

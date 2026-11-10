@@ -55,6 +55,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .login-card { width: min(360px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px 24px; display: grid; gap: 14px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
 .brand.big { font-size: 20px; }
+.brand .ver { font: 400 11px var(--mono); color: var(--muted); letter-spacing: 0; }
 .stack { display: grid; gap: 10px; }
 .sep { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
 .sep::before, .sep::after { content: ""; flex: 1; border-top: 1px solid var(--border); }

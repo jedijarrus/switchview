@@ -1006,6 +1006,14 @@ def test_the_header_names_the_user_and_the_role():
     assert in_dom(js) == ["Anna", "Freigeben"]
 
 
+def test_the_header_names_the_version_next_to_the_name():
+    """The version /api/auth/me names, as "v0.5.0"; the place starts hidden and stays so for an answer without a version."""
+    js = (NO_VIEWS + '(async () => { const seen = [[$("#app-version").textContent, $("#app-version").hidden]]; for (const version of ["0.5.0", undefined]) { '
+          'api = async (m, u) => u === "/api/auth/me" ? {name: "Anna", role: "lesen", zones: null, four_eyes: false, version} : []; '
+          'await start(); seen.push([$("#app-version").textContent, $("#app-version").hidden]); } return seen; })()')
+    assert in_dom(js) == [["", True], ["v0.5.0", False], ["", True]]
+
+
 def test_a_401_shows_the_servers_reason_on_the_login_page():
     js = ('(async () => { fetch = async () => ({status: 401, ok: false, headers: {get: () => "application/json"}, '
           'json: async () => ({detail: "Abgemeldet nach 120 Minuten ohne Aktivität – bitte neu anmelden"})}); '
