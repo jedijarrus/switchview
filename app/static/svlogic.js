@@ -129,6 +129,23 @@ const SVLogic = {
     const t = Date.parse(String(until || "").replace(" ", "T") + "Z");
     return isNaN(t) ? 0 : Math.max(0, Math.ceil((t - now) / 60000));
   },
+  // The ports of one switch in the form of a bulk change, from its text ("1-4, 7, Gi1/0/2"): split at commas and white space; "a-b"
+  // of digits is every port from a to b (a range the wrong way round is an error), any other part a port name as
+  // api_changes.SNMP_PORT_RE allows it (so "ge-0/0/1" is a name); a port named twice counts once, at its first place. At most 200
+  // ports (the limit of a /plan). {ports, error}: with an error (the first) no ports
+  parsePorts(text) {
+    const ports = [], bad = error => ({ ports: [], error });
+    for (const part of String(text == null ? "" : text).split(/[\s,]+/).filter(Boolean)) {
+      const range = /^(\d+)-(\d+)$/.exec(part), from = range ? Number(range[1]) : 0, to = range ? Number(range[2]) : 0;
+      if (range && from > to) return bad(`Bereich „${part}“ ist rückwärts`);
+      if (!range && !/^[A-Za-z0-9][A-Za-z0-9/._:-]{0,63}$/.test(part)) return bad(`Port „${part}“ ist ungültig`);
+      // a range wider than the limit is over it whatever came before: refused without counting it out
+      if (to - from >= 200) return bad("Höchstens 200 Ports je Switch");
+      for (const n of range ? Array.from({ length: to - from + 1 }, (_, i) => String(from + i)) : [part]) if (!ports.includes(n)) ports.push(n);
+      if (ports.length > 200) return bad("Höchstens 200 Ports je Switch");
+    }
+    return { ports, error: null };
+  },
   // The query string of params for GET /api/history, /api/events and the audit: "?" and k=v (both encoded) for every value but "",
   // null and undefined (no filter), joined with "&" in the order of params; "" when none is left
   query(params) {
@@ -175,11 +192,13 @@ const SVLogic = {
   },
   // The number in the tab "Freigaben" of user me (/api/auth/me) over the requests list (GET /api/approvals, own: me asked for it):
   // with Freigeben or Admin the open requests of others it may review, at a switch of its zones (me.zones, null = every zone; a
-  // switch without a zone is ""), as inZone in the list; below that the open requests of its own
+  // switch without a zone is ""), as inZone in the list - a bulk request (kind bulk_change) has no switch of its own and counts for
+  // every reviewer, as the list offers "Prüfen" for it (the server checks the zone of each of its switches); below that the open
+  // requests of its own
   approvalCount(list, me) {
     const reviewer = SVLogic.atLeast(me && me.role, "freigeben"), zones = me && me.zones;
     return (list || []).filter(a => a.status === "open"
-      && (reviewer ? !a.own && (zones == null || zones.includes(a.switch_zone || "")) : !!a.own)).length;
+      && (reviewer ? !a.own && (zones == null || a.kind === "bulk_change" || zones.includes(a.switch_zone || "")) : !!a.own)).length;
   },
   // The name of a role as the UI shows it; an unknown one as it stands, none as "–" (an audit entry from before Phase 4a)
   roleLabel(role) {

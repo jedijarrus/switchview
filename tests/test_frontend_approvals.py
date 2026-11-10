@@ -422,3 +422,92 @@ def test_the_commands_of_a_request_come_from_one_helper():                      
     text = (STATIC / "sv-approvals.js").read_text(encoding="utf-8")
     assert text.count("(a.preview && a.preview.commands)") == 1
     assert "apprCmds(a)" in body_of("sv-approvals.js", "approvalDetails") and "apprCmds(a)" in body_of("sv-approvals.js", "reviewApproval")
+
+
+# Phase 4c Task 9: a bulk request (kind bulk_change) has no switch of its own - the list says "mehrere Switches" and offers "Prüfen"
+# without the zone check of the browser (the server checks the zone of every switch), the review shows the fresh sections
+# (bulkSectionsHtml of sv-bulk.js) instead of one preview, approving opens the run of the bulk change, the details show the
+# requester's sections, and "Neu anfordern" opens the bulk preview of the stored switches and ports
+BULK_SECS = [{"switch_id": 1, "switch": "SW-A", "ports": ["1", "2"], "mechanism": "ssh", "commands": ["vlan 30 untagged 1,2"], "warnings": [], "token": "t-a"},
+             {"switch_id": 3, "switch": "SW-C", "ports": ["5"], "mechanism": "ssh", "commands": ["vlan 30 untagged 5"], "warnings": [], "token": "t-c"}]
+BULK_PAYLOAD = {"items": [{"switch_id": 1, "ports": ["1", "2"], "token": "t-a", "mechanism": "ssh"},
+                          {"switch_id": 3, "ports": ["5"], "token": "t-c", "mechanism": "ssh"}],
+                "skipped": [{"switch_id": 2, "reason": "Es gibt nichts zu ändern"}], "change": {"untagged": "30"}, "expert": False, "on_error": "continue",
+                "confirm_minutes": None}
+BULK_A = {**A, "kind": "bulk_change", "kind_label": "Sammeländerung", "switch_id": None, "switch_name": None, "switch_zone": None,
+          "summary": "VLAN 30 · 3 Ports an 2 Switches", "bulk_id": None, "own": False, "payload": BULK_PAYLOAD,
+          "preview": {"summary": "VLAN 30 · 3 Ports an 2 Switches", "token": "T", "sections": BULK_SECS,
+                      "skipped": [{"switch_id": 2, "switch": "SW-<B>", "reason": "Es gibt <nichts> zu ändern"}]}}
+FRESH = [{**s, "status": "ready", "reason": "", "matches": True} for s in BULK_SECS]
+BULK_FRESH = {"kind": "bulk_change", "summary": BULK_A["summary"], "sections": FRESH, "token": "T", "matches": True}
+MOVED = {**BULK_FRESH, "matches": False, "token": "X", "sections": [FRESH[0], {**FRESH[1], "commands": ["vlan 30 untagged 5", "no vlan 40 tagged 5"],
+                                                                              "token": "t-x", "matches": False}]}
+
+
+def bulk_answers(preview=BULK_FRESH, full=BULK_A):
+    return ('if (u.endsWith("/preview")) return %s; if (u.endsWith("/approve")) return {id: 8, approval: 4, kind: "bulk_change"}; '
+            'if (u === "/api/netmap") throw new Error("a bulk request reads no netmap"); return %s;') % (json.dumps(preview), json.dumps(full))
+
+
+BULK_REVIEW = 'let opened = null; openBulk = id => { opened = id; }; await reviewApproval(4); '
+
+
+def test_a_bulk_request_shows_its_switches_and_runs_as_a_bulk():
+    # the list: no switch of its own, and "Prüfen" although no zone of the reviewer is known to hold it
+    js = ('(async () => { ME = {role: "freigeben", zones: ["EK"], four_eyes: true}; api = async () => [%s]; ' + DRAW) % json.dumps(BULK_A)
+    html = in_dom(js)
+    assert "<td>mehrere Switches</td>" in html and 'data-ar="4">Prüfen</button>' in html
+    assert 'VLAN 30 · 3 Ports an 2 Switches<span class="cellnote">Sammeländerung</span>' in html
+    # the review: the fresh sections, then approving starts the bulk change and opens its run
+    act = (BULK_REVIEW + 'const d = ' + DIALOG + '; $("#ap-comment").value = "passt"; '
+           'await $("#m-foot").children.find(x => x.textContent === "Freigeben und ausführen").handlers.click[0](); '
+           'return [d, opened, ran, $("#modal").hidden, calls.map(c => c[1]), calls.slice(-1)[0], n];')
+    (title, body, labels), opened, ran, hidden, urls, last, n = review(bulk_answers(), act, map_before="MAP = null;")
+    assert title == "Anfrage #4 prüfen" and labels == ["Abbrechen", "Ablehnen", "Freigeben und ausführen"]
+    assert body.startswith('<p class="note" style="margin:0">Angefordert von <b>Anna</b> (Ändern) · ')
+    assert "<b>VLAN 30 · 3 Ports an 2 Switches</b>" in body and '<b>SW-A</b> <span class="muted">· 2 Ports: <span class="mono">1, 2</span></span></p>' in body
+    assert '<pre class="code">vlan 30 untagged 5</pre>' in body and "passt nicht mehr" not in body and "Freigeben geht nicht" not in body
+    assert body.endswith(COMMENT_FIELD)
+    assert (opened, ran, hidden, n) == (8, None, True, 1)
+    assert urls == ["/api/approvals/4", "/api/approvals/4/preview", "/api/approvals/4/approve"]
+    assert last == ["POST", "/api/approvals/4/approve", {"token": "T", "comment": "passt"}]
+
+
+def test_a_bulk_request_that_no_longer_matches_cannot_be_approved():
+    title, body, labels = review(bulk_answers(preview=MOVED), BULK_REVIEW + 'return ' + DIALOG + ';')
+    assert labels == ["Abbrechen", "Ablehnen"]
+    assert ('<div class="error"><b>Freigeben geht nicht:</b> Mindestens ein Switch passt nicht mehr zur Anfrage: er hat sich seit der Anfrage geändert, '
+            'ist gesperrt oder nicht lesbar. Ablehnen oder neu anfordern lassen.</div>') in body
+    assert body.count('<span class="pill warn">passt nicht mehr</span>') == 1
+    assert body.index("SW-C") < body.index("passt nicht mehr") < body.index("no vlan 40 tagged 5")
+    # the requester's sections to compare, folded
+    theirs = body[body.index('<details class="adv"><summary>Vorschau des Antragstellers</summary>'):]
+    assert '<pre class="code">vlan 30 untagged 5</pre>' in theirs and "no vlan 40" not in theirs
+
+
+@pytest.mark.parametrize("full, said", [
+    ({**BULK_A, "status": "approved", "decided_by": "ben", "bulk_id": 8}, "<dt>Änderung</dt><dd>Sammeländerung #8</dd>"),
+    ({**BULK_A, "own": True}, "<dt>Änderung</dt><dd>–</dd>")], ids=["approved", "open"])
+def test_the_details_of_a_bulk_request_show_its_sections_and_its_bulk_change(full, said):
+    title, body, foot = view_click('await click("ad"); return ' + DIALOG + ';', row=full, full=full)
+    assert title == "Anfrage #4" and foot == ["Schließen"] and said in body
+    assert '<b>VLAN 30 · 3 Ports an 2 Switches</b> <span class="muted">· mehrere Switches · Sammeländerung</span>' in body
+    assert body.count('<div class="bulk-sec">') == 2 and '<pre class="code">vlan 30 untagged 1,2</pre>' in body
+    assert "passt nicht mehr" not in body
+    # the switches the preview skipped, with their reason (escaped)
+    assert "<p class=\"eyebrow\">Übersprungen</p>" in body and "<li>SW-&lt;B&gt;: Es gibt &lt;nichts&gt; zu ändern</li>" in body
+
+
+@pytest.mark.parametrize("role, four, offered", [("aendern", False, True), ("aendern", True, True), ("lesen", True, False)])
+def test_a_bulk_request_is_asked_again_through_the_bulk_preview(role, four, offered):
+    """A port request needs the expert mode to be asked again, a bulk request only Ändern: every bulk change needs an approval."""
+    stale = {**BULK_A, "own": True, "status": "stale"}
+    js = ('(async () => { ME = {role: %s, zones: ["EK"], four_eyes: %s}; api = async () => [%s]; ' + DRAW) % (
+        json.dumps(role), json.dumps(four), json.dumps(stale))
+    assert ('data-an="4">Neu anfordern</button>' in in_dom(js)) == offered
+    act = ('let got = null; previewBulk = (req, o) => { got = [req, o]; }; previewChange = () => { got = "port"; }; await click("an"); '
+           'return [got, calls.map(c => c[1])];')
+    got, calls = view_click(act, row=stale, full=stale)
+    assert got == [{"targets": [{"switch_id": 1, "ports": ["1", "2"]}, {"switch_id": 3, "ports": ["5"]}], "change": {"untagged": "30"}, "expert": False},
+                   {"onError": "continue"}]
+    assert calls == ["/api/approvals?status=all&limit=100", "/api/approvals/4"]          # no netmap: the preview reads what it needs

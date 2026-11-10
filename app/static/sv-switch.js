@@ -40,7 +40,7 @@
     if (pickedFor !== selSwitch) { picked = new Set(); pickedFor = selSwitch; }
     const side = `<nav class="side" aria-label="Switches">${zones().map(z => `<div class="zonehead">${esc(z)}</div>` + MAP.switches.filter(s => (s.zone || "Ohne Zone") === z).map(s => {
       const ph = physOf(s); return `<button type="button" class="si" data-sw="${s.id}" aria-current="${s.id === selSwitch}">${stDot(s)}<span>${esc(s.k)}</span><span class="c">${ph.filter(p => p.o).length}/${ph.length}</span></button>`; }).join("")).join("")}
-      ${roleOk("admin") ? `<button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button>` : ""}</nav>`;
+      ${roleOk("aendern") ? `<button type="button" class="btn small add" id="btn-bulk">Sammeländerung</button>` : ""}${roleOk("admin") ? `<button type="button" class="btn small add" id="btn-add">Switch hinzufügen</button>` : ""}</nav>`;
     if (selSwitch == null) { v.innerHTML = `<div class="md">${side}<div class="card"><div class="empty"><b>Noch keine Switches</b><span>${roleOk("admin") ? "Links „Switch hinzufügen“." : "Switches anlegen braucht die Rolle „Admin“."}</span></div></div></div>`; bindSide(); return; }
     const s = swById(selSwitch), ph = physOf(s), trunks = s.ports.filter(p => p.n.startsWith("Trk"));
     const vset = [...new Set(ph.flatMap(p => [...p.u, ...p.t]))].sort((a, b) => a - b);
@@ -124,6 +124,8 @@
   function bindSide() {
     document.querySelectorAll(".side .si").forEach(b => b.addEventListener("click", () => { swVlan = null; swPortFilter = "all"; swText = ""; go("switches", +b.dataset.sw); }));
     const add = $("#btn-add"); if (add) add.addEventListener("click", () => editSwitch(null));
+    // The entry to the view "Sammeländerung" (sv-bulk.js), which has no tab of its own
+    const bulk = $("#btn-bulk"); if (bulk) bulk.addEventListener("click", () => go("bulk"));
   }
   function renderPlate(s) {
     const ph = physOf(s), main = ph.filter(p => isNum(p.n) && +p.n <= 48).sort((a, b) => +a.n - +b.n), extra = ph.filter(p => !isNum(p.n) || +p.n > 48);
@@ -407,16 +409,17 @@
   // waits for its confirmation (pending, Phase 4c) is a resting state: its banner (pendingHtml) and the footer "Bestätigen"
   // (mayConfirm), "Jetzt zurücknehmen" (mayRevert, the revert's preview) and "Schließen", set once; it is asked every 3 s while its
   // dialog is open (each request keeps the session awake: whoever is to confirm sits in front of it), until its status changes.
+  // The footer of the open dialog set anew with the buttons btns (as modal() takes them), for a dialog that follows something
+  // running (runProgress, openBulk of sv-bulk.js). The focused button went with the old footer, and the focus with it (to body, the
+  // dialog still open): it moves to the last new button ("Schließen"); a focus still in the dialog (the ✕) stays
+  function modalFoot(btns) {
+    const foot = $("#m-foot"); foot.innerHTML = "";
+    const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
+    if (!$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
+  }
   async function runProgress(s, id) {
     const shown = modal(`Änderung #${id}`, `<div id="prog"><div class="empty">Starte …</div></div>`, [{ label: "Schließen", onClick: closeModal }]);
     let waiting = false;    // the footer of the waiting change is set
-    const setFoot = btns => {
-      const foot = $("#m-foot"); foot.innerHTML = "";
-      const els = btns.map(b => { const el = document.createElement("button"); el.type = "button"; el.className = "btn " + (b.cls || ""); el.textContent = b.label; el.addEventListener("click", () => b.onClick(el)); foot.appendChild(el); return el; });
-      // The focused "Schließen" went with the old footer, and the focus with it (to body, the dialog still open): it moves to the
-      // new "Schließen"; a focus still in the dialog (the ✕) stays
-      if (!$(".modal").contains(document.activeElement)) els[els.length - 1].focus();
-    };
     // A change that sent nothing changed nothing at the switch: only its list in the switch view reloads (SVLogic.afterChange)
     const reload = c => {
       const next = SVLogic.afterChange(c);
@@ -437,7 +440,7 @@
           if (["unclear", "failed"].includes(c.status) && mayRevert(c)) btns.push({ label: "Rückgängig", onClick: () => previewChange(s, { mode: "revert", of: id }) });
           if (maySave(c)) btns.push({ label: "Trotzdem speichern", onClick: () => previewChange(s, { mode: "save", of: id }) });
           btns.push({ label: "Schließen", cls: "primary", onClick: closeModal });
-          setFoot(btns);
+          modalFoot(btns);
         }
         if (c.status === "ok") toast(c.saved ? "Änderung erledigt" : "Änderung erledigt, aber nicht dauerhaft gespeichert");
         reload(c);
@@ -449,14 +452,14 @@
           waiting = true; reload(c);
           const confirmBtn = { label: "Bestätigen", cls: "primary", onClick: async b => { b.disabled = true; if (!(await confirmChange(id))) b.disabled = false; } };
           const backBtn = { label: "Jetzt zurücknehmen", onClick: () => previewChange(s, { mode: "revert", of: id }) };
-          if (modalShown(shown)) setFoot([...(mayConfirm(c) ? [confirmBtn] : []), ...(mayRevert(c) ? [backBtn] : []), { label: "Schließen", onClick: closeModal }]);
+          if (modalShown(shown)) modalFoot([...(mayConfirm(c) ? [confirmBtn] : []), ...(mayRevert(c) ? [backBtn] : []), { label: "Schließen", onClick: closeModal }]);
         }
         if (!modalShown(shown)) return;
         await new Promise(res => setTimeout(res, 3000));
         continue;
       }
       // Confirmed: it runs again (the save), its actions go
-      if (waiting) { waiting = false; if (modalShown(shown)) setFoot([{ label: "Schließen", onClick: closeModal }]); }
+      if (waiting) { waiting = false; if (modalShown(shown)) modalFoot([{ label: "Schließen", onClick: closeModal }]); }
       await new Promise(res => setTimeout(res, 1200));
     }
   }
@@ -476,7 +479,7 @@
     if (!rows.length) { el.innerHTML = `<div class="empty">Noch keine Änderungen.</div>`; return; }
     const more = rows.length >= limit && limit < 500 ? `<div class="more-row"><button class="btn small" type="button" data-more="${Math.min(500, limit * 2)}">Mehr laden</button></div>` : "";
     el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Zeit</th><th>Benutzer</th>${switchId ? "" : "<th>Switch</th>"}<th>Änderung</th><th>Status</th><th></th></tr></thead><tbody>` + rows.map(c =>
-      `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}</td><td>${chPill(c)}</td>
+      `<tr><td class="num">${c.id}</td><td class="num">${esc(fmtTime(c.created_at))}</td><td>${esc(c.username || "")}</td>${switchId ? "" : `<td>${esc(c.switch_name)}</td>`}<td>${esc(c.summary)}${c.bulk_id ? `<span class="cellnote">Sammeländerung #${c.bulk_id}</span>` : ""}</td><td>${chPill(c)}</td>
         <td><div class="actions"><button class="btn small" type="button" data-cd="${c.id}">Details</button>${mayConfirm(c) ? `<button class="btn small" type="button" data-cc="${c.id}" data-sw="${c.switch_id}">Bestätigen</button>` : ""}${mayRevert(c) ? `<button class="btn small" type="button" data-cr="${c.id}" data-sw="${c.switch_id}">Rückgängig</button>` : ""}${maySave(c) ? `<button class="btn small" type="button" data-cs="${c.id}" data-sw="${c.switch_id}">Trotzdem speichern</button>` : ""}</div></td></tr>`).join("") + `</tbody></table></div>${more}`;
     el.onclick = async e => {
       const d = e.target.closest("[data-cd]"), r = e.target.closest("[data-cr]"), sv = e.target.closest("[data-cs]"), m = e.target.closest("[data-more]"), cc = e.target.closest("[data-cc]");

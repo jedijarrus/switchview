@@ -460,3 +460,5 @@ a.btn { color: var(--fg); text-decoration: none; }
 .fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .fold .count { padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11.5px; font-weight: 500; }
 @media (prefers-reduced-motion: reduce) { .fold .chev { transition: none; } }
+/* Sammeländerung: the section of one switch in a preview, in the review and in the details of a request (sv-bulk.js) */
+.bulk-sec { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }

@@ -1,9 +1,10 @@
 "use strict";
 
   /* ── Router: #overview, #switches, #sw=<id>, #vlans, … (#switch=<name>: a bookmark from before ids, still valid). Every navigation
-     of the user adds a history entry, so Back and Forward walk the views; popstate / hashchange show the view of the hash. ── */
+     of the user adds a history entry, so Back and Forward walk the views; popstate / hashchange show the view of the hash. bulk has
+     no tab: "Sammeländerung" in the switch view and the link of the alert bulk_problem lead to #bulk. ── */
   const VIEWS = { overview: renderOverview, switches: renderSwitchDetail, vlans: renderVlans, devices: renderDevices, verlauf: renderVerlauf,
-    backups: renderBackups, approvals: renderApprovals, audit: renderAudit, settings: renderSettings };
+    backups: renderBackups, approvals: renderApprovals, audit: renderAudit, settings: renderSettings, bulk: renderBulk };
   // selSwitch: the id of the shown switch (a name is not unique); from an old bookmark briefly a name, which renderSwitchDetail resolves
   // with SVLogic.switchIdOf
   let current = "overview", selSwitch = null, swVlan = null, swPortFilter = "all", swText = "";

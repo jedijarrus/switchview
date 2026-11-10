@@ -255,6 +255,16 @@ def test_approval_count_follows_the_zones_of_a_reviewer(me, want):
     assert run(f"L.approvalCount({json.dumps(rows)}, {json.dumps(me)})") == want
 
 
+# Phase 4c Task 9: a bulk request has no switch and no zone in the list - it counts for every reviewer, as "Prüfen" is offered for it
+@pytest.mark.parametrize("me, want", [({"role": "freigeben", "zones": ["EK"]}, 1), ({"role": "freigeben", "zones": None}, 1),
+                                      ({"role": "aendern", "zones": ["EK"]}, 1)])
+def test_approval_count_takes_a_bulk_request_for_every_reviewer(me, want):
+    rows = [{"status": "open", "own": False, "kind": "bulk_change", "switch_zone": None},
+            {"status": "open", "own": True, "kind": "bulk_change", "switch_zone": None},
+            {"status": "stale", "own": False, "kind": "bulk_change", "switch_zone": None}]
+    assert run(f"L.approvalCount({json.dumps(rows)}, {json.dumps(me)})") == want
+
+
 # Phase 4b Task 9: the query string of the history, the events and the audit (empty values are no filter), and the number with its noun
 def test_query_skips_empty_values_and_encodes_the_rest():
     assert run('L.query({q: "a b&c", limit: 50, port: "", switch_id: null, x: undefined})') == "?q=a%20b%26c&limit=50" and run("L.query({})") == ""
@@ -305,3 +315,26 @@ def test_audit_params_send_every_filter_in_order():
                                        ("Date.UTC(2026, 10, 8, 10, 6, 0)", 0), ("Date.UTC(2026, 10, 8, 10, 4, 59)", 1)])
 def test_minutes_left_rounds_up_and_never_goes_below_zero(now, want):
     assert run(f'L.minutesLeft("2026-11-08 10:05:00", {now})') == want
+
+
+# Phase 4c Task 9: the ports of a switch in the form of a bulk change, written as text
+@pytest.mark.parametrize("text, want", [
+    ("1-3, 7,Gi1/0/2 7", {"ports": ["1", "2", "3", "7", "Gi1/0/2"], "error": None}),
+    ("", {"ports": [], "error": None}),
+    ("5-1", {"ports": [], "error": "Bereich „5-1“ ist rückwärts"}),
+    ("1, x;y", {"ports": [], "error": "Port „x;y“ ist ungültig"}),
+    ("1-201", {"ports": [], "error": "Höchstens 200 Ports je Switch"})])
+def test_the_ports_text_reads_lists_and_ranges(text, want):
+    assert run(f"L.parsePorts({json.dumps(text)})") == want                             # run: the helper of this module
+
+
+# Beyond the brief: the edges - exactly 200 ports pass, the count is over the whole text and after duplicates fell away, a range of
+# one port, a name with a dash is a name (ge-0/0/1), one that starts with a dash or is longer than 64 characters is none, a range
+# too large to count is refused without counting, and no text at all (a switch without a field) is no port
+@pytest.mark.parametrize("text, ports, error", [
+    ("1-200", 200, None), ("1-150 100-200", 200, None), ("1-150, 151-201", 0, "Höchstens 200 Ports je Switch"), ("4-4", 1, None),
+    ("ge-0/0/1\n\tPort-channel1", 2, None), ("-1", 0, "Port „-1“ ist ungültig"), ("a" * 65, 0, "Port „" + "a" * 65 + "“ ist ungültig"),
+    ("1-99999999999999999999", 0, "Höchstens 200 Ports je Switch"), (None, 0, None)])
+def test_the_ports_text_at_its_edges(text, ports, error):
+    got = run(f"L.parsePorts({json.dumps(text)})")
+    assert (len(got["ports"]), got["error"]) == (ports, error)

@@ -500,6 +500,7 @@
     approval_withdrawn: "Anfrage zurückgezogen", approval_expired: "Anfrage abgelaufen", approval_stale: "Anfrage veraltet", approval_settings: "Vier-Augen-Einstellung geändert",
     zone_scopes_update: "Zonen geändert", alert_settings: "Benachrichtigungen geändert", alert_test: "Benachrichtigung getestet", alert_failed: "Benachrichtigung nicht zugestellt", compliance_rules: "Sicherheitsregeln geändert", watch_add: "MAC beobachtet", watch_remove: "MAC nicht mehr beobachtet",
     token_create: "API-Token angelegt", token_revoke: "API-Token widerrufen", change_pending: "Änderung wartet auf Bestätigung", change_confirm: "Änderung bestätigt",
+    bulk_start: "Sammeländerung gestartet", bulk_done: "Sammeländerung fertig", bulk_failed: "Sammeländerung mit Fehlern", bulk_cancel: "Abbruch einer Sammeländerung angefordert", bulk_cancelled: "Sammeländerung abgebrochen", bulk_interrupted: "Sammeländerung durch Neustart abgebrochen",
     pf_snmp_settings: "SNMP-Benutzer für PacketFence geändert" };
   // The audit log asks the server at every change of a filter (GET /api/audit, SVLogic.auditParams; 100 a page, "Mehr laden" by
   // the cursor, loadPaged): text and user AUDIT_DELAY ms after the last key, which drops the answer to the filter before, the
