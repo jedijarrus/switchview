@@ -111,7 +111,7 @@ def ask(client, sid, who="anna", plan=PLAN):
 @pytest.mark.parametrize("kind, request_, on, want", [
     ("port_change", {"mode": "ports", "expert": True}, True, True), ("port_change", {"mode": "ports", "expert": False}, True, False),
     ("port_change", {"mode": "ports", "expert": True}, False, False), ("port_change", {"mode": "revert", "expert": True}, True, False),
-    ("bulk_change", {"expert": True}, True, False)])
+    ("bulk_change", {"expert": False}, True, True), ("bulk_change", {}, False, False)])
 def test_needs_approval(kind, request_, on, want):
     assert approvals.needs_approval(kind, request_, on) is want
 
@@ -351,7 +351,7 @@ def test_an_approval_starts_the_change_through_start_change(world, client):
     assert (fresh["matches"], fresh["commands"]) == (True, p["commands"])
     got = approve(client, aid, "ben", comment="passt").json()
     cid = got["id"]
-    assert got == {"id": cid, "approval": aid} and ran == [cid]
+    assert got == {"id": cid, "approval": aid, "kind": "port_change"} and ran == [cid]
     ch = dbfix.query("SELECT username, role, approved_by, expert, status FROM changes WHERE id = ?", (cid,))
     assert ch == [("anna", "aendern", "ben", 1, "queued")]
     a = client.get(f"/api/approvals/{aid}", headers=H("lea")).json()

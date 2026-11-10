@@ -15,7 +15,11 @@ failure stops the rest unless on_error is "continue"; a cancel (cancel) acts bet
 confirm_minutes each switch waits for its confirmation and the run goes on, the deadlines of the waiting ones grow with it
 (_extend_deadlines), and confirm_all confirms them in one go. The end is audited (bulk_<status>) and a bulk change with failures
 raises the alert bulk_problem; a restart ends every bulk change that was queued or running as interrupted (mark_interrupted) and
-continues none. Everything of api_changes, changes and confirm goes through the module, never imported by name."""
+continues none. Everything of api_changes, changes and confirm goes through the module, never imported by name.
+
+Task 8: with the four-eyes principle on every bulk change is requested instead (the kind bulk_change of approvals, registered by
+api_bulk, whose run is precheck, create with the claim of the request, schedule); zones_of gives the zones of such a request, those
+of all its switches."""
 import asyncio
 import json
 import logging
@@ -293,6 +297,23 @@ async def precheck(body) -> list[dict]:
     return results
 
 
+async def zones_of(payload: dict) -> list[str]:
+    """The zones, of now, of the switches of a bulk change's payload (its "items", each with "switch_id": the body of POST /api/bulk
+    as a four-eyes request stores it), sorted, each once ("" is the switches without a zone); a switch deleted meanwhile has none.
+    Whoever rejects, reviews or approves such a request needs every one of them (api_approvals)."""
+    ids = [i["switch_id"] for i in payload["items"]]
+    async with db() as conn:
+        async with conn.execute(f"SELECT DISTINCT zone FROM switches WHERE id IN ({', '.join('?' * len(ids))}) ORDER BY zone", ids) as cur:
+            return [r["zone"] for r in await cur.fetchall()]
+
+
+async def names_of(ids: list[int]) -> dict[int, str]:
+    """The name of now of each switch of ids that is there."""
+    async with db() as conn:
+        async with conn.execute(f"SELECT id, name FROM switches WHERE id IN ({', '.join('?' * len(ids))})", ids) as cur:
+            return {r["id"]: r["name"] for r in await cur.fetchall()}
+
+
 def summary_of(body) -> str:
     """The summary of a bulk change body (api_bulk.BulkIn): summary over its change, its items and their ports."""
     return summary(body.change, len(body.items), sum(len(i.ports) for i in body.items))
@@ -311,7 +332,7 @@ async def create(body, maker: dict, *, api_token: str | None = None, approved_by
     async with db() as conn:
         await conn.execute("BEGIN IMMEDIATE")
         async with conn.execute(f"SELECT id, name FROM switches WHERE id IN ({', '.join('?' * len(ids))})", ids) as cur:
-            names = {r["id"]: r["name"] for r in await cur.fetchall()}
+            names = {r["id"]: r["name"] for r in await cur.fetchall()}    # read in the write transaction, not names_of: one state
         cur = await conn.execute(
             "INSERT INTO bulks(created_at, username, role, api_token, approved_by, summary, change, expert, on_error, confirm_minutes, status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')",

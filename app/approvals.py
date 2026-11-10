@@ -1,11 +1,11 @@
 """The four-eyes principle of SwitchView (Phase 4a, Task 6): a generic approval mechanism, without FastAPI (the routes are in
 api_approvals). A request has a kind (KINDS, filled by register: each kind brings its own preview and its own run; Task 7 registers
-port_change, 4c a bulk change), a payload (exactly the desired state its requester sent) and the preview they saw, stored in the table
-approvals. needs_approval is the one predicate that says which request needs an approval, policy the setting (off by default). A
-request is open until it is approved (claim, in the one write that also creates its change, Task 7), rejected, withdrawn, goes stale
-(its plan is no longer the preview, Task 7) or expires (expire_due: every 10 minutes from the scheduler, and before every read of a
-request). Every step is announced to the listeners (subscribe, emit), where 4b's alerting hangs on. KINDS and _listeners are
-registries filled at import, the same in every process."""
+port_change in api_approvals, Phase 4c bulk_change in api_bulk), a payload (exactly the desired state its requester sent) and the
+preview they saw, stored in the table approvals. needs_approval is the one predicate that says which request needs an approval,
+policy the setting (off by default). A request is open until it is approved (claim, in the one write that also creates its change
+or its bulk change), rejected, withdrawn, goes stale (its plan is no longer the preview, Task 7) or expires (expire_due: every 10
+minutes from the scheduler, and before every read of a request). Every step is announced to the listeners (subscribe, emit), where
+4b's alerting hangs on. KINDS and _listeners are registries filled at import, the same in every process."""
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -17,6 +17,7 @@ from db import audit, db, load_settings
 log = logging.getLogger("switchview.approvals")
 
 PORT_CHANGE = "port_change"
+BULK_CHANGE = "bulk_change"          # Phase 4c: a bulk change, a request without a switch of its own
 OPEN, APPROVED, REJECTED, WITHDRAWN, EXPIRED, STALE = "open", "approved", "rejected", "withdrawn", "expired", "stale"
 STATUS_LABEL = {OPEN: "offen", APPROVED: "freigegeben", REJECTED: "abgelehnt", WITHDRAWN: "zurückgezogen", EXPIRED: "abgelaufen",
                 STALE: "veraltet"}
@@ -25,7 +26,9 @@ DEFAULT_HOURS = 24
 SETTINGS_KEYS = ("four_eyes", "approval_hours")
 # The columns of a request in a listing: all but payload and preview (get reads those too)
 LIST_COLUMNS = ("id", "kind", "switch_id", "summary", "status", "requested_by", "requester_name", "requester_subject", "requester_role",
-                "requested_at", "expires_at", "decided_by", "decided_subject", "decided_at", "comment", "reason", "change_id")
+                "requested_at", "expires_at", "decided_by", "decided_subject", "decided_at", "comment", "reason", "change_id", "bulk_id")
+# The columns claim may write the id of what an approval started to: the change of a port change, the bulk change of a bulk change
+CLAIM_COLUMNS = ("change_id", "bulk_id")
 # A request with the name and zone of its switch (LEFT JOIN: a kind without a switch has switch_id NULL)
 _JOINED = "SELECT {}, s.name AS switch_name, s.zone AS switch_zone FROM approvals a LEFT JOIN switches s ON s.id = a.switch_id"
 
@@ -33,11 +36,13 @@ _JOINED = "SELECT {}, s.name AS switch_name, s.zone AS switch_zone FROM approval
 @dataclass(frozen=True)
 class Kind:
     """A kind of request: its name (approvals.kind), its label for the UI, its preview for (request, user) and its run for (request,
-    approver, comment), which starts what was approved and returns the id of the change."""
+    approver, comment), which starts what was approved and returns its id; started is the noun of what the run starts, for the
+    audit of an approval ("… → Änderung #7", "… → Sammeländerung #3")."""
     name: str
     label: str
     preview: Callable[[dict, dict], Awaitable[dict]]
     run: Callable[[dict, dict, str], Awaitable[int]]
+    started: str = "Änderung"
 
 
 KINDS: dict[str, Kind] = {}
@@ -68,9 +73,12 @@ async def emit(event: str, approval: dict) -> None:
 
 
 def needs_approval(kind: str, request: dict, four_eyes: bool) -> bool:
-    """Whether a request of kind needs an approval: in 4a only a port change (mode "ports") in expert mode, and only with the
-    four-eyes principle on. A revert and a save never do: a revert must work in an outage without a second person, and it restores
-    a state that ran before. 4c adds its bulk change here."""
+    """Whether a request of kind needs an approval, and never with the four-eyes principle off: a port change (mode "ports") in
+    expert mode - a revert and a save never do: a revert must work in an outage without a second person, and it restores a state
+    that ran before -, and every bulk change (Phase 4c), in expert mode or not: it changes many ports at once, the case a second
+    person is there for."""
+    if kind == BULK_CHANGE:
+        return bool(four_eyes)
     return four_eyes and kind == PORT_CHANGE and request.get("mode", "ports") == "ports" and bool(request.get("expert"))
 
 
@@ -145,16 +153,19 @@ async def set_status(aid: int, status: str, user: dict | None, *, comment: str =
     return cur.rowcount == 1
 
 
-async def claim(conn, aid: int, approver: dict, comment: str, cid: int) -> None:
-    """Marks request aid approved by approver (auth.current_user) for change cid, with comment ("" stores none), on conn and without a
-    commit: changes.create_change runs it in the transaction of the change's INSERT, so the approval and the change are stored
-    together or not at all. Only an open request that has not run out yet (its expires_at, whatever expire_due has marked so far);
-    otherwise AlreadyDecided, and the transaction is rolled back by its caller."""
+async def claim(conn, aid: int, approver: dict, comment: str, ref: int, *, column: str = "change_id") -> None:
+    """Marks request aid approved by approver (auth.current_user) for what it started, ref - the change of a port change (column
+    change_id) or the bulk change of a bulk change (column bulk_id; any other column is a ValueError) -, with comment ("" stores
+    none), on conn and without a commit: changes.create_change and bulk.create run it in the transaction of their INSERT, so the
+    approval and what it starts are stored together or not at all. Only an open request that has not run out yet (its expires_at,
+    whatever expire_due has marked so far); otherwise AlreadyDecided, and the transaction is rolled back by its caller."""
+    if column not in CLAIM_COLUMNS:
+        raise ValueError(f"approvals.claim: no column {column!r}")
     now = datetime.now(timezone.utc).isoformat()
     cur = await conn.execute(
-        "UPDATE approvals SET status = ?, decided_by = ?, decided_subject = ?, decided_at = ?, comment = ?, change_id = ? "
+        f"UPDATE approvals SET status = ?, decided_by = ?, decided_subject = ?, decided_at = ?, comment = ?, {column} = ? "
         "WHERE id = ? AND status = ? AND expires_at >= ?",
-        (APPROVED, approver["username"], approver["subject"], now, comment or None, cid, aid, OPEN, now))
+        (APPROVED, approver["username"], approver["subject"], now, comment or None, ref, aid, OPEN, now))
     if cur.rowcount != 1:
         raise AlreadyDecided()
 

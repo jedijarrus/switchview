@@ -361,6 +361,9 @@ ADDED_COLUMNS = (
     # Phase 4c, Task 7: the bulk change a change belongs to (bulks.id, written by changes.create_change for each switch bulk.run
     # starts; NULL for every other change and every row of before). No foreign key: a bulk change is never deleted.
     ("changes", "bulk_id", "INTEGER"),
+    # Phase 4c, Task 8: the bulk change an approval of the kind bulk_change started (bulks.id, written by approvals.claim in the
+    # transaction that creates the bulk change; NULL for every other request and every row of before), as change_id for a port change.
+    ("approvals", "bulk_id", "INTEGER"),
 )
 
 

@@ -88,7 +88,8 @@ PHASE4A_TABLES = {
                   ("requester_subject", "TEXT", 1, None, 0), ("requester_role", "TEXT", 0, None, 0), ("requested_at", "TEXT", 1, None, 0),
                   ("expires_at", "TEXT", 1, None, 0), ("decided_by", "TEXT", 0, None, 0), ("decided_subject", "TEXT", 0, None, 0),
                   ("decided_at", "TEXT", 0, None, 0), ("comment", "TEXT", 0, None, 0), ("reason", "TEXT", 0, None, 0),
-                  ("change_id", "INTEGER", 0, None, 0)],
+                  ("change_id", "INTEGER", 0, None, 0),
+                  ("bulk_id", "INTEGER", 0, None, 0)],    # appended by Phase 4c (Task 8, db.ADDED_COLUMNS)
 }
 
 
@@ -334,7 +335,7 @@ async def test_migration_adds_the_phase4a_columns(data_dir):
         for table in PHASE4A_TABLES:
             await conn.execute(f"DROP TABLE {table}")
         for table, column, definition in db.ADDED_COLUMNS:
-            if (table, column) not in PHASE4A_COLUMNS:
+            if (table, column) not in PHASE4A_COLUMNS and table not in PHASE4A_TABLES:    # a later column of a 4a table: with init_db
                 await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         await conn.execute("INSERT INTO sessions (token, username, display_name, method, created_at, expires_at) VALUES "
                            "(?, 'anna@example.org', 'Anna', 'entra', '2026-11-07T08:00:00+00:00', '2026-11-07T20:00:00+00:00')",
@@ -379,11 +380,11 @@ PHASE4B_COLUMNS: set[tuple[str, str]] = {("switches", "poll_failures"), ("switch
                                          ("switches", "compliance_snmp_at")}
 # The tables and the columns Phase 4c adds (Tasks 4, 7 and 8 extend both): Task 2 the API tokens (with idx_api_tokens_subject) and
 # the API token an audit entry was made with, Task 4 the confirmation of a change (its minutes, its deadline, who confirmed it), Task
-# 7 the bulk changes with their switches (with idx_bulks_status) and the bulk change a change belongs to. A database as Phase 4b left
-# it has none of them, and its audit entries and changes read NULL there.
+# 7 the bulk changes with their switches (with idx_bulks_status) and the bulk change a change belongs to, Task 8 the bulk change an
+# approval started. A database as Phase 4b left it has none of them, and its audit entries, changes and approvals read NULL there.
 PHASE4C_TABLES = {"api_tokens", "bulks", "bulk_items"}
 PHASE4C_COLUMNS: set[tuple[str, str]] = {("audit", "token"), ("changes", "confirm_minutes"), ("changes", "confirm_until"),
-                                         ("changes", "confirmed_by"), ("changes", "bulk_id")}
+                                         ("changes", "confirmed_by"), ("changes", "bulk_id"), ("approvals", "bulk_id")}
 
 
 async def _index_names(conn, tables: set[str]) -> set[str]:
@@ -406,8 +407,9 @@ async def _default_of(conn, table: str, column: str):
 @pytest.mark.parametrize("tables, columns", [(PHASE4B_TABLES, PHASE4B_COLUMNS), (PHASE4C_TABLES, PHASE4C_COLUMNS)], ids=["4b", "4c"])
 async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables, columns):
     """A database as the phase before left it (db.SCHEMA without the tables of tables, every column of db.ADDED_COLUMNS but those of
-    columns, one switch, one backup, one audit entry and one change) gets the tables (empty, with their indexes) and the columns (the
-    rows: the column's default) from init_db, the rows keep what they held; a second init_db changes nothing."""
+    columns, one switch, one backup, one audit entry, one change and one four-eyes request) gets the tables (empty, with their
+    indexes) and the columns (the rows: the column's default) from init_db, the rows keep what they held; a second init_db changes
+    nothing."""
     path = data_dir / "switchview.db"
     async with aiosqlite.connect(path) as conn:
         await conn.executescript(db.SCHEMA)
@@ -422,11 +424,14 @@ async def test_migration_adds_the_tables_and_columns_of_a_phase(data_dir, tables
         await conn.execute("INSERT INTO audit (username, action, target, detail, role) VALUES ('anna', 'login', 'entra', '', 'aendern')")
         await conn.execute("INSERT INTO changes (switch_id, username, kind, summary, status, mechanism, sent) VALUES "
                            "(1, 'anna', 'ports', 'Port 2: VLAN 20', 'ok', 'ssh', 1)")
+        await conn.execute("INSERT INTO approvals (kind, switch_id, summary, payload, preview, status, requested_by, requester_subject, "
+                           "requested_at, expires_at) VALUES ('port_change', 1, 'Port 2: VLAN 20', '{}', '{}', 'approved', 'anna', "
+                           "'entra:anna', '2026-11-01T08:00:00+00:00', '2026-11-02T08:00:00+00:00')")
         await conn.commit()
         # the premise: none of the tables, their indexes or the columns is there yet
         assert not await _table_names(conn) & tables and not await _index_names(conn, tables)
         assert set((await _added_state(conn, columns)).values()) <= {(None, None)}
-        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups", "audit", "changes")}
+        before = {t: await _first_row_plain(conn, t) for t in ("switches", "config_backups", "audit", "changes", "approvals")}
 
     await db.init_db()
 
