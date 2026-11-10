@@ -526,8 +526,8 @@ SEEN_AS = {"first": "zum ersten Mal gesehen", "moved": "an einem anderen Port", 
 async def announce_sightings(news: list[dict]) -> None:
     """What history.record added or revived (its return): a first sighting ever of a MAC that is neither in the device database
     (known) nor at a possible uplink (suspect), outside the first recording of its switch (baseline), as unknown_device (once per
-    MAC and call: a MAC first seen in two VLANs at once is one device); and every watched MAC (history.watched) seen for the first
-    time, at another place or back, as watch (its note first)."""
+    MAC and call: a MAC first seen in two VLANs at once is one device; its link leads to the devices view, the fact "_view"); and
+    every watched MAC (history.watched) seen for the first time, at another place or back, as watch (its note first)."""
     try:
         import history  # late: history → alerts
         hits = [n for n in news if n["first"] or n["moved"] or n["back"]]
@@ -536,18 +536,18 @@ async def announce_sightings(news: list[dict]) -> None:
         notes = await history.watched({n["mac"] for n in hits})
         told: set[str] = set()    # the keys told in this call: one message per subject, not one and a repeat
 
-        async def tell(event: str, n: dict, title: str, text: str, key: str) -> None:
+        async def tell(event: str, n: dict, title: str, text: str, key: str, *, view: str | None = None) -> None:
             if key not in told:
                 told.add(key)
                 await emit(event, title, text, switch_id=n["switch_id"], switch_name=n["switch"], key=key,
-                           facts={"Switch": n["switch"], "Port": n["port"]})
+                           facts={"Switch": n["switch"], "Port": n["port"]} | ({"_view": view} if view else {}))
 
         for n in hits:
             mac, switch, port, vlan, ip, name = n["mac"], n["switch"], n["port"], n["vlan"], n["ip"], n["name"]
             if n["first"] and not (n["known"] or n["suspect"] or n["baseline"]):
                 await tell("unknown_device", n, f"Neues unbekanntes Gerät an {switch} Port {port}",
                            f"MAC {mac}{', IP ' + ip if ip else ''}{', Name ' + name if name else ''} im VLAN {vlan}, zum ersten Mal gesehen.",
-                           f"unknown:{mac}")
+                           f"unknown:{mac}", view="devices")    # where its suggestion and "Freigeben" stand (Phase 4c)
             if mac in notes:
                 note, why = notes[mac], next(w for w in SEEN_AS if n[w])
                 await tell("watch", n, f"Beobachtete MAC {mac} gesehen: {switch} Port {port}",

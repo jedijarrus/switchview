@@ -210,6 +210,12 @@
 ]
 ],
 [
+"/api/devices/import",
+[
+"POST"
+]
+],
+[
 "/api/devices/sync",
 [
 "POST"
@@ -231,6 +237,12 @@
 "/api/devices/{mac}",
 [
 "PUT"
+]
+],
+[
+"/api/devices/{mac}/reevaluate",
+[
+"POST"
 ]
 ],
 [

@@ -1,18 +1,23 @@
 """The devices API: the device database (with its PacketFence sync), the unknown devices the switches have learned, and the
-PacketFence roles and test. Split from main.py (Phase 3, Task 11), the code as it was."""
+PacketFence roles and test. Split from main.py (Phase 3, Task 11), the code as it was. Since Phase 4c (Task 10) the triage: each
+unknown device with a suggestion (triage.suggest), its first sighting and whether it is new; several devices or a CSV list released
+through one route with a preview (import_devices); and the re-evaluation of one MAC by PacketFence (reevaluate_device)."""
 import json
 import re
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 import auth
+import csvout
+import history
 import names as names_mod
 import pf
 import roles
+import triage
 from db import audit, db
 from topology import build_map, device_port, switch_keys
 
@@ -42,7 +47,7 @@ class DeviceIn(BaseModel):
     valid_until: str | None = Field(default=None, pattern=r"^(\d{4}-\d{2}-\d{2})?$")    # null or "": no expiry date
 
 
-def _valid_until(body: DeviceIn) -> str | None:
+def _valid_until(body) -> str | None:
     """body.valid_until as stored: None for no expiry date (null or ""), else the date; 422 for one that has the format of a date but
     is none (2026-13-45, 0000-00-00, 2026-02-30): pf compares it as text with today's date and hands it to PacketFence as the
     node's unregdate, so an impossible one would end the release at a point nobody chose."""
@@ -79,6 +84,17 @@ async def list_devices(user=Depends(auth.require(roles.LESEN))):
 
 
 UNKNOWN_PER_PORT = 12  # unknown devices listed per port: a flood shows its port (flag "many" with its count), not thousands of rows
+NEW_HOURS = 24         # an unknown device is "new" this long after its first sighting
+
+
+async def roles_by_kind() -> dict[str, tuple[str, int]]:
+    """Per device type the PacketFence role its released devices with a role have most, with their number; of a tie the
+    alphabetically first. What a suggestion names as the role (triage.suggest): the roles are called differently in every
+    PacketFence, the own device database knows them."""
+    async with db() as conn:
+        async with conn.execute("SELECT kind, role, count(*) AS n FROM devices WHERE allowed = 1 AND role <> '' GROUP BY kind, role "
+                                "ORDER BY n, role DESC") as cur:
+            return {r["kind"]: (r["role"], r["n"]) for r in await cur.fetchall()}    # the last row of a kind stays: most, then first
 
 
 @router.get("/api/devices/unknown")
@@ -96,8 +112,10 @@ async def unknown_devices(user=Depends(auth.require(roles.LESEN))):
         if r["mac"] not in base:
             learned[(r["switch_id"], r["port"])].append(r)
     keys = switch_keys(m["switches"])
+    kinds = await roles_by_kind()
     out = []
     for s in m["switches"]:
+        nac = "nac" in s["caps"] and s["ssh"]    # SwitchView sets the port mode of this switch (as the port table offers it)
         for p in s["ports"]:
             # F3: only trunks and confirmed uplinks are skipped (topology.device_port, which history.record takes as well). An LLDP
             # frame or a MAC flood on an access port no longer hides the devices behind it; such entries are flagged and listed after
@@ -117,10 +135,23 @@ async def unknown_devices(user=Depends(auth.require(roles.LESEN))):
             # device past the cap.
             ds = sorted(learned.get((s["id"], p["n"]), []), key=lambda r: not (r["ip"] or r["name"]))
             for r in ds[:UNKNOWN_PER_PORT]:
-                out.append({"mac": r["mac"], "vlan": r["vlan"], "ip": r["ip"] or "", "name": r["name"] or "",
-                            "vendor": r["vendor"] or names_mod.vendor_of(r["mac"]), "sw": s["k"], "sid": s["id"], "port": p["n"],
-                            "st": p["st"], "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"]})
-    out.sort(key=lambda e: bool(e["flags"]))  # stable: poll order within each group
+                e = {"mac": r["mac"], "vlan": r["vlan"], "ip": r["ip"] or "", "name": r["name"] or "",
+                     "vendor": r["vendor"] or names_mod.vendor_of(r["mac"]), "sw": s["k"], "sid": s["id"], "port": p["n"],
+                     "st": p["st"], "flags": flags, "lldp": p["l"][0][0] if p["l"] else "", "mc": p["mc"], "poe": p.get("poe")}
+                # The triage (Phase 4c): asked with the vendor of the ARP table alone, so a vendor triage finds by the prefix says so
+                e["suggest"] = triage.suggest(e | {"vendor": r["vendor"] or ""}, p, kinds, nac=nac)
+                out.append(e)
+    # The first sighting from the history (the rows history.record writes) and "new": first seen in the last NEW_HOURS hours and
+    # after the first recording of its switch (the stock a switch brings at its first poll is not new)
+    first, base = await history.first_seen({e["mac"] for e in out}), await history.baselines()
+    recent = (datetime.now(timezone.utc) - timedelta(hours=NEW_HOURS)).strftime(history.TIME)
+    for e in out:
+        seen = e["first_seen"] = first.get(e["mac"])
+        e["new"] = bool(seen and seen > recent and seen > base.get(e["sid"], seen))
+    # Two stable sorts: the latest first sighting first (none last), then unflagged before flagged and in each the new ones first;
+    # equal entries stay in poll order, and the cap keeps the newest
+    out.sort(key=lambda e: e["first_seen"] or "", reverse=True)
+    out.sort(key=lambda e: (bool(e["flags"]), not e["new"]))
     return out[:500]
 
 
@@ -181,6 +212,171 @@ async def delete_device(mac: str, user=Depends(auth.require(roles.AENDERN))):
     await audit(user["username"], "device_delete", mac, warning or "", role=user["role"])
     _sessions["items"] = None    # as in _save_device
     return {"ok": True, "warning": warning}
+
+
+# ── Triage: several devices or a CSV list in one go, and the re-evaluation of one MAC (Phase 4c, Task 10) ─────────────────────────
+KIND_PATTERN = "^(" + "|".join(KINDS) + ")$"
+IMPORT_ONE_OF = "Entweder eine CSV-Liste oder ausgewählte Geräte schicken"
+IMPORT_TOO_MANY = f"Höchstens {triage.IMPORT_MAX} Zeilen je Import"
+IMPORT_ERRORS = "Die Liste hat {n} – nichts übernommen"
+BAD_MAC = "MAC-Adresse ungültig"
+TWICE = "doppelt (wie Zeile {line})"
+EXISTS = "schon in der Datenbank – bleibt, wie es ist"
+NO_ROLE = "Rolle „{role}“ gibt es in PacketFence nicht"
+FORMULA_NAME = "Name beginnt wie eine Formel (= + - @)"
+LONG_NAME = "Name zu lang (höchstens 64 Zeichen)"
+BAD_KIND = "Typ „{kind}“ unbekannt"
+ROLES_UNCHECKED = "Rollen nicht geprüft: {why}"
+PF_OFF = "PacketFence-API ist nicht eingerichtet"
+REEVAL_FAILED = "Neubewertung (CoA) fehlgeschlagen: {why}"
+NAME_MAX = 64          # as DeviceIn.name
+
+
+class ImportRow(BaseModel):
+    mac: str = Field(max_length=40)
+    name: str = Field(default="", max_length=200)
+    role: str = Field(default="", max_length=64)
+    kind: str = Field(default="", max_length=20)
+
+
+class DeviceImportIn(BaseModel):
+    """Several devices to release: rows (the devices picked in the lists) or csv (a list "MAC;Rolle;Name;Typ"), never both; kind
+    and role for a row without its own, valid_until for all; dry_run (the default) only checks."""
+    rows: list[ImportRow] = Field(default_factory=list, max_length=triage.IMPORT_MAX)
+    csv: str | None = Field(default=None, max_length=50000)
+    kind: str = Field(default="sonstiges", pattern=KIND_PATTERN)
+    role: str = Field(default="", max_length=64)
+    valid_until: str | None = Field(default=None, pattern=r"^(\d{4}-\d{2}-\d{2})?$")
+    dry_run: bool = True
+
+
+async def _known_roles() -> tuple[set[str] | None, str | None]:
+    """The names of PacketFence's roles and None; without PacketFence set up, or when it does not answer, None and the note that
+    says why the roles of an import are not checked."""
+    if not await pf.configured():
+        return None, ROLES_UNCHECKED.format(why=PF_OFF)
+    try:
+        return {r["name"] for r in await pf.roles()}, None
+    except Exception as e:  # noqa: BLE001
+        return None, ROLES_UNCHECKED.format(why=str(e)[:200] or type(e).__name__)
+
+
+def _checked_rows(raw: list[dict], body: DeviceImportIn, existing: set[str], arp: dict[str, tuple[str, str]], known_roles: set[str] | None) -> list[dict]:
+    """The rows of an import as its answer lists them: each of raw (line, mac, role, name, kind as sent) with what would be stored
+    (the MAC normalized; role and kind of the request for a row without its own; without a name the one of the ARP table up to its
+    first dot, else "<vendor or Gerät> <the last three bytes of the MAC>") and its status: "error" with the reason (no MAC, a MAC
+    of an earlier row, an unknown type, a name that starts like a formula or is too long, a role PacketFence does not have),
+    "exists" for a device of the database (it stays as it is), else "ok". arp: MAC -> (name, vendor) of the ARP table."""
+    out, lines = [], {}    # lines: MAC -> the line that named it first
+    for r in raw:
+        mac = triage.mac_of(r["mac"])
+        row = {"line": r["line"], "mac": mac or r["mac"], "name": triage.unformula(r["name"].strip()), "role": r["role"].strip() or body.role.strip(),
+               "kind": r["kind"].strip().lower() or body.kind, "status": "ok", "reason": ""}
+        out.append(row)
+        if mac is None:
+            reason = BAD_MAC
+        elif mac in lines:
+            reason = TWICE.format(line=lines[mac])
+        else:
+            lines[mac] = r["line"]
+            if mac in existing:
+                row |= {"status": "exists", "reason": EXISTS}
+                continue
+            if not row["name"]:
+                arp_name, arp_vendor = arp.get(mac, ("", ""))
+                row["name"] = (arp_name.split(".")[0] or f"{triage.vendor_label(mac, arp_vendor)[0] or 'Gerät'} {mac[9:]}")[:NAME_MAX]
+            if row["kind"] not in KINDS:
+                reason = BAD_KIND.format(kind=row["kind"])
+            elif row["name"].startswith(csvout.FORMULA):
+                reason = FORMULA_NAME
+            elif len(row["name"]) > NAME_MAX:
+                reason = LONG_NAME
+            elif known_roles is not None and row["role"] and row["role"] not in known_roles:
+                reason = NO_ROLE.format(role=row["role"])
+            else:
+                continue
+        row |= {"status": "error", "reason": reason}
+    return out
+
+
+async def sync_job(macs: list[str]) -> None:
+    """The PacketFence sync of an import, after its answer (200 devices are 600 requests): pf.sync writes the state of each device
+    (pf_state, as the list shows it; the nightly sync catches up on what failed), then the kept sessions go, as in _save_device."""
+    await pf.sync(macs)
+    _sessions["items"] = None
+
+
+def schedule_sync(macs: list[str]) -> None:
+    """sync_job(macs) as a date job of the one scheduler (jobs.scheduler, imported here: jobs imports half the app), now;
+    misfire_grace_time None: a sync that starts late still runs."""
+    from jobs import scheduler
+    scheduler.add_job(sync_job, "date", args=[macs], misfire_grace_time=None)
+
+
+@router.post("/api/devices/import")
+async def import_devices(body: DeviceImportIn, user=Depends(auth.require(roles.AENDERN))):
+    """Releases several devices in one go: the ones picked in the lists (rows) or a CSV list (csv), at most triage.IMPORT_MAX.
+    With dry_run (the default) it only answers what would happen, per row. Else it stores, all or nothing: with a faulty row 422
+    and nothing is stored; a device of the database stays as it is; every other row goes the way of one device (a devices row,
+    released, the audit device_create, the PacketFence sync - in the background, sync_job - and the kept sessions dropped)."""
+    if bool(body.rows) == (body.csv is not None):
+        raise HTTPException(422, IMPORT_ONE_OF)
+    from_csv = body.csv is not None
+    raw = triage.parse_csv(body.csv) if from_csv else [{"line": i, **r.model_dump()} for i, r in enumerate(body.rows, 1)]
+    if len(raw) > triage.IMPORT_MAX:
+        raise HTTPException(422, IMPORT_TOO_MANY)
+    vu = _valid_until(body)
+    known_roles, note = await _known_roles()
+    async with db() as conn:
+        async with conn.execute("SELECT mac FROM devices") as cur:
+            existing = {r["mac"] for r in await cur.fetchall()}
+        async with conn.execute("SELECT mac, name, vendor FROM names") as cur:
+            arp = {r["mac"]: (r["name"] or "", r["vendor"] or "") for r in await cur.fetchall()}
+    rows = _checked_rows(raw, body, existing, arp, known_roles)
+    count = lambda status: sum(1 for r in rows if r["status"] == status)    # noqa: E731
+    answer = {"rows": rows, "ok": count("ok"), "exists": count("exists"), "errors": count("error"), "roles_checked": known_roles is not None,
+              "note": note}
+    if body.dry_run:
+        return answer
+    if answer["errors"]:
+        n = answer["errors"]
+        raise HTTPException(422, IMPORT_ERRORS.format(n="1 fehlerhafte Zeile" if n == 1 else f"{n} fehlerhafte Zeilen"))
+    source = "CSV-Import" if from_csv else "Sammel-Freigabe"
+    created = []
+    async with db() as conn:    # one transaction: all rows or none
+        for r in rows:
+            if r["status"] != "ok":
+                continue
+            cur = await conn.execute("INSERT INTO devices(mac, name, kind, notes, role, allowed, valid_until, created_by, updated_at) "
+                                     "VALUES (?,?,?,?,?,1,?,?,datetime('now')) ON CONFLICT (mac) DO NOTHING",
+                                     (r["mac"], r["name"], r["kind"], source, r["role"], vu, user["username"]))
+            if cur.rowcount:
+                created.append(r)
+            else:    # someone stored it since the check: it stays theirs
+                r |= {"status": "exists", "reason": EXISTS}
+        await conn.commit()
+    for r in created:
+        await audit(user["username"], "device_create", r["mac"], f"{r['name']} freigegeben=1 ({source})", role=user["role"])
+    if created:
+        _sessions["items"] = None    # as in _save_device; sync_job drops them again once PacketFence has the releases
+        schedule_sync([r["mac"] for r in created])
+    return answer | {"ok": count("ok"), "exists": count("exists"), "created": len(created)}
+
+
+@router.post("/api/devices/{mac}/reevaluate")
+async def reevaluate_device(mac: str, user=Depends(auth.require(roles.AENDERN))):
+    """„Neu bewerten“: PacketFence re-evaluates the access of the MAC now (CoA), for a released device it parks anyway or one that
+    does not switch over. 409 without PacketFence, 502 with its reason when it does not take it (a MAC it does not know); audited
+    either way. Without a zone: a MAC belongs to no switch, like the device database."""
+    mac = norm_mac(mac)
+    if not await pf.configured():
+        raise HTTPException(409, PF_OFF)
+    why = await pf.reevaluate(mac)
+    await audit(user["username"], "device_reevaluate", mac, why or "ok", role=user["role"])
+    if why:
+        raise HTTPException(502, REEVAL_FAILED.format(why=why))
+    _sessions["items"] = None    # the port switches: the next GET /api/pf/sessions asks PacketFence anew
+    return {"ok": True}
 
 
 @router.post("/api/devices/sync")

@@ -381,3 +381,27 @@ async def watched(macs: set[str]) -> dict[str, str]:
             async with conn.execute(f"SELECT mac, note FROM watch_macs WHERE mac IN ({', '.join('?' * len(part))})", part) as cur:
                 out |= {r["mac"]: r["note"] for r in await cur.fetchall()}
     return out
+
+
+async def first_seen(macs: set[str]) -> dict[str, str]:
+    """Of macs those with a sighting, each with its earliest first_seen at any place (MAC -> time); no query for none. The list
+    of unknown devices shows it as "seit" and takes "new" from it (Phase 4c, Task 10)."""
+    out: dict[str, str] = {}
+    wanted = sorted(macs)
+    if not wanted:
+        return out
+    async with db() as conn:
+        for i in range(0, len(wanted), IN_CHUNK):
+            part = wanted[i:i + IN_CHUNK]
+            async with conn.execute(f"SELECT mac, min(first_seen) FROM sightings WHERE mac IN ({', '.join('?' * len(part))}) GROUP BY mac",
+                                    part) as cur:
+                out |= dict(await cur.fetchall())
+    return out
+
+
+async def baselines() -> dict[int, str]:
+    """Per switch with a sighting its earliest first_seen (switch id -> time): the first recording of the switch, its stock. A
+    device first seen then is not new."""
+    async with db() as conn:
+        async with conn.execute("SELECT switch_id, min(first_seen) FROM sightings GROUP BY switch_id") as cur:
+            return dict(await cur.fetchall())

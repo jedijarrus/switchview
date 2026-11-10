@@ -121,6 +121,8 @@ MATRIX_4C: dict = {
     ("GET", "/api/bulk/{blk}"): "lesen",
     ("POST", "/api/bulk/{blk}/cancel"): "aendern",
     ("POST", "/api/bulk/{blk}/confirm"): "aendern",
+    ("POST", "/api/devices/import"): "aendern",
+    ("POST", "/api/devices/{mac}/reevaluate"): "aendern",
 }
 # Who is logged in now, as PacketFence holds it (the table of docs/anmeldungen.md)
 MATRIX_AUTH: dict = {

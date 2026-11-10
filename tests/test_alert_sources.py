@@ -133,7 +133,7 @@ async def test_a_new_unknown_device_is_told_but_not_in_the_baseline_nor_a_known_
     await poller.poll_switch(sid)
     assert queued() == [("unknown_device", "Neues unbekanntes Gerät an A Port 1")]
     assert told()[0][2:] == ("MAC aa:bb:cc:00:00:02 im VLAN 20, zum ersten Mal gesehen.", f"unknown_device:unknown:{MAC2}", sid, "A",
-                             {"Switch": "A", "Port": "1"})
+                             {"Switch": "A", "Port": "1", "_view": "devices"})
 
 
 async def test_a_new_device_names_its_ip_and_name_and_is_told_once(net, monkeypatch):
@@ -180,6 +180,16 @@ async def test_a_watched_mac_without_a_note_names_its_ip_and_is_told_in_the_base
     dbfix.query("INSERT INTO names(mac, ip, name) VALUES (?, '10.0.20.9', '')", (MAC,))
     await add(net, "A", "10.0.0.1", "procurve", W_SAMPLE, fdb(PORT1, MAC, "20"))     # the switch's first recording
     assert [r[:3] for r in told()] == [("watch", f"Beobachtete MAC {MAC} gesehen: A Port 1", "zum ersten Mal gesehen (VLAN 20, IP 10.0.20.9).")]
+
+
+async def test_only_the_message_of_a_new_device_links_to_the_devices_view(net, monkeypatch):    # Phase 4c, T10-i
+    await configure(mail=True, events=EVERY)
+    await history.watch_add(MAC2, "", apifix.user("aendern"))
+    sid = await add(net, "A", "10.0.0.1", "procurve", W_SAMPLE, fdb(PORT1, MAC, "20"))
+    learn(net, "10.0.0.1", fdb(PORT1, MAC, "20"), fdb(PORT1, MAC2, "20"))
+    await poller.poll_switch(sid)
+    assert {r[0]: r[6] for r in told()} == {"unknown_device": {"Switch": "A", "Port": "1", "_view": "devices"},
+                                            "watch": {"Switch": "A", "Port": "1"}}
 
 
 async def test_the_watch_list_answers_by_mac_with_the_last_sighting(database):

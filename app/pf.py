@@ -93,6 +93,20 @@ async def _reevaluate(cl, mac: str) -> int | None:
     return None if 200 <= r.status_code < 300 else r.status_code
 
 
+async def reevaluate(mac: str) -> str | None:
+    """Asks PacketFence to re-evaluate the access of mac now (CoA), for a device that is released but does not switch over. None
+    when PacketFence takes it; else the reason: it does not know the device (404), its status, or the text of whatever went wrong
+    on the way (session's RuntimeError, an httpx error at the login or the request), cut to 200 characters. Never raises."""
+    try:
+        async with session() as cl:
+            code = await _reevaluate(cl, mac)
+    except Exception as e:  # noqa: BLE001
+        return str(e)[:200] or type(e).__name__
+    if code is None:
+        return None
+    return "PacketFence kennt dieses Gerät nicht (HTTP 404)" if code == 404 else f"HTTP {code}"
+
+
 async def _sync_one(cl, role_ids: dict, dev) -> str | None:
     """Writes the device dev to its node (registered with its role, or unregistered) and re-evaluates it. RuntimeError for a role
     PacketFence does not have, or when it does not confirm reading or writing the node. A failed re-evaluation is no error, the node
