@@ -94,7 +94,7 @@ up mail and Teams: [History and alerts](#history-and-alerts).
 
 Bulk changes, confirmation, REST API and triage notes (German): [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md) (what was
 built, the rights per route, the REST API with curl examples, known limits, checks before production use, what to do on an update,
-decisions).
+what comes later, decisions).
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
@@ -265,10 +265,15 @@ cookie); a bearer value without `svt_` — a proxy in front may send its own, oa
 its id_token so — leaves the cookie path as it is. A token's role is its user's app roles, stored at the login it was created in,
 against the role mapping of now, capped by the token's maximum role; its zones are the user's. Managing tokens and approving a
 four-eyes request need a signed-in person, not a token, and the emergency login gets no token at all. A role withdrawn in Entra
-reaches a token only when it expires or is revoked: revoke a user's tokens when taking away a role (each user revokes their own,
-an Admin any under Settings → "Alle API-Tokens"). Invalid tokens are throttled: after 10 within 60 seconds every further invalid one
-is answered 429, a log line names the sender, never the token; a valid token is never throttled. Every audit entry made through a
-token names it. The REST flow: [REST API](#rest-api); details in [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md).
+reaches a token only when it expires or is revoked: revoke a user's tokens when taking away a role (each user revokes their own, an
+Admin any under Settings → "Alle API-Tokens"; the emergency login, an Admin without tokens of its own, lists and revokes any there
+too, also while SSO is down). A token does not check the login gate again: narrowing `ENTRA_ALLOWED_ROLES` or
+`ENTRA_ALLOWED_GROUPS`, or switching SSO off, reaches existing tokens only when they expire, so revoke the tokens of whoever it
+shuts out. A token with the role Admin can switch the four-eyes principle off and then change alone, as an Admin session can: give a
+script a maximum role below Admin (Ändern for one that changes ports, Lesen for monitoring). Invalid tokens are throttled: after 10
+within 60 seconds every further invalid one is answered 429, a log line names the sender, never the token; a valid token is never
+throttled. Every audit entry made through a token names it. The REST flow: [REST API](#rest-api); details in
+[docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md).
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
@@ -490,6 +495,25 @@ of a bulk change is that of its run: with confirmation it ends `done` while its 
 counts the waiting ones, `counts.unconfirmed` those that ended without a confirmation after it (alerted as
 "Änderung ohne Bestätigung zurückgenommen" per change, not as a failed bulk change). Whoever starts one with confirmation confirms
 after the run with `POST /api/bulk/<id>/confirm` while `counts.pending` is above 0.
+
+The triage queue is `GET /api/devices/unknown` (any role): every unknown device a poll learned on an access port, those without a
+flag first and the new ones first among them, each with `suggest` (`kind`, `label`, `role`, `role_count`, `port_mode`, `why`,
+`hint`), `first_seen` and `new`. A suggestion is a hint and is never applied by itself. `POST /api/devices/import` (Ändern) releases
+several devices at once, from `rows` or from a CSV list (`csv`, one device per line `MAC;Rolle;Name;Typ`, at most 200): with
+`"dry_run": true`, the default, it only answers per row what would happen (`ok`, `exists`, `error` with its reason) and stores
+nothing; with `"dry_run": false` it stores only when no row is faulty (else 422), a device already in the database stays as it is,
+and PacketFence is synced in the background. Send a `role`: a row without one is released into PacketFence's role `default`.
+`POST /api/devices/<mac>/reevaluate` asks PacketFence to re-evaluate the access of a device it still parks
+(CoA):
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/devices/unknown" \
+     | jq '[.[] | select(.suggest.kind == "telefon") | {mac, sw, port, role: .suggest.role, why: .suggest.why}]'
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"rows": [{"mac": "80:5e:c0:00:00:11"}], "kind": "telefon", "role": "voice"}' "$SV/api/devices/import" | jq '{ok, exists, errors, rows}'
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"rows": [{"mac": "80:5e:c0:00:00:11"}], "kind": "telefon", "role": "voice", "dry_run": false}' "$SV/api/devices/import" | jq '{created}'
+```
 
 ## ProCurve notes
 
