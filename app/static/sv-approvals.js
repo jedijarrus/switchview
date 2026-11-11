@@ -59,7 +59,7 @@
       + `<td>${esc(a.summary)}<span class="cellnote">${esc(a.kind_label)}</span></td><td>${apprPill(a)}${a.status === "open" ? `<span class="cellnote">läuft ab ${esc(fmtTime(a.expires_at))}</span>` : ""}</td>`
       + `<td><div class="actions">${btns(a)}</div></td></tr>`).join("") + `</tbody></table></div>` : `<div class="empty">Keine Anfragen.</div>`;
     v.innerHTML = `<section class="card"><div class="card-h"><h2>Freigaben</h2><span class="sub">neueste zuerst · die letzten 100</span></div><div class="card-b" style="display:grid;gap:10px">
-      <p class="note" style="margin:0">${ME && ME.four_eyes ? "Vier-Augen-Prinzip an: Änderungen im Expertenmodus werden erst nach der Freigabe durch eine zweite Person mit der Rolle „Freigeben“ ausgeführt."
+      <p class="note" style="margin:0">${ME && ME.four_eyes ? "Vier-Augen-Prinzip an: Änderungen im Expertenmodus und Sammeländerungen werden erst nach der Freigabe durch eine zweite Person mit der Rolle „Freigeben“ ausgeführt."
         : "Vier-Augen-Prinzip aus: offene Anfragen lassen sich weiter prüfen, ablehnen oder zurückziehen."}</p>
       ${reviewer ? "" : `<p class="note gate">Anfragen prüfen und freigeben braucht die Rolle „Freigeben“.</p>`}</div>${list}</section>`;
     v.onclick = async e => {

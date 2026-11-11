@@ -76,13 +76,14 @@
         <label class="field"><span>Eine Zeile je App-Rolle</span><textarea id="s-scopes" rows="4" placeholder="SwitchView.Zone.EK = EK, Lager" aria-describedby="s-scopes-hint${lossy.length ? " s-scopes-lossy" : ""}"${admin ? "" : " disabled"}></textarea><span class="hint" id="s-scopes-hint">„Ohne Zone“ steht für Switches ohne Zone.</span></label></div>`
       + (admin ? cardFoot("s-zones-save", "Zonen") : "");
   }
-  // The card "Vier-Augen-Prinzip" (four_eyes and approval_hours of GET /api/settings)
+  // The card "Vier-Augen-Prinzip" (four_eyes and approval_hours of GET /api/settings); the principle covers every change in expert
+  // mode and, since Phase 4c, every bulk change (approvals.needs_approval)
   function fourEyesCard(s, admin) {
     const dis = admin ? "" : " disabled";
     return setHead("Vier-Augen-Prinzip") + `<div class="card-b set-b">
-        <label class="check"><input type="checkbox" id="s-4e"${s.four_eyes ? " checked" : ""}${dis}> Änderungen im Expertenmodus brauchen die Freigabe durch eine zweite Person (Rolle „Freigeben“ oder „Admin“)</label>
+        <label class="check"><input type="checkbox" id="s-4e"${s.four_eyes ? " checked" : ""}${dis}> Änderungen im Expertenmodus und Sammeländerungen brauchen die Freigabe durch eine zweite Person (Rolle „Freigeben“ oder „Admin“)</label>
         <label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" max="168" value="${esc(s.approval_hours)}"${dis}></label>
-        <p class="note warn" style="margin:0">Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit „Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus dann nicht.</p></div>`
+        <p class="note warn" style="margin:0">Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit „Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus und Sammeländerungen dann nicht.</p></div>`
       + (admin ? cardFoot("s-4save", "Vier-Augen-Prinzip") : "");
   }
 

@@ -152,8 +152,9 @@ def test_withdraw_and_ask_again_hold_the_role_and_the_zone(role, zones, four, st
 # Beyond the brief: the card says whether the principle is on, why a role below Freigeben does not review, and each row names the
 # requester with the role, the change with its kind and the status with the expiry of an open one (escaped)
 @pytest.mark.parametrize("role, four, sentence, gate", [
-    ("aendern", True, "Vier-Augen-Prinzip an: Änderungen im Expertenmodus werden erst nach der Freigabe durch eine zweite Person mit der "
-                      "Rolle „Freigeben“ ausgeführt.", True),
+    # (Phase 4c, Task 12: since Task 8 every bulk change needs the approval as well, the sentence names both)
+    ("aendern", True, "Vier-Augen-Prinzip an: Änderungen im Expertenmodus und Sammeländerungen werden erst nach der Freigabe durch eine "
+                      "zweite Person mit der Rolle „Freigeben“ ausgeführt.", True),
     ("freigeben", False, "Vier-Augen-Prinzip aus: offene Anfragen lassen sich weiter prüfen, ablehnen oder zurückziehen.", False)])
 def test_the_view_says_whether_four_eyes_are_on_and_names_each_request(role, four, sentence, gate):
     rows = [{**A, "own": True},
@@ -355,7 +356,7 @@ FOUR_EYES_CARD = ('(async () => { const calls = []; %s api = async (m, u, b) => 
                   + ' : u === "/api/zone-scopes" ? {entries: []} : u === "/api/auth/me" ? {name: "x", role: "admin", zones: null, four_eyes: true} : '
                   'u.startsWith("/api/approvals") ? [] : {ok: true}; }; await renderSettings(); const html = $("#view").innerHTML; %s })()')
 ONE_PERSON = ("Niemand kann die eigene Anfrage freigeben, auch nicht mit „Admin“, und der Notfall-Login gibt nichts frei. Mit nur einer Person mit "
-              "„Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus dann nicht.")
+              "„Freigeben“ oder „Admin“ gehen Änderungen im Expertenmodus und Sammeländerungen dann nicht.")
 ADMIN = 'ME = {name: "x", role: "admin", zones: null, four_eyes: false};'
 
 
@@ -366,8 +367,8 @@ def test_the_four_eyes_card_saves_and_rereads_the_user():
     html, calls, toasts, four, last, disabled = in_dom(FOUR_EYES_CARD % (ADMIN, act))
     assert calls == [["PUT", "/api/settings/approvals", {"four_eyes": True, "hours": 48}], ["GET", "/api/auth/me", None]]
     assert (toasts, four, last, disabled) == (["Gespeichert"], True, "/api/approvals?status=open", False)
-    assert ('<label class="check"><input type="checkbox" id="s-4e"> Änderungen im Expertenmodus brauchen die Freigabe durch eine zweite Person '
-            '(Rolle „Freigeben“ oder „Admin“)</label>') in html
+    assert ('<label class="check"><input type="checkbox" id="s-4e"> Änderungen im Expertenmodus und Sammeländerungen brauchen die Freigabe durch '
+            'eine zweite Person (Rolle „Freigeben“ oder „Admin“)</label>') in html
     assert ('<label class="field" style="max-width:220px"><span>Anfragen verfallen nach (Stunden)</span><input id="s-4h" type="number" min="1" '
             'max="168" value="24"></label>') in html
     assert f'<p class="note warn" style="margin:0">{ONE_PERSON}</p>' in html
