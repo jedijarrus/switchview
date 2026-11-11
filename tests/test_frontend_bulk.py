@@ -394,18 +394,35 @@ def test_a_refused_confirm_all_names_how_many_and_why():                        
 
 
 def test_the_sections_of_a_request_name_switch_ports_and_commands():
+    # SW-A over SSH (its driver's autosave says nothing there), SW-C without a plan, SW-D over SNMP at a switch that does not save
     secs = [{"switch_id": A, "switch": "SW-<A>", "ports": ["1", "2"], "mechanism": "ssh", "commands": ["vlan 30 untagged 1,2", "x <y>"],
-             "warnings": ["Port 1: <Achtung>"], "token": "t"},
+             "warnings": ["Port 1: <Achtung>"], "token": "t", "autosave": True},
             {"switch_id": C, "switch": "SW-C", "ports": ["5"], "mechanism": None, "commands": [], "warnings": [], "token": None, "status": "error",
-             "reason": "Switch <deaktiviert>", "matches": False}]
+             "reason": "Switch <deaktiviert>", "matches": False},
+            {"switch_id": 4, "switch": "SW-D", "ports": ["Gi1/0/2"], "mechanism": "snmp", "commands": ["Port Gi1/0/2: Access-VLAN 1 → 20"],
+             "warnings": [], "token": "t-d", "autosave": False}]
     plain, review = bulk(f'return [bulkSectionsHtml({json.dumps(secs)}), bulkSectionsHtml({json.dumps(secs)}, true)]; ')
     assert ('<div class="bulk-sec"><p style="margin:0"><b>SW-&lt;A&gt;</b> <span class="muted">· 2 Ports: <span class="mono">1, 2</span></span></p>'
             '<div class="banner warn"><ul class="blist"><li>Port 1: &lt;Achtung&gt;</li></ul></div>'
             '<pre class="code">vlan 30 untagged 1,2\nx &lt;y&gt;</pre></div>') in plain
     assert ('<span class="muted">· 1 Port: <span class="mono">5</span></span></p><p class="note gate">Switch &lt;deaktiviert&gt;</p>'
             '<pre class="code">–</pre>') in plain
+    # Final review of Phase 4c, finding 5: the reviewer is told that this switch is changed over SNMP and not saved
+    assert ('<b>SW-D</b> <span class="muted">· 1 Port: <span class="mono">Gi1/0/2</span> · per SNMP, nicht gespeichert</span></p>'
+            '<pre class="code">Port Gi1/0/2: Access-VLAN 1 → 20</pre>') in plain
+    assert plain.count("per SNMP") == review.count("per SNMP") == 1
     assert "passt nicht mehr" not in plain and review.count('<span class="pill warn">passt nicht mehr</span>') == 1
     assert review.index("SW-C") < review.index("passt nicht mehr")
+
+
+@pytest.mark.parametrize("autosave, mark", [(False, " · per SNMP, nicht gespeichert"), (True, " · per SNMP, automatisch gespeichert"),
+                                            (None, " · per SNMP")], ids=["unsaved", "saves-itself", "request-from-before"])
+def test_a_section_over_snmp_says_whether_the_switch_keeps_the_change(autosave, mark):
+    """Finding 5 of the final review: as the requester's preview (previewBody) says it - a ProCurve over SNMP saves every SET by
+    itself (snmp_autosave), any other switch keeps the change unsaved; a request stored before the review has no autosave."""
+    sec = {"switch_id": A, "switch": "SW-A", "ports": ["5"], "mechanism": "snmp", "commands": ["x"], "warnings": [], "token": "t"}
+    html = bulk(f'return bulkSectionsHtml({json.dumps([sec if autosave is None else {**sec, "autosave": autosave}])}); ')
+    assert f'<b>SW-A</b> <span class="muted">· 1 Port: <span class="mono">5</span>{mark}</span></p>' in html
 
 
 def test_the_view_is_reached_by_its_hash():

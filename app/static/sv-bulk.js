@@ -187,9 +187,13 @@
 
   // The sections of a bulk request as its requester saw them (the stored preview) or, with review, as the reviewer's fresh preview
   // plans them now: per switch its name, its ports, why it cannot run now (reason), its warnings and what goes out; with review a
-  // switch that is no longer the request's (matches false) says so
+  // switch that is no longer the request's (matches false) says so. A switch written over SNMP says whether it keeps the change
+  // unsaved, as the requester's preview did (previewBody): saved by the switch itself only with autosave (snmp_autosave, a ProCurve);
+  // a request stored before autosave was part of a section says only "per SNMP"
+  const bulkWay = s => (s.mechanism !== "snmp" ? "" : s.autosave === true ? " · per SNMP, automatisch gespeichert"
+    : s.autosave === false ? " · per SNMP, nicht gespeichert" : " · per SNMP");
   const bulkSectionsHtml = (sections, review = false) => (sections || []).map(s =>
-    `<div class="bulk-sec"><p style="margin:0"><b>${esc(s.switch)}</b> <span class="muted">· ${SVLogic.plural(s.ports.length, "Port", "Ports")}: <span class="mono">${esc(s.ports.join(", "))}</span></span>`
+    `<div class="bulk-sec"><p style="margin:0"><b>${esc(s.switch)}</b> <span class="muted">· ${SVLogic.plural(s.ports.length, "Port", "Ports")}: <span class="mono">${esc(s.ports.join(", "))}</span>${bulkWay(s)}</span>`
     + `${review && s.matches === false ? ` <span class="pill warn">passt nicht mehr</span>` : ""}</p>${s.reason ? `<p class="note gate">${esc(s.reason)}</p>` : ""}`
     + `${warnList(s.warnings)}<pre class="code">${esc((s.commands || []).join("\n") || "–")}</pre></div>`).join("");
 

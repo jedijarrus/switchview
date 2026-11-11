@@ -122,8 +122,9 @@ async def confirm_bulk(blk: int, user=Depends(auth.require(roles.AENDERN))):
 # ── Task 8: four eyes, the kind bulk_change ────────────────────────────────────────────────────────────────────────────────────────
 # Why a switch whose commands are those of the request does not match in the reviewer's preview: the planner chose another write way
 OTHER_WAY = "Der Schreibweg von jetzt ist ein anderer als der der Vorschau der Anfrage"
-# The keys of a switch's preview (api_changes.preview_answer) a request stores and a reviewer sees, beside switch_id, switch and ports
-SECTION_KEYS = ("mechanism", "commands", "warnings", "token")
+# The keys of a switch's preview (api_changes.preview_answer) a request stores and a reviewer sees, beside switch_id, switch and ports;
+# autosave (whether the driver saves an SNMP change by itself) since the final review of Phase 4c: a request stored before has none
+SECTION_KEYS = ("mechanism", "commands", "warnings", "token", "autosave")
 
 
 async def request_parts(body: BulkIn) -> tuple[str, dict, dict]:
@@ -157,7 +158,7 @@ async def _preview_bulk(a: dict, user: dict) -> dict:
     async def planned(item: BulkItemIn) -> dict:
         async with gate:
             s = await bulk.section(user, BulkTarget(switch_id=item.switch_id, ports=item.ports), body.change, body.expert, four_eyes)
-        p = s["preview"] or {"mechanism": None, "commands": [], "warnings": [], "token": None}
+        p = s["preview"] or {"mechanism": None, "commands": [], "warnings": [], "token": None, "autosave": None}
         ready = s["status"] == "ready"
         other_way = ready and p["token"] == item.token and p["mechanism"] != item.mechanism
         return ({"switch_id": s["switch_id"], "switch": s["switch"], "ports": s["ports"], "status": s["status"],

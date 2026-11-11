@@ -130,7 +130,7 @@ def test_a_bulk_request_stores_what_was_sent_and_what_was_seen(world, client):
     assert a["preview"]["summary"] == a["summary"] == "VLAN 30 · 2 Ports an 2 Switches"
     assert a["preview"]["sections"][1] == {"switch_id": world.b, "switch": "B", "ports": ["1"], "mechanism": "ssh",
                                            "commands": ["vlan 30 untagged 1"], "warnings": [],
-                                           "token": a["payload"]["items"][1]["token"]}
+                                           "token": a["payload"]["items"][1]["token"], "autosave": True}
     assert a["preview"]["skipped"] == [{"switch_id": world.c, "switch": "C", "reason": "Port 1: Uplink"}]
     [row] = client.get("/api/approvals", headers=H("ben")).json()
     assert (row["bulk_id"], row["change_id"], row["switch_name"], row["switch_zone"]) == (None, None, None, None)
@@ -207,7 +207,7 @@ def test_the_reviewers_preview_names_what_runs_now(world, client):
     assert (p["kind"], p["summary"], p["token"]) == ("bulk_change", a["summary"], a["preview"]["token"])
     assert p["sections"][0] == {"switch_id": world.a, "switch": "A", "ports": ["1"], "status": "ready", "reason": "", "mechanism": "ssh",
                                 "commands": ["vlan 30 untagged 1"], "warnings": [], "token": a["preview"]["sections"][0]["token"],
-                                "matches": True}
+                                "autosave": True, "matches": True}
     world.plans["A"] = {"blocked": [{"port": "1", "reason": "Uplink"}]}
     world.plans["B"] = {"mechanism": "snmp"}
     dbfix.query("DELETE FROM switches WHERE id = ?", (world.c,))
@@ -216,6 +216,7 @@ def test_the_reviewers_preview_names_what_runs_now(world, client):
     assert [(s["switch"], s["status"], s["reason"], s["matches"]) for s in p["sections"]] == [
         ("A", "blocked", "Port 1: Uplink", False), ("B", "ready", api_bulk.OTHER_WAY, False),
         (f"#{world.c}", "error", "Switch nicht gefunden", False)]
+    assert [s["autosave"] for s in p["sections"]] == [True, True, None]                  # None: no plan, no driver to ask
 
 
 def test_approving_starts_the_bulk_once_under_the_requesters_name(world, client):
