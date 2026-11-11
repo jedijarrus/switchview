@@ -512,3 +512,36 @@ def test_a_bulk_request_is_asked_again_through_the_bulk_preview(role, four, offe
     assert got == [{"targets": [{"switch_id": 1, "ports": ["1", "2"]}, {"switch_id": 3, "ports": ["5"]}], "change": {"untagged": "30"}, "expert": False},
                    {"onError": "continue"}]
     assert calls == ["/api/approvals?status=all&limit=100", "/api/approvals/4"]          # no netmap: the preview reads what it needs
+
+
+# Phase 4c, Task 12 (browser check): how a request will run once approved stands in neither preview - with confirmation it waits
+# for "Bestätigen" and is taken back without it, a bulk change stops at its first failure or goes on. The review and the details
+# say it from the request's payload; a port request without confirmation says nothing, as before.
+RUN_CONFIRM = "mit Bestätigung (%s) – ohne „Bestätigen“ nimmt SwitchView sie danach zurück"
+RUNS = [(REVIEW_A, None),
+        ({**REVIEW_A, "payload": {**PAYLOAD, "confirm_minutes": 5}}, RUN_CONFIRM % "5 Minuten"),
+        ({**REVIEW_A, "payload": {**PAYLOAD, "confirm_minutes": 1}}, RUN_CONFIRM % "1 Minute"),
+        (BULK_A, "bei einem Fehler weitermachen"),
+        ({**BULK_A, "payload": {**BULK_PAYLOAD, "on_error": "stop", "confirm_minutes": 2}}, "bei einem Fehler stoppen · " + RUN_CONFIRM % "2 Minuten")]
+RUN_IDS = ["port", "port-confirm", "port-one-minute", "bulk-continue", "bulk-stop-confirm"]
+
+
+@pytest.mark.parametrize("full, said", RUNS, ids=RUN_IDS)
+def test_the_review_says_how_the_request_will_run(full, said):
+    fresh = BULK_FRESH if full["kind"] == "bulk_change" else {**SNMP_PLAN, "matches": True}
+    title, body, labels = review(bulk_answers(preview=fresh, full=full), BULK_REVIEW + 'return ' + DIALOG + ';')
+    assert labels == ["Abbrechen", "Ablehnen", "Freigeben und ausführen"]
+    if said is None:
+        assert 'id="ap-run"' not in body and "Ausführung" not in body
+    else:    # after the preview, right before the comment
+        assert body.endswith('<p class="note" id="ap-run" style="margin:0">Ausführung: %s</p>' % said + COMMENT_FIELD)
+
+
+@pytest.mark.parametrize("full, said", RUNS, ids=RUN_IDS)
+def test_the_details_say_how_the_request_will_run(full, said):
+    full = {**full, "own": True}
+    title, body, foot = view_click('await click("ad"); return ' + DIALOG + ';', row=full, full=full)
+    assert title == "Anfrage #4" and ("<dt>Ausführung</dt><dd>%s</dd>" % said in body if said else "Ausführung" not in body)
+    assert body.index("<dt>Grund</dt>") < body.index("<dt>Änderung</dt>")
+    if said:
+        assert body.index("<dt>Änderung</dt>") < body.index("<dt>Ausführung</dt>") < body.index("Vorschau des Antragstellers")

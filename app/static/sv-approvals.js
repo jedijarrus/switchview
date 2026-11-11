@@ -96,15 +96,23 @@
     return bulkSectionsHtml(a.preview && a.preview.sections) + (skipped.length ? `<div><p class="eyebrow">Übersprungen</p><ul class="blist">`
       + skipped.map(s => `<li>${esc(s.switch)}: ${esc(s.reason)}</li>`).join("") + `</ul></div>` : "");
   };
+  // How request a runs once approved, as far as no preview says it (its payload): a bulk change stops at its first failure or goes
+  // on, and either kind may run with confirmation - then someone has to confirm in time, a reviewer should know that; "" else
+  const apprRun = a => {
+    const p = a.payload || {}, m = p.confirm_minutes;
+    return [isBulk(a) ? `bei einem Fehler ${p.on_error === "continue" ? "weitermachen" : "stoppen"}` : "",
+      m ? `mit Bestätigung (${SVLogic.plural(m, "Minute", "Minuten")}) – ohne „Bestätigen“ nimmt SwitchView sie danach zurück` : ""].filter(Boolean).join(" · ");
+  };
   // Request a with everything it says: who asked and when, its status (open: until when), who decided, the comment, the reason of a
-  // stale one, the change (or the bulk change) an approval started, and the preview its requester saw
+  // stale one, the change (or the bulk change) an approval started, how it runs (apprRun) and the preview its requester saw
   function approvalDetails(a) {
+    const run = apprRun(a);
     const decided = ["approved", "rejected", "stale"].includes(a.status) && a.decided_by;
     const kv = [["Angefordert von", `${apprWho(a)} (${esc(SVLogic.roleLabel(a.requester_role))}) · ${esc(fmtTime(a.requested_at))}`],
       ["Status", apprPill(a) + (a.status === "open" ? ` <span class="muted">läuft ab ${esc(fmtTime(a.expires_at))}</span>` : "")],
       ["Prüfer", decided ? esc(a.decided_by) + (a.decided_at ? ` · ${esc(fmtTime(a.decided_at))}` : "") : "–"],
       ["Kommentar", esc(a.comment) || "–"], ["Grund", esc(a.reason) || "–"],
-      ["Änderung", a.bulk_id ? `Sammeländerung #${a.bulk_id}` : a.change_id ? `#${a.change_id}` : "–"]];
+      ["Änderung", a.bulk_id ? `Sammeländerung #${a.bulk_id}` : a.change_id ? `#${a.change_id}` : "–"], ...(run ? [["Ausführung", esc(run)]] : [])];
     modal(`Anfrage #${a.id}`, `<p style="margin:0"><b>${esc(a.summary)}</b> <span class="muted">· ${apprWhere(a)} · ${esc(a.kind_label)}</span></p>
       <dl class="kv">${kv.map(([k, x]) => `<dt>${k}</dt><dd>${x}</dd>`).join("")}</dl>
       <div><p class="eyebrow">Vorschau des Antragstellers</p>${isBulk(a) ? apprBulkHtml(a) : `<pre class="code">${apprCmds(a)}</pre>`}</div>`,
@@ -118,7 +126,8 @@
   // an open request (rejecting needs no preview; Task 10). After a decision the count, and the list when it is shown, are read
   // again. A dialog closed or replaced while the switch is read opens nothing (modalShown). A bulk request (isBulk): every switch
   // planned now, shown as sections (bulkSectionsHtml, a switch that is no longer the request's marked), approved only when every
-  // one matches; then the dialog closes and the run of the bulk change opens (openBulk).
+  // one matches; then the dialog closes and the run of the bulk change opens (openBulk). Under the preview: how the request runs
+  // (apprRun), which no preview says.
   async function reviewApproval(id) {
     const title = `Anfrage #${id} prüfen`, wait = modal(title, `<div class="empty">Lese die aktuelle Konfiguration …</div>`, []);
     const comment = `<label class="field"><span>Kommentar (optional)</span><textarea id="ap-comment" rows="2" maxlength="500"></textarea></label>`;
@@ -140,14 +149,14 @@
     }
     if (!modalShown(wait)) return;
     // The emergency login may reject but never approves (a shared account, not a person: api_approvals.EMERGENCY, T7-e)
-    const approve = r.matches && !(ME && ME.method === "local");
+    const approve = r.matches && !(ME && ME.method === "local"), run = apprRun(a);
     const body = `<p class="note" style="margin:0">Angefordert von <b>${apprWho(a)}</b> (${esc(SVLogic.roleLabel(a.requester_role))}) · ${esc(fmtTime(a.requested_at))}</p>`
       + (isBulk(a) ? `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${apprWhere(a)}</span></p>` + bulkSectionsHtml(r.sections, true) : previewBody(s, r, a.payload))
       + (r.matches ? "" : `<div class="error"><b>Freigeben geht nicht:</b> ${isBulk(a) ? "Mindestens ein Switch passt nicht mehr zur Anfrage: er hat sich seit der Anfrage geändert, ist gesperrt oder nicht lesbar."
         : "Der Switch hat sich seit der Anfrage geändert, diese Vorschau weicht von der des Antragstellers ab."} Ablehnen oder neu anfordern lassen.</div>`
         + `<details class="adv"><summary>Vorschau des Antragstellers</summary>${isBulk(a) ? apprBulkHtml(a) : `<pre class="code">${apprCmds(a)}</pre>`}</details>`)
       + (r.matches && !approve ? `<p class="note gate">Der Notfall-Login gibt keine Anfrage frei: er ist kein persönliches Konto.</p>` : "")
-      + comment;
+      + (run ? `<p class="note" id="ap-run" style="margin:0">Ausführung: ${esc(run)}</p>` : "") + comment;
     const btns = [{ label: "Abbrechen", onClick: closeModal }, reject];
     if (approve) btns.push({ label: "Freigeben und ausführen", cls: "primary", onClick: async b => {
       b.disabled = true;
