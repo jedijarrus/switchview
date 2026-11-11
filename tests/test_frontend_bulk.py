@@ -179,6 +179,15 @@ def test_the_bulk_choice_promises_a_save_only_when_every_switch_saves(ways, save
     assert "Mit Bestätigung ausführen: " + ("erst speichern, wenn ich bestätige – " if saves else "") + "ohne Bestätigung nach <select" in body
 
 
+def test_the_reason_of_a_skipped_switch_goes_out_cut_to_300_characters():
+    """Open from the Task 9 review (final review of Phase 4c, finding 6): BulkSkip takes at most 300 characters, so the start cuts a
+    longer reason - by characters, not by UTF-16 units (a character outside the BMP is two)."""
+    long = "ä" * 200 + "\U0001d518" * 150
+    sent = bulk(FILLED + PREVIEW_CLICK + CLICK % "Ausführen (1 Switch)" + 'return posts()[1][2].skipped; ',
+                preview={**PREVIEW, "sections": [SEC_A, {**SEC_C, "reason": long}]})
+    assert sent == [{"switch_id": C, "reason": "ä" * 200 + "\U0001d518" * 100}]
+
+
 def test_a_skipped_section_shows_its_reason_escaped():
     odd = {**PREVIEW, "sections": [SEC_A, {**SEC_C, "switch": "SW-<C>", "reason": "Lesen <fehlgeschlagen> & mehr", "selection": "Zugangsports <x>"}]}
     body = bulk(FILLED + PREVIEW_CLICK + 'return $("#m-body").innerHTML; ', preview=odd)
