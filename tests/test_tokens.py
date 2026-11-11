@@ -17,14 +17,17 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from tokenfix import bare, bearer, mint, signed
 
+import api_changes
 import api_tokens
 import apifix
 import auth
+import changes
 import db
 import dbfix
 import main
@@ -269,3 +272,36 @@ async def test_two_tokens_at_once_cannot_pass_the_limit(login_api, monkeypatch):
     monkeypatch.setattr(auth, "db", slow_insert)
     both = await asyncio.gather(*(auth.create_token(apifix.user("aendern"), [], name, 90, None) for name in ("x", "y")), return_exceptions=True)
     assert sorted(type(r).__name__ for r in both) == ["TokenLimit", "dict"] and dbfix.query("SELECT count(*) FROM api_tokens") == [(20,)]
+
+
+async def test_the_audit_of_a_change_started_with_a_token_names_it(mapping, entra, monkeypatch):
+    """Final review of Phase 4c, finding 10 (T2-g): the change_* entries of a change are written by its run, a task of its own
+    (api_changes.spawn), not by the request of /apply; they name the token because that task starts with a copy of the request's
+    context. A run moved to a context of its own (the scheduler's, say) would drop the token from the audit. The request goes through
+    httpx on the app's own loop, so the task runs to its end (a TestClient ends its loop with the request)."""
+    t = mint(signed(mapping, entra))
+    sid = dbfix.insert_switch(name="SW", host="10.0.0.1", zone="")
+
+    async def plan(row, body):
+        shown = ["vlan 30 untagged 5"]
+        return ({"shown": shown, "commands": shown, "blocked": [], "mechanism": "ssh", "warnings": [], "desired": {"5": {"u": "30"}},
+                 "before": {"5": {"u": "20"}}, "expert": False}, {"ports": body.ports, "set": body.change.model_dump(), "expert": False},
+                "ports", api_changes._summary(body))
+
+    async def run(cid):                             # what run_change writes at its end, as the change's user
+        await asyncio.sleep(0)
+        await db.audit("anna@example.org", "change_ok", "SW", f"#{cid}", role="aendern")
+
+    monkeypatch.setattr(api_changes, "_make_plan", plan)
+    monkeypatch.setattr(changes, "run_change", run)
+    want, before = {"ports": ["5"], "change": {"untagged": "30"}}, set(api_changes._tasks)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test", headers=bearer(t["token"])) as c:
+        p = (await c.post(f"/api/switches/{sid}/plan", json=want)).json()
+        r = await c.post(f"/api/switches/{sid}/apply", json={**want, "token": p["token"], "mechanism": p["mechanism"]})
+        assert r.status_code == 200, r.json()
+        for _ in range(500):                        # the run's task to its end, at most 5 s
+            if not api_changes._tasks - before:
+                break
+            await asyncio.sleep(0.01)
+    assert dbfix.query("SELECT username, detail, token FROM audit WHERE action = 'change_ok'") == [
+        ("anna@example.org", f"#{r.json()['id']}", f"ci (#{t['id']})")]
