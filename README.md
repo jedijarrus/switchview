@@ -475,13 +475,17 @@ curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/bulk/$BID" | jq '{status, cou
 By default the first failure (a refused start, a change that ends unclear, failed or aborted) stops the rest, which is then "not
 started"; `"on_error": "continue"` runs the rest anyway. `POST /api/bulk/<id>/cancel` (who started it, or "Freigeben" with the
 zone of each of its switches) stops it before its next switch, never inside a change. Rights, the token and the four-eyes principle
-are checked when it starts: revoking the token does not stop a running bulk change, its cancel does. With `"confirm_minutes": N` every switch waits unsaved for its confirmation and the
-run goes on; each deadline moves with the run, so all of them end N minutes after the last switch, and
-`POST /api/bulk/<id>/confirm` confirms every waiting change of the bulk change with the rules of `/confirm`. With the four-eyes
-principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409): `POST /api/approvals` with `{"kind":
-"bulk_change", "bulk": <the body of /api/bulk>}` requests it, and a second person with "Freigeben" in the zones of all its switches
-approves it signed in in the UI. A bulk change that ends with failures, or
-that a restart of SwitchView ends ("interrupted"; none is continued), raises the alert "Sammeländerung mit Fehlern beendet".
+are checked when it starts: revoking the token does not stop a running bulk change, its cancel does. With `"confirm_minutes": N`
+every switch waits unsaved for its confirmation and the run goes on; each deadline moves with the run, so all of them end N
+minutes after the last switch, and `POST /api/bulk/<id>/confirm` confirms every waiting change of the bulk change with the rules of
+`/confirm`. With the four-eyes principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409):
+`POST /api/approvals` with `{"kind": "bulk_change", "bulk": <the body of /api/bulk>}` requests it, and a second person with
+"Freigeben" in the zones of all its switches approves it signed in in the UI. A bulk change that ends with failures, or that a
+restart of SwitchView ends ("interrupted"; none is continued), raises the alert "Sammeländerung mit Fehlern beendet". The status
+of a bulk change is that of its run: with confirmation it ends `done` while its changes still wait, and stays so; `counts.pending`
+counts the waiting ones, `counts.unconfirmed` those that ended without a confirmation after it (alerted as
+"Änderung ohne Bestätigung zurückgenommen" per change, not as a failed bulk change). Whoever starts one with confirmation confirms
+after the run with `POST /api/bulk/<id>/confirm` while `counts.pending` is above 0.
 
 ## ProCurve notes
 

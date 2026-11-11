@@ -206,9 +206,15 @@ async def preview(user: dict, body) -> dict:
 # ── Task 7: start, run, cancel, read ───────────────────────────────────────────────────────────────────────────────────────────────
 POLL_S = 1.0                        # how often the run asks the database whether the change of a switch has ended
 # A bulk change (bulks.status) is queued, running, done, failed, cancelled or interrupted, a switch in it (bulk_items.status)
-# waiting, running, done, failed, skipped or not_started. The counts of an answer, in this order: those of a switch, and pending,
-# the switches whose change waits for its confirmation
-COUNTED = ("done", "failed", "skipped", "not_started", "waiting", "running", changes.PENDING)
+# waiting, running, done, failed, skipped or not_started. The counts of an answer, in this order: those of a switch, pending, the
+# switches whose change waits for its confirmation, and unconfirmed, the done ones whose change ended without it (ENDED_UNCONFIRMED):
+# the status of a bulk change is that of its run, and with confirmation its changes wait beyond it (T7-e)
+COUNTED = ("done", "failed", "skipped", "not_started", "waiting", "running", changes.PENDING, "unconfirmed")
+# A switch of a bulk change (bulk_items i) whose change (changes c) ended unconfirmed: done (it waited for its confirmation at its
+# run), with confirm_minutes and without confirmed_by, neither waiting nor queued, running or ok (ok without a confirm is
+# changes.CONFIRM_SKIPPED: the switch saved it itself). NULL, not true, for a switch without a change
+ENDED_UNCONFIRMED = ("i.status = 'done' AND c.confirm_minutes IS NOT NULL AND c.confirmed_by IS NULL "
+                     "AND c.status NOT IN ('pending', 'queued', 'running', 'ok')")
 OUTDATED = "Die Vorschau ist veraltet – bitte neu laden: {list}"
 APPROVAL_NEEDED = "Sammeländerungen brauchen eine Freigabe (Vier-Augen-Prinzip): bitte „Freigabe anfordern“"
 NOT_FOUND = "Sammeländerung nicht gefunden"
@@ -418,18 +424,16 @@ async def _extend_deadlines(bid: int, minutes: int) -> None:
 
 
 async def _unconfirmed(bid: int) -> bool:
-    """Whether a change of bulk change bid ended unconfirmed: the change of a done switch (it waited for its confirmation at its run)
-    with confirm_minutes and without confirmed_by that is neither waiting nor queued, running or ok (ok without a confirm is
-    changes.CONFIRM_SKIPPED: the switch saved it itself). Each such switch keeps done and gets the detail of what happened, as the
-    change says it at this look (rewritten at each look, so it follows a revert that ends meanwhile): UNCONFIRMED once its revert
-    ended ok (reverted_by), else UNCONFIRMED_AS with the change's error (stored masked) - the watch gave up and the switch keeps the
-    change unsaved, or the revert has only started -, UNCONFIRMED_BARE without one; never "zurückgenommen" for a change that was not.
-    A switch that failed at its own run keeps its detail."""
+    """Whether a change of bulk change bid ended unconfirmed (ENDED_UNCONFIRMED). Each such switch keeps done and gets the detail of
+    what happened, as the change says it at this look (rewritten at each look, so it follows a revert that ends meanwhile):
+    UNCONFIRMED once its revert ended ok (reverted_by), else UNCONFIRMED_AS with the change's error (stored masked) - the watch gave up
+    and the switch keeps the change unsaved, or the revert has only started -, UNCONFIRMED_BARE without one; never "zurückgenommen"
+    for a change that was not. A switch that failed at its own run keeps its detail. Only the run looks: after its end the counts
+    (_counts) follow the changes, the details do not."""
     async with db() as conn:
         async with conn.execute(
                 "SELECT i.pos, c.id, c.error, c.reverted_by FROM bulk_items i JOIN changes c ON c.id = i.change_id WHERE i.bulk_id = ? "
-                "AND i.status = 'done' AND c.confirm_minutes IS NOT NULL AND c.confirmed_by IS NULL "
-                "AND c.status NOT IN ('pending', 'queued', 'running', 'ok')", (bid,)) as cur:
+                f"AND {ENDED_UNCONFIRMED}", (bid,)) as cur:
             ended = await cur.fetchall()
         for r in ended:
             text = (UNCONFIRMED.format(cid=r["id"]) if r["reverted_by"] else
@@ -514,15 +518,16 @@ def _tally(counts: dict) -> str:
 
 
 async def _counts(conn, bids: list[int]) -> dict[int, dict[str, int]]:
-    """Per bulk change of bids its switches per state (COUNTED: each state of a switch, and pending, the switches whose change waits
-    for its confirmation now)."""
+    """Per bulk change of bids its switches per state (COUNTED: each state of a switch, pending, the switches whose change waits for
+    its confirmation now, and unconfirmed, those whose change ended without it, ENDED_UNCONFIRMED), as the changes say it now."""
     out = {bid: dict.fromkeys(COUNTED, 0) for bid in bids}
-    async with conn.execute(f"SELECT i.bulk_id, i.status, c.status AS change_status FROM bulk_items i LEFT JOIN changes c ON c.id = i.change_id "
-                            f"WHERE i.bulk_id IN ({', '.join('?' * len(bids))})", bids) as cur:
+    async with conn.execute(f"SELECT i.bulk_id, i.status, c.status AS change_status, ({ENDED_UNCONFIRMED}) AS unconfirmed FROM bulk_items i "
+                            f"LEFT JOIN changes c ON c.id = i.change_id WHERE i.bulk_id IN ({', '.join('?' * len(bids))})", bids) as cur:
         for r in await cur.fetchall():
             counts = out[r["bulk_id"]]
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             counts[changes.PENDING] += r["change_status"] == changes.PENDING
+            counts["unconfirmed"] += bool(r["unconfirmed"])
     return out
 
 

@@ -17,8 +17,12 @@
   let bulkForm = null;
   const bulkFormEmpty = () => ({ picked: [], ports: {}, mode: "ports", vlan: "", st: "", u: "", tadd: "", trem: "", name: "", nclear: false, poe: "",
     expert: false, cont: false });
-  // "1 erledigt · 0 fehlgeschlagen · 2 nicht gestartet" of the counts of a bulk change (GET /api/bulk, bulk.COUNTED)
-  const bulkCounts = c => `${c.done} erledigt · ${c.failed} fehlgeschlagen · ${c.not_started} nicht gestartet`;
+  // "1 erledigt · 0 fehlgeschlagen · 2 nicht gestartet" of the counts of a bulk change (GET /api/bulk, bulk.COUNTED), then what its
+  // changes do now, each only when there is one: "· 1 wartet auf Bestätigung" (pending) and "· 1 nicht bestätigt" (unconfirmed). The
+  // status is that of the run: with confirmation it ends "fertig" while its changes wait, and stays so when one is taken back after it
+  const bulkCounts = c => `${c.done} erledigt · ${c.failed} fehlgeschlagen · ${c.not_started} nicht gestartet`
+    + (c.pending > 0 ? ` · ${SVLogic.plural(c.pending, "wartet", "warten")} auf Bestätigung` : "")
+    + (c.unconfirmed > 0 ? ` · ${c.unconfirmed} nicht bestätigt` : "");
   // The states of a port the form offers, in its order ("" leaves it as it is); the server's names (api_changes.PortChange)
   const BULK_STATES = [["", "unverändert"], ["off", "Aus"], ["on", "An"], ["protected", "Protected"], ["known", "Bekannte Geräte"], ["radius", "RADIUS"]];
 

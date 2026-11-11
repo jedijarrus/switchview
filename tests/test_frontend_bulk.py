@@ -269,7 +269,8 @@ def test_the_view_lists_the_last_bulk_changes():
     assert ('<tr><td class="num">5</td><td class="num">10.11.26, 09:00</td><td>a&lt;nna</td><td>VLAN 30 · 4 Ports &lt;an&gt; 3 Switches</td>'
             '<td><span class="pill crit">mit Fehlern</span><span class="cellnote">1 erledigt · 1 fehlgeschlagen · 1 nicht gestartet</span></td>'
             '<td><div class="actions"><button class="btn small" type="button" data-bulk-open="5">Anzeigen</button></div></td></tr>') in html
-    assert '<span class="pill neutral">läuft</span><span class="cellnote">1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet</span>' in html
+    assert ('<span class="pill neutral">läuft</span><span class="cellnote">1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet · 1 wartet auf '
+            'Bestätigung</span>') in html
     assert opened == 5
     assert '<div class="empty">Noch keine Sammeländerungen.</div>' in bulk(FORM)
     failed = bulk('const real = api; api = async (m, u, b) => { if (u === "/api/bulk") throw new Error("Server <weg>"); return real(m, u, b); }; ' + FORM)
@@ -456,3 +457,22 @@ def test_the_form_says_that_every_bulk_change_needs_an_approval(role, four):
         assert 'id="b-expert" aria-describedby="b-4eyes"' in html
     elif role == "freigeben":
         assert 'id="b-expert">' in html
+
+
+# Final review of Phase 4c, finding 1: the status of a bulk change is that of its run - with confirmation it ends "fertig" while its
+# changes wait, and a change taken back after the run leaves it so; the counts say what its changes do now (bulk.COUNTED)
+@pytest.mark.parametrize("counts, note", [
+    ({"pending": 1}, "1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet · 1 wartet auf Bestätigung"),
+    ({"pending": 2, "unconfirmed": 1}, "1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet · 2 warten auf Bestätigung · 1 nicht bestätigt"),
+    ({"pending": 0, "unconfirmed": 1}, "1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet · 1 nicht bestätigt"),
+    ({"pending": 0, "unconfirmed": 0}, "1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet")], ids=["waits", "both", "unconfirmed", "neither"])
+def test_a_listed_bulk_names_its_changes_that_wait_or_ended_unconfirmed(counts, note):
+    row = {**ROW, "status": "done", "counts": {**ROW["counts"], "failed": 0, "not_started": 0, **counts}}
+    assert f'<span class="pill ok">fertig</span><span class="cellnote">{note}</span></td>' in bulk(FORM, rows=[row])
+
+
+def test_the_run_dialog_names_the_changes_that_wait_or_ended_unconfirmed():
+    run = {**RUN, "status": "done", "counts": {**RUN["counts"], "running": 0, "pending": 1, "unconfirmed": 2}}
+    html = bulk(OPEN + 'return $("#bulk-run").innerHTML; ', run=run)
+    assert ('<span class="pill ok">fertig</span> · 1 erledigt · 0 fehlgeschlagen · 0 nicht gestartet · 1 wartet auf Bestätigung · 2 nicht bestätigt'
+            ' · bei einem Fehler: stoppen') in html

@@ -269,7 +269,7 @@ def test_the_answer_names_each_switch_its_zone_its_change_and_the_counts(world, 
     assert [(i["pos"], i["switch"], i["zone"], i["ports"], i["status"], i["detail"], i["change"]) for i in b["items"]] == [
         (0, "A", "EK", ["1", "2"], "waiting", "", None), (1, "B", "EK", ["1", "2"], "waiting", "", None),
         (2, "C", "EK", [], "skipped", "Port 1: Uplink/Trunk: nur im Expertenmodus", None)]
-    assert b["counts"] == {"done": 0, "failed": 0, "skipped": 1, "not_started": 0, "waiting": 2, "running": 0, "pending": 0}
+    assert b["counts"] == {"done": 0, "failed": 0, "skipped": 1, "not_started": 0, "waiting": 2, "running": 0, "pending": 0, "unconfirmed": 0}
     world.ends["A"] = "pending"
     asyncio.run(bulk.run(bid))
     [ca, cb] = [i for (i,) in dbfix.query("SELECT id FROM changes ORDER BY id")]
@@ -277,7 +277,8 @@ def test_the_answer_names_each_switch_its_zone_its_change_and_the_counts(world, 
     assert set(a) == {"id", "status", "error", "saved", "confirm_until", "confirmed_by", "reverted_by"} and (a["id"], a["status"]) == (ca, "pending")
     listed = client.get("/api/bulk", headers=H("anna")).json()
     assert listed == [{"id": bid, "created_at": b["created_at"], "username": "anna", "summary": b["summary"], "status": "done",
-                       "counts": {"done": 2, "failed": 0, "skipped": 1, "not_started": 0, "waiting": 0, "running": 0, "pending": 1}}]
+                       "counts": {"done": 2, "failed": 0, "skipped": 1, "not_started": 0, "waiting": 0, "running": 0, "pending": 1,
+                                  "unconfirmed": 0}}]
     assert cb != ca and client.get("/api/bulk?limit=0", headers=H("anna")).status_code == 422
 
 
@@ -505,3 +506,40 @@ def test_freigeben_cancels_another_ones_bulk_only_with_the_zone_of_each_of_its_s
     other = start(client, world).json()["id"]
     assert client.post(f"/api/bulk/{other}/cancel", headers=H("ute")).status_code == 200
     assert client.post(f"/api/bulk/{bid}/cancel", headers=H("anna")).status_code == 200
+
+
+# ── Final review of Phase 4c ──────────────────────────────────────────────────────────────────────────────────────────────────────
+def test_the_status_is_that_of_the_run_and_the_counts_follow_the_changes_after_it(world, client):
+    """Finding 1: the deadlines end N minutes after the last switch (T7-e), so a run with confirmation ends done while its changes
+    still wait (pending). What they do after the run leaves the status of the bulk change and its alert as they are; its counts say
+    it: unconfirmed, a done switch whose change ended without its confirmation (the rule of bulk._unconfirmed: A, taken back by the
+    watch), not one that was confirmed (B) or still waits (C)."""
+    asyncio.run(configure(mail=True, events=["bulk_problem"]))
+    world.ends |= {"A": "pending", "B": "pending", "C": "pending"}
+    bid = start(client, world, confirm_minutes=2).json()["id"]
+    assert asyncio.run(bulk.run(bid)) == "done"
+    assert got(client, bid)["counts"] == {"done": 3, "failed": 0, "skipped": 0, "not_started": 0, "waiting": 0, "running": 0, "pending": 3,
+                                          "unconfirmed": 0}
+    ca, cb, _ = [i for (i,) in dbfix.query("SELECT id FROM changes WHERE bulk_id = ? ORDER BY id", (bid,))]
+    dbfix.query("UPDATE changes SET status = 'unclear', error = ?, reverted_by = 19 WHERE id = ?", (changes.REVERT_STARTED.format(rid=19), ca))
+    dbfix.query("UPDATE changes SET status = 'ok', saved = 1, confirmed_by = 'anna' WHERE id = ?", (cb,))
+    b = got(client, bid)
+    assert (b["status"], b["counts"]) == ("done", {"done": 3, "failed": 0, "skipped": 0, "not_started": 0, "waiting": 0, "running": 0,
+                                                   "pending": 1, "unconfirmed": 1})
+    assert client.get("/api/bulk", headers=H("anna")).json()[0]["counts"] == b["counts"]
+    assert dbfix.query("SELECT count(*) FROM alert_outbox") == [(0,)]
+
+
+@pytest.mark.parametrize("change, unconfirmed", [
+    ("status = 'unclear', confirm_minutes = NULL", 0),                                   # never waited: a bulk without confirmation
+    ("status = 'ok', saved = 1", 0),                                                     # ok without a confirm: the switch saved itself
+    ("status = 'unclear', error = 'x'", 1),                                              # the watch gave up
+    ("status = 'failed'", 1),
+    ("status = 'unclear', confirmed_by = 'anna'", 0)],                                   # confirmed, then its save went wrong
+    ids=["no-confirmation", "saved-itself", "gave-up", "failed", "confirmed"])
+def test_unconfirmed_counts_by_the_rule_of_an_unconfirmed_end(world, client, change, unconfirmed):
+    world.ends |= {"A": "pending"}
+    bid = start(client, world, confirm_minutes=5).json()["id"]
+    asyncio.run(bulk.run(bid))
+    dbfix.query(f"UPDATE changes SET {change} WHERE switch_id = ? AND bulk_id = ?", (world.a, bid))
+    assert got(client, bid)["counts"]["unconfirmed"] == unconfirmed
