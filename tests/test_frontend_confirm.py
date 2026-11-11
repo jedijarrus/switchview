@@ -54,6 +54,19 @@ def test_the_preview_offers_confirmation_where_it_is_possible(answer, payload, b
         assert f'<p class="note" id="p-confirm-why">{why}.</p>' in html
 
 
+# Phase 4c, Task 12 (browser check): over SNMP "Bestätigen" never saves (confirm._confirm_snmp ends the change ok and unsaved, the
+# preview above says "NICHT dauerhaft gespeichert"), so the choice promises no save there - only the take-back
+CONFIRM_BOX = '<label class="check"><input type="checkbox" id="p-confirm"><span>Mit Bestätigung ausführen: %sohne Bestätigung nach <select'
+SAVE_CLAUSE = "erst speichern, wenn ich bestätige – "
+
+
+@pytest.mark.parametrize("mechanism, clause", [("ssh", SAVE_CLAUSE), ("snmp", "")])
+def test_the_choice_promises_a_save_only_on_a_way_that_saves(mechanism, clause):
+    html = preview('return $("#m-body").innerHTML; ', {**PLAN_ANSWER, "mechanism": mechanism})
+    assert CONFIRM_BOX % clause in html and (SAVE_CLAUSE in html) == bool(clause)
+    assert "</select> Minuten automatisch zurücknehmen</span></label>" in html
+
+
 @pytest.mark.parametrize("ticked, want", [(True, {"confirm_minutes": 10}), (False, {})], ids=["ticked", "not-ticked"])
 def test_apply_sends_the_minutes_only_when_ticked(ticked, want):
     tick = '$("#p-confirm").checked = true; $("#p-confirm-min").value = "10"; ' if ticked else '$("#p-confirm-min").value = "10"; '

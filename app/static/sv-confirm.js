@@ -8,12 +8,14 @@
   const CONFIRM_CHOICES = [2, 5, 10, 15, 30];
   // The choice under the preview r (a /plan answer) of payload: only for a port change and only where r names confirm (a server from
   // before the update does not). Where it is possible a checkbox with the minutes (the select inside its label, which so names them),
-  // else why not as a sentence
+  // else why not as a sentence. Over SNMP (r.mechanism) "Bestätigen" saves nothing (confirm._confirm_snmp), so the choice promises
+  // the save only on another way
   const confirmOptionHtml = (r, payload) => {
     if (payload.mode !== "ports" || !r.confirm) return "";
     if (!r.confirm.possible) return `<p class="note" id="p-confirm-why">${esc(sentence(r.confirm.why || ""))}</p>`;
     const opts = CONFIRM_CHOICES.map(m => `<option value="${m}"${m === r.confirm.default_minutes ? " selected" : ""}>${m}</option>`).join("");
-    return `<label class="check"><input type="checkbox" id="p-confirm"><span>Mit Bestätigung ausführen: erst speichern, wenn ich bestätige – ohne Bestätigung nach `
+    const saves = r.mechanism === "snmp" ? "" : "erst speichern, wenn ich bestätige – ";
+    return `<label class="check"><input type="checkbox" id="p-confirm"><span>Mit Bestätigung ausführen: ${saves}ohne Bestätigung nach `
       + `<select id="p-confirm-min" aria-label="Minuten bis zur automatischen Rücknahme">${opts}</select> Minuten automatisch zurücknehmen</span></label>`;
   };
   // The minutes of the preview's choice when it is ticked, else null (no choice shown: null too)

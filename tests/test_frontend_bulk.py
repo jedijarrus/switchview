@@ -169,6 +169,16 @@ def test_the_run_carries_continue_and_the_minutes_only_when_chosen(fill, want):
     assert sent == ["POST", "/api/bulk", {**BODY, **want}]
 
 
+# Phase 4c, Task 12 (browser check): "Bestätigen" saves only over SSH (over SNMP the change stays unsaved, as each section says),
+# so the bulk's choice promises a save only when every ready switch runs over SSH
+@pytest.mark.parametrize("ways, saves", [(["ssh"], True), (["snmp"], False), (["ssh", "snmp"], False)], ids=["ssh", "snmp", "mixed"])
+def test_the_bulk_choice_promises_a_save_only_when_every_switch_saves(ways, saves):
+    ready = [{**SEC_A, "switch_id": i + 1, "preview": {**PLAN_A, "mechanism": w}} for i, w in enumerate(ways)]
+    body = bulk(FILLED + PREVIEW_CLICK + 'return $("#m-body").innerHTML; ', preview={**PREVIEW, "sections": [*ready, SEC_C]})
+    assert 'id="p-confirm"' in body and ("erst speichern, wenn ich bestätige" in body) == saves
+    assert "Mit Bestätigung ausführen: " + ("erst speichern, wenn ich bestätige – " if saves else "") + "ohne Bestätigung nach <select" in body
+
+
 def test_a_skipped_section_shows_its_reason_escaped():
     odd = {**PREVIEW, "sections": [SEC_A, {**SEC_C, "switch": "SW-<C>", "reason": "Lesen <fehlgeschlagen> & mehr", "selection": "Zugangsports <x>"}]}
     body = bulk(FILLED + PREVIEW_CLICK + 'return $("#m-body").innerHTML; ', preview=odd)

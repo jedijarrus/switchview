@@ -152,7 +152,9 @@
     const body = (ask ? `<div class="banner warn"><span><b>Vier-Augen-Prinzip:</b> Diese Sammeländerung wird erst ausgeführt, wenn eine zweite Person mit der Rolle „Freigeben“ sie freigibt. Niemand kann die eigene Anfrage freigeben.</span></div>` : "")
       + `<p style="margin:0"><b>${esc(r.summary)}</b> <span class="muted">· ${SVLogic.plural(ready.length, "Switch", "Switches")} bereit, ${skipped.length} übersprungen</span></p>`
       + r.sections.map(section).join("")
-      + (ready.length ? confirmOptionHtml({ confirm: r.confirm }, { mode: "ports" }) : `<div class="banner">Kein Switch ist bereit.</div>`);
+      // the choice promises the save only when every ready switch saves at "Bestätigen" (none over SNMP)
+      + (ready.length ? confirmOptionHtml({ confirm: r.confirm, mechanism: ready.some(s => s.preview.mechanism === "snmp") ? "snmp" : "ssh" }, { mode: "ports" })
+        : `<div class="banner">Kein Switch ist bereit.</div>`);
     // What starts: the ready switches as the preview showed them; a reason is cut to the 300 characters the server takes
     const started = () => {
       const m = confirmMinutes();
