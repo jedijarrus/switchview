@@ -122,7 +122,7 @@ def test_the_change_of_the_form_is_the_port_change_of_the_request(fill, change, 
 def test_expert_mode_is_offered_only_to_who_may_use_it():                               # beyond the brief
     """Freigeben, or Ändern with the four-eyes principle on (expertOk); without it the box is not drawn and never sent."""
     with_box = bulk(FORM, me=role_me("aendern", four_eyes=True))
-    assert 'id="b-expert" aria-describedby="f-4eyes"' in with_box and 'id="f-4eyes"' in with_box
+    assert 'id="b-expert" aria-describedby="b-4eyes"' in with_box
     assert 'id="b-expert"' not in bulk(FORM, me=role_me("aendern"))
     sent = bulk('await renderBulk(); pick({1: "7"}); $("#b-u").value = "30"; $("#b-expert").checked = true; ' + PREVIEW_CLICK
                 + 'return posts()[0][2]; ', me=role_me("aendern"))
@@ -429,3 +429,20 @@ def test_the_audit_labels_of_bulk_changes():
     assert in_dom(f"{json.dumps(keys)}.map(k => AUDIT_LABELS[k])") == [
         "Sammeländerung gestartet", "Sammeländerung fertig", "Sammeländerung mit Fehlern", "Abbruch einer Sammeländerung angefordert",
         "Sammeländerung abgebrochen", "Sammeländerung durch Neustart abgebrochen"]
+
+
+# Task 12 (browser check): with the four-eyes principle on every bulk change is requested, not only one in expert mode - the form
+# said the port form's sentence ("Im Expertenmodus braucht die Änderung eine Freigabe …") under its expert box
+BULK_FOUR_EYES = ('<p class="note" id="b-4eyes" style="margin:0">Vier-Augen-Prinzip: Jede Sammeländerung braucht die Freigabe durch eine zweite '
+                  'Person, mit und ohne Expertenmodus – die Vorschau fordert sie an.</p>')
+
+
+@pytest.mark.parametrize("role, four", [("aendern", True), ("freigeben", True), ("freigeben", False), ("aendern", False)])
+def test_the_form_says_that_every_bulk_change_needs_an_approval(role, four):
+    html = bulk(FORM, me=role_me(role, four_eyes=four))
+    assert (BULK_FOUR_EYES in html) == four and "Im Expertenmodus braucht die Änderung" not in html and 'id="f-4eyes"' not in html
+    if four:    # after the choice what a failure does, before "Vorschau"; the expert box names it as its description
+        assert html.index('id="b-continue"') < html.index('id="b-4eyes"') < html.index('id="b-preview"')
+        assert 'id="b-expert" aria-describedby="b-4eyes"' in html
+    elif role == "freigeben":
+        assert 'id="b-expert">' in html

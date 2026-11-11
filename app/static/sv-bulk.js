@@ -49,11 +49,12 @@
   }
 
   // The form with the state f: the switches by zone (only those the user may change, mayChange), each with its port field, shown
-  // for a ticked switch while the ports are chosen per switch (syncBulkFields); the change; what happens after a failure
+  // for a ticked switch while the ports are chosen per switch (syncBulkFields); the change; what happens after a failure; with the
+  // four-eyes principle on, that every bulk change is requested (the port form's sentence names only the expert mode)
   function bulkFormHtml(f) {
     const mine = MAP.switches.filter(mayChange);
     if (!mine.length) return `<p class="note gate">Kein Switch, an dem du ändern darfst und an dem SwitchView schreiben kann.</p>`;
-    const byPorts = f.mode !== "vlan", vl = Object.keys(MAP.vlans).sort((a, b) => a - b);
+    const byPorts = f.mode !== "vlan", vl = Object.keys(MAP.vlans).sort((a, b) => a - b), four = !!(ME && ME.four_eyes);
     const sel = (v, cur) => (v === cur ? " selected" : ""), on = x => (x ? " checked" : "");
     const vlanOpts = (cur, none) => `<option value="">${none}</option>` + vl.map(id => `<option value="${esc(id)}"${sel(id, cur)}>${esc(id)} · ${esc(vname(id))}</option>`).join("");
     const sw = s => {
@@ -76,8 +77,9 @@
         <div class="grid2"><label class="field"><span>Name</span><input id="b-name" maxlength="64" placeholder="unverändert" autocomplete="off" value="${esc(f.name)}"><span class="hint">ohne Leerzeichen, z. B. Drucker-EK</span></label>
           <label class="field"><span>PoE</span><select id="b-poe"><option value="">unverändert</option><option value="on"${sel("on", f.poe)}>an</option><option value="off"${sel("off", f.poe)}>aus</option></select></label></div>
         <label class="check"><input type="checkbox" id="b-nclear"${on(f.nclear)}> Name entfernen</label>
-        ${expertOk() ? `<label class="check warnbox"><input type="checkbox" id="b-expert"${on(f.expert)}${fourEyesDesc()}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>${fourEyesNote()}` : ""}</fieldset>
+        ${expertOk() ? `<label class="check warnbox"><input type="checkbox" id="b-expert"${on(f.expert)}${four ? ' aria-describedby="b-4eyes"' : ""}> Expertenmodus: Uplinks/Trunks ändern. Falsch gesetzt, trennt das den Switch vom Netz.</label>` : ""}</fieldset>
       <label class="check"><input type="checkbox" id="b-continue"${on(f.cont)}> Bei einem Fehler weitermachen (sonst stoppt der erste Fehler die übrigen Switches)</label>
+      ${four ? `<p class="note" id="b-4eyes" style="margin:0">Vier-Augen-Prinzip: Jede Sammeländerung braucht die Freigabe durch eine zweite Person, mit und ohne Expertenmodus – die Vorschau fordert sie an.</p>` : ""}
       <div><button class="btn primary" type="button" id="b-preview">Vorschau</button></div></div>`;
   }
 
