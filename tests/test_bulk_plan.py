@@ -5,7 +5,7 @@ A request names the change once (the fields of api_changes.PortChange, plus expe
 request, each planned by the per-switch planner (api_changes._make_plan) with its own preview token, at most five switches at once;
 a switch outside the user's zones, with a blocked port, with nothing to do or that cannot be planned is skipped with its reason, and
 a port the filter took from the poll that the fresh read finds in another VLAN blocks its switch. The answer adds the combined
-token, whether the bulk needs an approval and whether it can run with confirmation. Nothing starts.
+preview token, whether the bulk needs an approval and whether it can run with confirmation. Nothing starts.
 
 The app runs in-process through FastAPI's TestClient, signed in per request as the user its X-Test-User header names
 (apifix.by_header). The world (tests/bulkfix.py) has switches A and B in zone EK and C in VK, a fake planner and a fake poll

@@ -36,8 +36,8 @@ class BulkPlanIn(BaseModel):
 
 @router.post("/api/bulk/plan")
 async def plan_bulk(body: BulkPlanIn, user=Depends(auth.require(roles.AENDERN))):
-    """Per switch the preview of /plan with its own preview token, or why the switch is skipped; the combined token, whether the bulk
-    needs an approval and whether it can run with confirmation (bulk.preview). Starts nothing."""
+    """Per switch the preview of /plan with its own preview token, or why the switch is skipped; the combined preview token, whether
+    the bulk needs an approval and whether it can run with confirmation (bulk.preview). Starts nothing."""
     return await bulk.preview(user, body)
 
 

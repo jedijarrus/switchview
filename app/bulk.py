@@ -161,7 +161,8 @@ async def _masked(sid: int, detail):
 
 
 def token_of(pairs: list[tuple[int, str]]) -> str:
-    """The token of a bulk preview: changes.cmd_token over "<switch id>:<preview token>" of each ready switch, by switch id."""
+    """The combined preview token of a bulk preview: changes.cmd_token over "<switch id>:<preview token>" of each ready switch, by
+    switch id."""
     return changes.cmd_token([f"{sid}:{token}" for sid, token in sorted(pairs, key=lambda p: p[0])])
 
 

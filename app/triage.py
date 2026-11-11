@@ -1,4 +1,5 @@
-"""The triage of unknown devices (Phase 4c, Task 10): what a device probably is. Without FastAPI, without a database.
+"""The triage of unknown devices (Phase 4c, Task 10): what a device probably is. Without a database; it imports api_changes only
+for STATUS_LABEL (Ruling 5).
 
 suggest gives an entry of the list of unknown devices (api_devices.unknown_devices) a suggestion: the device type of the device
 database, the PacketFence role released devices of that type have most (the caller counts them: api_devices.roles_by_kind) and the
