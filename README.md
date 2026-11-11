@@ -126,6 +126,24 @@ decisions).
   filters; a CSV cell that starts like a formula gets a `'`
 - `PUBLIC_URL` (optional) gives every alert a link to its switch or to the approvals
 
+**Bulk changes, confirmation, REST API and triage**
+- Bulk change ("Sammeländerung" under "Switches", Ändern): the same port change on up to 20 switches and 1000 ports, per switch a
+  port list or every access port untagged in a VLAN; a preview per switch with its own preview token, where a switch outside the
+  user's zones, blocked, unreadable or with nothing to do is skipped with its reason; then one switch after another through the
+  guided loop, stopping at the first failure unless told to go on, cancellable between two switches, with a summary per switch and
+  an alert when it ends with failures. With the four-eyes principle on, every bulk change is requested and a second person approves
+  it after every switch was planned anew
+- Changes with confirmation ("Mit Bestätigung ausführen", 1–30 minutes, also for a bulk change): verified as any change but not
+  saved until someone confirms; without a confirmation in time, or when the switch does not answer twice in a row, SwitchView takes
+  it back through the guided loop, and one it cannot take back ends in a clear state ("nicht zurückgenommen", unsaved until the
+  switch restarts) with an alert. Not offered where the write way saves by itself (ProCurve over SNMP); over SNMP a confirmation
+  ends the waiting without saving
+- Personal API tokens (Settings → "API-Tokens", every user their own, shown once, with an expiry and an optional maximum role) for
+  scripts against the routes of the UI, with the schema at `/api/openapi.json`: see [REST API](#rest-api)
+- Triage of unknown devices under "Geräte": per device a suggested type, role and port mode with its reasons (LLDP text, PoE,
+  name, vendor), its first sighting and "neu"; several devices approved at once, or a CSV list imported after a check row by row
+  (all or nothing, at most 200 rows); "Neu bewerten" asks PacketFence to re-evaluate a released device it still parks
+
 **Login**
 - Microsoft Entra ID (MSAL popup, ID token verified via JWKS, optional app roles/groups) or a local emergency account. With neither
   `ENTRA_ALLOWED_ROLES` nor `ENTRA_ALLOWED_GROUPS` set, every user of the tenant may sign in; the start logs a warning
@@ -146,7 +164,8 @@ decisions).
 - Every route has a minimum role, checked by the server on every request; the UI shows the user's name and role, hides or locks
   what the role does not allow and says why. An Admin can limit Ändern and Freigeben to the switches of some zones by Entra app
   role (Settings → "Zonen")
-- Optional four-eyes principle for expert-mode changes (uplinks, trunks), off by default: the preview requests an approval, a
+- Optional four-eyes principle for expert-mode changes (uplinks, trunks) and, since Phase 4c, every bulk change, off by default:
+  the preview requests an approval, a
   second person with Freigeben or Admin reviews a freshly planned preview under "Freigaben" and approves it, which runs the change
   through the same guided loop; nobody approves their own request, the emergency login approves nothing. An Admin switches it on
   under Settings → "Vier-Augen-Prinzip" (or `PUT /api/settings/approvals` with `{"four_eyes": true, "hours": 24}`); open requests
@@ -190,7 +209,8 @@ The settings that matter, in `.env` unless noted:
 | "TLS-Zertifikat prüfen" (Settings, PacketFence and OPNsense) | on for a new installation | certificate check of the PacketFence and OPNsense APIs |
 | "SSH-Hostschlüssel vergessen" (switch form) | – | drops a switch's pinned SSH host key, so the next SSH session pins the key it is offered |
 | "Alle meine Sitzungen beenden" (Settings → "Sitzungen") | – | ends every session of your account on every device |
-| "Vier-Augen-Prinzip" (Settings, Admin) | off, requests expire after `24` hours | on: an expert-mode change is requested, and a second person with Freigeben or Admin approves it; hours 1–168 |
+| "Vier-Augen-Prinzip" (Settings, Admin) | off, requests expire after `24` hours | on: an expert-mode change and every bulk change is requested, and a second person with Freigeben or Admin approves it; hours 1–168 |
+| "API-Tokens" (Settings, every role) | none | personal tokens for scripts (`Authorization: Bearer svt_…`), shown once, 30–365 days, an optional maximum role; an Admin sees and revokes all under "Alle API-Tokens" |
 | "Zonen" (Settings, Admin) | empty: nobody is limited | one line per Entra app role (`SwitchView.Zone.EK = EK`): Ändern and Freigeben with that role change only switches of those zones; needs `ENTRA_ROLE_MAPPING=on` |
 | "Benachrichtigungen" (Settings, Admin) | off until set up | mail via SMTP (STARTTLS, TLS, or without TLS and without login for an internal relay; certificate check on) and a webhook for a Microsoft Teams workflow or plain JSON, each with its events; the SMTP password and the webhook URL are stored encrypted and never shown again (of the URL only its scheme and host); a test button per channel |
 
@@ -220,11 +240,13 @@ in the log, without a traceback.
 device changes), Freigeben (expert mode, approvals) and Admin (switches, settings, preparing RADIUS, zones, four eyes). Every
 route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are
 the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (the routes Phase 4b added in
-[docs/verlauf-phase4b.md](docs/verlauf-phase4b.md)), and a test holds the app's routes against it. The
+[docs/verlauf-phase4b.md](docs/verlauf-phase4b.md), those of Phase 4c in [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md)),
+and a test holds the app's routes against it. The
 roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO user is Admin, as before; the emergency login
 is Admin always). An Admin can limit Ändern and Freigeben to the switches of some zones, by app role (Settings → "Zonen", read on
-every request). The four-eyes principle for expert-mode changes is off by default (Settings → "Vier-Augen-Prinzip", Admin): with
-it on, an expert-mode change is requested instead of run (so Ändern may request an expert-mode change too), and a second person
+every request). The four-eyes principle for expert-mode changes (and, since Phase 4c, every bulk change) is off by default (Settings
+→ "Vier-Augen-Prinzip", Admin): with it on, an expert-mode change is requested instead of run (so
+Ändern may request an expert-mode change too), and a second person
 with Freigeben or Admin approves exactly the preview the requester saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
 cannot run until it is switched off again. The Entra login carries a single-use nonce bound to a cookie of the browser (a captured
 ID token cannot be replayed from another browser), and a session without a request for `IDLE_MINUTES` minutes ends. The audit
@@ -236,6 +258,18 @@ four eyes and zones stay off until an Admin switches them on, and the idle logou
 `IDLE_MINUTES=0` to keep the old behaviour); a reverse proxy must pass the new `sv_login` cookie like `sv_session`, and a page
 opened before the update is reloaded once. The upgrade steps in full are under "Was beim Update zu tun ist" in
 [docs/rollen-phase4a.md](docs/rollen-phase4a.md).
+
+**API tokens.** A personal API token is `svt_` followed by 256 random bits, stored as its SHA-256 like sessions, and shown once,
+when it is created; a lost token cannot be shown again, only replaced. A request with `Authorization: Bearer svt_…` needs no other
+header and never reads the cookie (so it needs no CSRF header either, and an invalid token is 401 even next to a valid session
+cookie); a bearer value without `svt_` — a proxy in front may send its own, oauth2-proxy with `--pass-authorization-header` passes
+its id_token so — leaves the cookie path as it is. A token's role is its user's app roles, stored at the login it was created in,
+against the role mapping of now, capped by the token's maximum role; its zones are the user's. Managing tokens and approving a
+four-eyes request need a signed-in person, not a token, and the emergency login gets no token at all. A role withdrawn in Entra
+reaches a token only when it expires or is revoked: revoke a user's tokens when taking away a role (each user revokes their own,
+an Admin any under Settings → "Alle API-Tokens"). Invalid tokens are throttled: after 10 within 60 seconds every further invalid one
+is answered 429, a log line names the sender, never the token; a valid token is never throttled. Every audit entry made through a
+token names it. The REST flow: [REST API](#rest-api); details in [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md).
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
@@ -404,7 +438,8 @@ person approves it signed in in the UI.
 A port change can also run with confirmation, where the preview says so (`"confirm": {"possible": true, ...}`; not over SNMP at a
 switch that saves every SNMP change by itself): `/apply` gets `"confirm_minutes": N` (1 to 30). The change runs and is verified as
 any other, but it is not saved: it waits, unsaved, in the status `pending` until `confirm_until` (UTC) for its confirmation, which
-saves it (over SSH after a fresh read still finds it). Without a confirmation SwitchView takes it back after the deadline, or
+saves it over SSH (after a fresh read still finds it; over SNMP SwitchView saves nothing, the confirmation ends the waiting and the
+change stays unsaved, as without confirmation). Without a confirmation SwitchView takes it back after the deadline, or
 earlier when the switch does not answer twice in a row (checked every 15 seconds over SNMP). Who started or approved the change may
 confirm it, else anyone with "Freigeben", a token too; so a script checks the network itself first:
 
@@ -443,7 +478,9 @@ zone of each of its switches) stops it before its next switch, never inside a ch
 are checked when it starts: revoking the token does not stop a running bulk change, its cancel does. With `"confirm_minutes": N` every switch waits unsaved for its confirmation and the
 run goes on; each deadline moves with the run, so all of them end N minutes after the last switch, and
 `POST /api/bulk/<id>/confirm` confirms every waiting change of the bulk change with the rules of `/confirm`. With the four-eyes
-principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409). A bulk change that ends with failures, or
+principle on, every bulk change needs an approval (`/api/bulk` refuses it with 409): `POST /api/approvals` with `{"kind":
+"bulk_change", "bulk": <the body of /api/bulk>}` requests it, and a second person with "Freigeben" in the zones of all its switches
+approves it signed in in the UI. A bulk change that ends with failures, or
 that a restart of SwitchView ends ("interrupted"; none is continued), raises the alert "Sammeländerung mit Fehlern beendet".
 
 ## ProCurve notes

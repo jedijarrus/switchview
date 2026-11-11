@@ -235,3 +235,41 @@ def test_the_readme_shows_the_rest_flow():
     note = (ROOT / "docs" / "sammel-api-phase4c.md").read_text(encoding="utf-8").split("\n## REST-API\n", 1)[1].split("\n## ", 1)[0]
     for text in ("Authorization: Bearer", "Vorschau-Token", "API-Token", "curl", "/api/openapi.json"):
         assert text in note, text
+
+
+def test_the_4c_note_has_a_row_per_decision_of_the_plan():
+    """Phase 4c wrap-up (T12-b): one table row per "Entscheidung:" of the plan, counted from the plan itself: A1.. for its exclusions,
+    Tn-a.. per task."""
+    note = (ROOT / "docs" / "sammel-api-phase4c.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "superpowers" / "plans" / "2026-11-08-phase4c-sammel-api.md").read_text(encoding="utf-8")
+    counts, section = {}, None
+    for line in plan.splitlines():
+        task = re.match(r"### Task (\d+):", line)
+        if task:
+            section = f"T{task[1]}"
+        elif line.startswith("## "):
+            section = "A" if line == "## Ausschlüsse" else None
+        elif line.startswith("- Entscheidung:") and section:
+            counts[section] = counts.get(section, 0) + 1
+    assert set(counts) == {"A"} | {f"T{n}" for n in range(1, 13)}, counts
+    for section, n in counts.items():
+        for rid in ([f"A{i}" for i in range(1, n + 1)] if section == "A" else [f"{section}-{chr(ord('a') + i)}" for i in range(n)]):
+            assert f"\n| {rid} |" in note, rid
+
+
+def test_the_readme_describes_bulk_changes_confirmation_tokens_and_triage():
+    """Phase 4c wrap-up: the feature list has a block on bulk changes, changes with confirmation, API tokens and the triage, and the
+    security section a paragraph on API tokens - the prefix, the hash, the header, shown once, revoking, the maximum role, the
+    emergency login, that a token request never reads the cookie and that a proxy's own bearer value keeps the cookie path."""
+    features = README.split("\n## Features\n", 1)[1].split("\n## ", 1)[0]
+    assert "**Bulk changes, confirmation, REST API and triage**" in features
+    block = " ".join(features.split("**Bulk changes, confirmation, REST API and triage**", 1)[1].split("\n\n", 1)[0].split())
+    for text in ("up to 20 switches", "preview per switch", "first failure", "cancellable", "four-eyes", "Mit Bestätigung ausführen",
+                 "takes it back", "API tokens", "/api/openapi.json", "Triage", "CSV", "Neu bewerten"):
+        assert text in block, text
+    security = README.split("\n## Security\n", 1)[1].split("\n## ", 1)[0]
+    assert "**API tokens.**" in security
+    paragraph = " ".join(security.split("**API tokens.**", 1)[1].split("\n\n", 1)[0].split())
+    for text in ("svt_", "SHA-256", "Authorization: Bearer", "shown once", "revoke", "maximum role", "emergency login",
+                 "never reads the cookie", "a proxy in front"):
+        assert text in paragraph, text
