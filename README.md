@@ -164,12 +164,12 @@ decisions).
 - Every route has a minimum role, checked by the server on every request; the UI shows the user's name and role, hides or locks
   what the role does not allow and says why. An Admin can limit Ändern and Freigeben to the switches of some zones by Entra app
   role (Settings → "Zonen")
-- Optional four-eyes principle for expert-mode changes (uplinks, trunks) and, since Phase 4c, every bulk change, off by default:
-  the preview requests an approval, a
-  second person with Freigeben or Admin reviews a freshly planned preview under "Freigaben" and approves it, which runs the change
-  through the same guided loop; nobody approves their own request, the emergency login approves nothing. An Admin switches it on
-  under Settings → "Vier-Augen-Prinzip" (or `PUT /api/settings/approvals` with `{"four_eyes": true, "hours": 24}`); open requests
-  expire after 24 hours (1–168, for new requests), and switching it off leaves open requests to be approved, rejected or withdrawn
+- Optional four-eyes principle for expert-mode changes (uplinks, trunks) and, since Phase 4c, every bulk change, off by default: the
+  preview requests an approval, a second person with Freigeben or Admin reviews a freshly planned preview under "Freigaben" and
+  approves it, which runs the change through the same guided loop; nobody approves their own request, the emergency login approves
+  nothing. An Admin switches it on under Settings → "Vier-Augen-Prinzip" (or `PUT /api/settings/approvals` with
+  `{"four_eyes": true, "hours": 24}`); open requests expire after 24 hours (1–168, for new requests), and switching it off leaves
+  open requests to be approved, rejected or withdrawn
 - The Entra login binds the ID token to its login attempt (a single-use nonce, bound to a cookie of the browser)
 
 ## Quick start
@@ -238,26 +238,25 @@ in the log, without a traceback.
 
 **Roles and approvals.** Four roles, each with the rights of the one before: Lesen (read, poll, test, back up), Ändern (port and
 device changes), Freigeben (expert mode, approvals) and Admin (switches, settings, preparing RADIUS, zones, four eyes). Every
-route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are
-the table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (the routes Phase 4b added in
+route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are the
+table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (the routes Phase 4b added in
 [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md), those of Phase 4c in [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md)),
-and a test holds the app's routes against it. The
-roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO user is Admin, as before; the emergency login
-is Admin always). An Admin can limit Ändern and Freigeben to the switches of some zones, by app role (Settings → "Zonen", read on
-every request). The four-eyes principle for expert-mode changes (and, since Phase 4c, every bulk change) is off by default (Settings
-→ "Vier-Augen-Prinzip", Admin): with it on, an expert-mode change is requested instead of run (so
-Ändern may request an expert-mode change too), and a second person
-with Freigeben or Admin approves exactly the preview the requester saw; nobody approves their own request, the emergency login approves nothing, and with only one such person expert-mode changes
-cannot run until it is switched off again. The Entra login carries a single-use nonce bound to a cookie of the browser (a captured
-ID token cannot be replayed from another browser), and a session without a request for `IDLE_MINUTES` minutes ends. The audit
-log records the role of every entry. To switch the roles on, create four app roles with the values `SwitchView.Lesen`,
-`SwitchView.Aendern`, `SwitchView.Freigeben` and `SwitchView.Admin` in the app registration, assign them to users or groups (at
-least one person Admin), add them to `ENTRA_ALLOWED_ROLES` if the login gate checks app roles, set `ENTRA_ROLE_MAPPING=on` and
-restart; whoever was signed in before the update signs in once more. On an update nothing about the rights changes until then,
-four eyes and zones stay off until an Admin switches them on, and the idle logout is the one change that comes on its own (set
-`IDLE_MINUTES=0` to keep the old behaviour); a reverse proxy must pass the new `sv_login` cookie like `sv_session`, and a page
-opened before the update is reloaded once. The upgrade steps in full are under "Was beim Update zu tun ist" in
-[docs/rollen-phase4a.md](docs/rollen-phase4a.md).
+and a test holds the app's routes against it. The roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO
+user is Admin, as before; the emergency login is Admin always). An Admin can limit Ändern and Freigeben to the switches of some
+zones, by app role (Settings → "Zonen", read on every request). The four-eyes principle for expert-mode changes (and, since Phase
+4c, every bulk change) is off by default (Settings → "Vier-Augen-Prinzip", Admin): with it on, an expert-mode change or any bulk
+change is requested instead of run (so Ändern may request an expert-mode change too), and a second person with Freigeben or Admin
+approves exactly the preview the requester saw; nobody approves their own request, the emergency login approves nothing, and with
+only one such person expert-mode changes and bulk changes cannot run until it is switched off again. The Entra login carries a
+single-use nonce bound to a cookie of the browser (a captured ID token cannot be replayed from another browser), and a session
+without a request for `IDLE_MINUTES` minutes ends. The audit log records the role of every entry. To switch the roles on, create
+four app roles with the values `SwitchView.Lesen`, `SwitchView.Aendern`, `SwitchView.Freigeben` and `SwitchView.Admin` in the app
+registration, assign them to users or groups (at least one person Admin), add them to `ENTRA_ALLOWED_ROLES` if the login gate checks
+app roles, set `ENTRA_ROLE_MAPPING=on` and restart; whoever was signed in before the update signs in once more. On an update nothing
+about the rights changes until then, four eyes and zones stay off until an Admin switches them on, and the idle logout is the one
+change that comes on its own (set `IDLE_MINUTES=0` to keep the old behaviour); a reverse proxy must pass the new `sv_login` cookie
+like `sv_session`, and a page opened before the update is reloaded once. The upgrade steps in full are under "Was beim Update zu tun
+ist" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md).
 
 **API tokens.** A personal API token is `svt_` followed by 256 random bits, stored as its SHA-256 like sessions, and shown once,
 when it is created; a lost token cannot be shown again, only replaced. A request with `Authorization: Bearer svt_…` needs no other
@@ -398,17 +397,18 @@ under "Was beim Update zu tun ist" in [docs/verlauf-phase4b.md](docs/verlauf-pha
 
 Scripts use the API of the UI, signed in with an API token instead of a session. A person signed in over SSO creates their own
 under Settings → "API-Tokens": a name, good for 30, 90, 180 or 365 days (90 by default; the API itself takes 1 to 365), and on
-request a maximum role lower than their own (a read-only token for a monitoring, say). The token (`svt_…`) is shown once, in a
-dialog with "Kopieren" (the clipboard needs HTTPS); SwitchView stores only its hash. Everyone revokes their own, an Admin any under
+request a maximum role up to their own (a read-only token for monitoring). The token (`svt_…`) is shown once, in a dialog with
+"Kopieren" (the clipboard needs HTTPS); SwitchView stores only its hash. Everyone revokes their own, an Admin any under
 "Alle API-Tokens"; the hourly prune deletes the expired ones.
 
 A request sends `Authorization: Bearer <token>` and no other header to sign in: no cookie, no `X-Requested-With`. A reverse proxy in
 front must pass the `Authorization` header on; a bearer value without `svt_` (one a proxy in front sets itself) is no API token and
-takes the way of a session. The token is its user: the role of the app roles of the login it was created in, against the role
-mapping of now, at most its maximum role, and the zones of that user; every audit entry it causes names it (`ci (#3)`). Not with a
-token: managing tokens (creating, listing, revoking) and approving a four-eyes request (rejecting one works); the emergency login
-gets none. An unknown, expired or revoked token is 401, and after 10 invalid ones within a minute every further invalid one is 429.
-Errors carry a German `detail` (FastAPI's own 422 for a body that does not fit the schema is English).
+is treated as a session request (cookie and `X-Requested-With`). The token is its user: the role of the app roles of the login it
+was created in, against the role mapping of now, at most its maximum role, and the zones of that user; every audit entry it causes
+names it (`ci (#3)`). Not with a token: managing tokens (creating, listing, revoking) and approving a four-eyes request (rejecting
+one works); the emergency login gets none. An unknown, expired or revoked token is 401, and after 10 invalid ones within a minute
+every further invalid one is 429. Errors carry a German `detail` (FastAPI's own 422 for a body that does not fit the schema is
+English).
 
 The schema of every route, generated by FastAPI, is at `GET /api/openapi.json` (any role, a token too; there is no Swagger or ReDoc
 page). `GET /api/audit` and `GET /api/history` answer `{"rows": [...], "next": ...}`: `next` goes back as `cursor` for the next
@@ -439,15 +439,19 @@ A port change can also run with confirmation, where the preview says so (`"confi
 switch that saves every SNMP change by itself): `/apply` gets `"confirm_minutes": N` (1 to 30). The change runs and is verified as
 any other, but it is not saved: it waits, unsaved, in the status `pending` until `confirm_until` (UTC) for its confirmation, which
 saves it over SSH (after a fresh read still finds it; over SNMP SwitchView saves nothing, the confirmation ends the waiting and the
-change stays unsaved, as without confirmation). Without a confirmation SwitchView takes it back after the deadline, or
-earlier when the switch does not answer twice in a row (checked every 15 seconds over SNMP). Who started or approved the change may
-confirm it, else anyone with "Freigeben", a token too; so a script checks the network itself first:
+change stays unsaved, as without confirmation). Without a confirmation SwitchView takes it back after the deadline, or earlier
+when the switch does not answer twice in a row (checked every 15 seconds over SNMP). Who started or approved the change may
+confirm it, else anyone with "Freigeben", a token too. The change runs in the background: a script waits until it is neither
+`queued` nor `running` (before that `/confirm` is 409 "Änderung #41 wartet nicht auf Bestätigung"), checks the network itself and
+confirms only a change that waits:
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d "$(jq -c '{ports: ["5"], change: {untagged: "30"}, token, mechanism, "confirm_minutes": 5}' plan.json)" "$SV/api/switches/3/apply"
-curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41" | jq '{status, confirm_until}'
-ping -c 3 198.51.100.15 && curl -s -X POST -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41/confirm"
+until curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41" | jq -e '.status != "queued" and .status != "running"' > /dev/null
+do sleep 2; done
+curl -s -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41" | jq -e 'select(.status == "pending") | {status, confirm_until}' &&
+  ping -c 3 198.51.100.15 && curl -s -X POST -H "Authorization: Bearer $TOKEN" "$SV/api/changes/41/confirm"
 ```
 
 A bulk change makes the same port change on up to 20 switches (at most 1000 ports), each switch as a change of its own through
