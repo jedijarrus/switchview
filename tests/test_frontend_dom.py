@@ -920,7 +920,7 @@ def test_a_blocked_preview_does_not_say_there_is_nothing_to_change(plan, blocked
                   % json.dumps(plan)) == ["Abbrechen"]
 
 
-# Phase 4a Task 1: the test gaps of Phase 5 ("Später → Phase 4" in docs/ux-phase5.md) and the open Minor findings of its final
+# Phase 4a Task 1: the test gaps of Phase 5 ("Später → Phase 4" of its note) and the open Minor findings of its final
 # review. The wiring pins hold behaviour the Phase 5 browser check saw (each dies under its mutation, see the Phase 4a note);
 # runProgress writing into a newer dialog and the port panel naming a LAG "Port Po1" were real bugs.
 def test_a_repeated_message_restarts_its_timer():                                      # UX Phase 5, Später

@@ -77,24 +77,7 @@ What stays SSH-only, so ProCurve only: 802.1X / MAC authentication / RADIUS (the
 devices per port, the VLAN for unknown devices, "Prepare switch"), configuration backup and diff, and the staged change with
 `write memory` after verification.
 
-Known limitations and required device checks (German): [docs/snmp-multivendor.md](docs/snmp-multivendor.md)
-
-Logic and robustness notes (German): [docs/logik-phase3.md](docs/logik-phase3.md) (what was built, where the moved code lives now,
-known limits, checks before production use, what to do on an update, decisions)
-
-UX notes and upgrade steps (German): [docs/ux-phase5.md](docs/ux-phase5.md) (what was built, known limits, checks before production
-use, what to do on an update, what is left for Phase 4, decisions)
-
-Roles and approvals notes (German): [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (what was built, the rights per route, known
-limits, checks before production use, what to do on an update, what comes later, decisions).
-
-History, drift and alerts notes (German): [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md) (what was built, the rights per route,
-the cost of recording, known limits, checks before production use, what to do on an update, what comes later, decisions). Setting
-up mail and Teams: [History and alerts](#history-and-alerts).
-
-Bulk changes, confirmation, REST API and triage notes (German): [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md) (what was
-built, the rights per route, the REST API with curl examples, known limits, checks before production use, what to do on an update,
-what comes later, decisions).
+Setting up mail and Teams: [History and alerts](#history-and-alerts).
 
 **Device database (PacketFence)**
 - Approve devices without a certificate (printers, phones, …) by MAC
@@ -190,9 +173,6 @@ Then add switches in the UI (management IP, driver, SNMP credentials, for ProCur
 
 ## Security
 
-Security notes and upgrade steps (German): [docs/sicherheit-phase2.md](docs/sicherheit-phase2.md) (what was built, known limits,
-checks before production use, what to do on an update, decisions).
-
 The settings that matter, in `.env` unless noted:
 
 | Setting | Default | What it does |
@@ -238,10 +218,8 @@ in the log, without a traceback.
 
 **Roles and approvals.** Four roles, each with the rights of the one before: Lesen (read, poll, test, back up), Ändern (port and
 device changes), Freigeben (expert mode, approvals) and Admin (switches, settings, preparing RADIUS, zones, four eyes). Every
-route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are the
-table "Rechte je Route" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md) (the routes Phase 4b added in
-[docs/verlauf-phase4b.md](docs/verlauf-phase4b.md), those of Phase 4c in [docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md)),
-and a test holds the app's routes against it. The roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO
+route declares its minimum role and the server checks it on every request (HTTP 403 with the reason); the rights per route are
+the table in `tests/test_permissions.py`, and a test holds the app's routes against it. The roles come from Entra app roles once `ENTRA_ROLE_MAPPING=on` (until then every SSO
 user is Admin, as before; the emergency login is Admin always). An Admin can limit Ändern and Freigeben to the switches of some
 zones, by app role (Settings → "Zonen", read on every request). The four-eyes principle for expert-mode changes (and, since Phase
 4c, every bulk change) is off by default (Settings → "Vier-Augen-Prinzip", Admin): with it on, an expert-mode change or any bulk
@@ -255,8 +233,7 @@ registration, assign them to users or groups (at least one person Admin), add th
 app roles, set `ENTRA_ROLE_MAPPING=on` and restart; whoever was signed in before the update signs in once more. On an update nothing
 about the rights changes until then, four eyes and zones stay off until an Admin switches them on, and the idle logout is the one
 change that comes on its own (set `IDLE_MINUTES=0` to keep the old behaviour); a reverse proxy must pass the new `sv_login` cookie
-like `sv_session`, and a page opened before the update is reloaded once. The upgrade steps in full are under "Was beim Update zu tun
-ist" in [docs/rollen-phase4a.md](docs/rollen-phase4a.md).
+like `sv_session`, and a page opened before the update is reloaded once.
 
 **API tokens.** A personal API token is `svt_` followed by 256 random bits, stored as its SHA-256 like sessions, and shown once,
 when it is created; a lost token cannot be shown again, only replaced. A request with `Authorization: Bearer svt_…` needs no other
@@ -272,8 +249,7 @@ too, also while SSO is down). A token does not check the login gate again: narro
 shuts out. A token with the role Admin can switch the four-eyes principle off and then change alone, as an Admin session can: give a
 script a maximum role below Admin (Ändern for one that changes ports, Lesen for monitoring). Invalid tokens are throttled: after 10
 within 60 seconds every further invalid one is answered 429, a log line names the sender, never the token; a valid token is never
-throttled. Every audit entry made through a token names it. The REST flow: [REST API](#rest-api); details in
-[docs/sammel-api-phase4c.md](docs/sammel-api-phase4c.md).
+throttled. Every audit entry made through a token names it. The REST flow: [REST API](#rest-api).
 
 **Request size.** Every request over 64 KiB is refused with HTTP 413 before its body is read.
 
@@ -362,8 +338,6 @@ The switch view marks each port by how PacketFence logged its device in (802.1X,
 of a port in its panel; the devices view adds a column to the device list and a card with every open session. Read from
 PacketFence's locationlog (its open entries), at most once a minute; without PacketFence the views stay as they are.
 
-PacketFence logins notes (German): [docs/anmeldungen.md](docs/anmeldungen.md)
-
 ## History and alerts
 
 The settings, in `.env` (see the table under [Security](#security)): `HISTORY_DAYS` (default 180) bounds the history, the events,
@@ -395,8 +369,7 @@ settings, so save first.
 "Neues unbekanntes Gerät an einem Zugangsport" is off for each channel until an Admin ticks it. A message that could not be
 delivered shows under "Letzte Meldungen" on the card and, for an Admin, in the overview; after five failed attempts (about 15
 minutes) it is given up and audited as `alert_failed`. For scripts: `GET /api/audit` now answers `{"rows": [...], "next": ...}`
-instead of a list, 100 entries per page (`limit` up to 500, `next` as the `cursor` of the next page). The upgrade steps in full are
-under "Was beim Update zu tun ist" in [docs/verlauf-phase4b.md](docs/verlauf-phase4b.md).
+instead of a list, 100 entries per page (`limit` up to 500, `next` as the `cursor` of the next page).
 
 ## REST API
 
@@ -527,8 +500,8 @@ Collected in [docs/procurve-cli-referenz.md](docs/procurve-cli-referenz.md) (Ger
 ## Status
 
 Tested with ProCurve / ArubaOS-Switch firmware 15.x and 16.x.
-SNMP writes are tested against a simulated agent only; check the device checks in [docs/snmp-multivendor.md](docs/snmp-multivendor.md)
-before you enable `snmp_write` on a production switch.
+SNMP writes are tested against a simulated agent only; try them on a test switch before you enable `snmp_write` on a production
+switch.
 
 ## Versions
 

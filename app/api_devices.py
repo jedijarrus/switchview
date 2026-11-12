@@ -401,7 +401,7 @@ async def pf_test(user=Depends(auth.require(roles.LESEN))):
     return await pf.test()
 
 
-# ── Anmeldungen: who is logged in on the LAN now, as PacketFence holds it (docs/anmeldungen.md) ──────────────────────────────────
+# ── Anmeldungen: who is logged in on the LAN now, as PacketFence holds it ─────────────────────────────────────────────────
 SESSIONS_TTL = 60.0     # seconds an answer of PacketFence is reused (the switch view and the devices view ask at each render)
 _sessions: dict = {"at": 0.0, "items": None}
 

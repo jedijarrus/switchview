@@ -1,6 +1,6 @@
 """Task 9 of Phase 3: the uplink protection no longer hangs on what a device on an access port says.
 
-Phase 2 found (docs/sicherheit-phase2.md, "Gefälschte Basis-MAC") that on a switch pair linked by base MACs only, one forged LLDP frame
+Phase 2 found ("Gefälschte Basis-MAC") that on a switch pair linked by base MACs only, one forged LLDP frame
 naming a real port of the neighbour displaced the MAC pair in main._links, and the real uplink lost its protection (T6-F1c); and that a
 device sending a switch's base MAC as its source made its own port the link's port, so the real uplink lost it as well (T6-RR1c).
 Phase 1 left the inventory backstop (a port whose LLDP neighbour is a managed switch is an uplink) out for ProCurve (R48). Now:

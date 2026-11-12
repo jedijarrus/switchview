@@ -1,4 +1,4 @@
-"""Who is logged in on the LAN now, as PacketFence holds it (docs/anmeldungen.md): pf.open_sessions (the open locationlog entries of
+"""Who is logged in on the LAN now, as PacketFence holds it: pf.open_sessions (the open locationlog entries of
 the LAN), GET /api/pf/sessions (each session with its switch, port and device of SwitchView, the answer reused for a minute) and the
 views of app/static/sv-auth.js (the port tiles and panel of the switch view, the column and the card of the devices view).
 PacketFence is a fake httpx (apifix.fake_httpx): nothing leaves the process.
@@ -7,7 +7,6 @@ import asyncio
 import json
 import re
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +16,6 @@ import crypto
 import db
 import pf
 
-ROOT = Path(__file__).resolve().parent.parent
 LAPTOP, PRINTER, GUEST = "00:00:5e:00:53:53", "00:11:22:33:44:55", "aa:bb:cc:00:00:01"
 
 
@@ -128,13 +126,6 @@ def test_without_packetfence_there_are_no_sessions(api):
             await conn.commit()
     asyncio.run(go())
     assert api.get("/api/pf/sessions").json() == {"configured": False, "ok": True, "sessions": []}
-
-
-def test_the_note_is_linked():
-    assert "PacketFence logins notes (German): [docs/anmeldungen.md](docs/anmeldungen.md)" in (ROOT / "README.md").read_text(encoding="utf-8")
-    note = (ROOT / "docs" / "anmeldungen.md").read_text(encoding="utf-8")
-    for heading in ("## Was gebaut wurde", "## Rechte je Route", "## Bekannte Grenzen", "## Was beim Update zu tun ist"):
-        assert f"\n{heading}\n" in note, heading
 
 
 # ── The views (sv-auth.js) ─────────────────────────────────────────────────

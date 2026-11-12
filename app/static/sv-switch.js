@@ -275,7 +275,7 @@
     document.querySelectorAll('input[name="f-st"]').forEach(r => r.addEventListener("change", hint)); hint();
   }
 
-  /* ── Editing a trunk: its VLANs only, in expert mode only (exclusion A2 of docs/logik-phase3.md, done in Phase 5) ── */
+  /* ── Editing a trunk: its VLANs only, in expert mode only (done in Phase 5) ── */
   // The plan request for trunk n: change holds only the fields that are set (untagged, tagged_add, tagged_remove)
   function trunkPayload(n, untagged, add, rem, expert) {
     const change = {};
